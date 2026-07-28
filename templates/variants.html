@@ -1,13 +1,22 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1>Variant types mentioned in report {{ report_id }}</h1>
-  <p class="muted">
-    Heuristic keyword scan of the report PDF's text layer — not HGVS/VCF
-    parsing. Counts aren't mutually exclusive (e.g. a "frameshift deletion"
-    mention adds to both that bucket and isn't otherwise separated out).
-    Treat as a rough signal, not a definitive variant list.
-  </p>
+  <h1>Extracted terms — report {{ report_id }}</h1>
 
+  {% if not has_text %}
+    <div class="error">
+      No extractable text found in this PDF (likely a scanned/image-only
+      document). Both keyword scanning and clinical NER need a text layer
+      to work with, so neither found anything here.
+    </div>
+  {% endif %}
+
+  <h2>Variant types (keyword scan)</h2>
+  <p class="muted">
+    Plain keyword scan of the report text for known variant-type terms —
+    not HGVS/VCF parsing. Counts aren't mutually exclusive (a "frameshift
+    deletion" mention also adds to the generic "deletion" count). Treat as
+    a rough signal, not a definitive variant list.
+  </p>
   {% if variant_counts %}
     <table>
       <tr><th>Variant type</th><th>Mentions</th></tr>
@@ -16,6 +25,26 @@
       {% endfor %}
     </table>
   {% else %}
-    <p class="muted">No known variant-type terms found in this document's text layer. If the PDF is scanned/image-only, it has no extractable text — this method won't find anything.</p>
+    <p class="muted">No known variant-type terms found.</p>
+  {% endif %}
+
+  <h2>Clinical terms (scispaCy NER)</h2>
+  <p class="muted">
+    Named-entity recognition over the report text using scispaCy's
+    <code>en_core_sci_sm</code> model — broad biomedical entity spans
+    (conditions, genes, procedures, findings, etc.), not typed by category.
+    This is model output, not a curated list — expect some noise.
+  </p>
+  {% if clinical_error %}
+    <div class="error">{{ clinical_error }}</div>
+  {% elif clinical_terms %}
+    <table>
+      <tr><th>Term</th><th>Mentions</th></tr>
+      {% for term, count in clinical_terms %}
+        <tr><td>{{ term }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No clinical entities found.</p>
   {% endif %}
 {% endblock %}

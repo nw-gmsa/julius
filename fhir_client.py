@@ -207,7 +207,24 @@ class FhirClient:
         content_type = ctype_header or attachment.get("contentType", "application/octet-stream")
         return resp.content, content_type
 
-    # ---- Variant extraction from PDF reports ---------------------------
+    # ---- PDF text extraction, variant keywords, and clinical terms -----
+
+    @staticmethod
+    def extract_pdf_text(pdf_bytes):
+        """Extract the text layer of a PDF via pdfplumber. Returns "" for
+        scanned/image-only PDFs (no text layer to extract) rather than
+        raising — callers should treat empty text as "nothing found",
+        not as an error."""
+        import pdfplumber
+        import io
+
+        text_parts = []
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+        return "\n".join(text_parts)
 
     #: Heuristic keyword list for spotting variant-type mentions in report
     #: text. This is a plain-text keyword scan, not HGVS/VCF parsing — it
@@ -227,35 +244,71 @@ class FhirClient:
     ]
 
     @classmethod
-    def extract_variant_types(cls, pdf_bytes):
+    def extract_variant_types(cls, text):
         """
-        Extract text from a PDF (via pdfplumber) and count mentions of known
-        variant-type terms. Returns {term: count}, sorted by count desc,
-        omitting terms with zero matches. More specific terms (e.g.
+        Count mentions of known variant-type terms in already-extracted PDF
+        text (see extract_pdf_text). Returns {term: count}, sorted by count
+        desc, omitting terms with zero matches. More specific terms (e.g.
         "frameshift deletion") are matched independently of their generic
         substrings ("deletion"), so one phrase can add to more than one
         bucket — intentional for a rough-signal tool, but means counts
         aren't mutually exclusive.
         """
-        import pdfplumber
-        import io
         import re
 
-        text_parts = []
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_parts.append(page_text)
-        text = "\n".join(text_parts).lower()
-
+        text_lower = text.lower()
         counts = {}
         for term in cls.VARIANT_TYPE_TERMS:
             pattern = r"\b" + re.escape(term) + r"s?\b"
-            n = len(re.findall(pattern, text))
+            n = len(re.findall(pattern, text_lower))
             if n:
                 counts[term] = n
         return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+    #: Lazily-loaded scispaCy pipeline, cached at module level so the model
+    #: (several hundred MB, slow to load) is only loaded once per process,
+    #: not once per request.
+    _scispacy_nlp = None
+
+    @classmethod
+    def _get_scispacy_pipeline(cls):
+        if cls._scispacy_nlp is None:
+            import spacy
+            # en_core_sci_sm is scispaCy's general-purpose biomedical NER
+            # model — broad "clinical entity" spans, not typed as
+            # disease/gene/chemical specifically. For typed extraction, swap
+            # in en_ner_bc5cdr_md (disease/chemical) or en_ner_bionlp13cg_md
+            # (genes/cell types) instead — see README.
+            cls._scispacy_nlp = spacy.load("en_core_sci_sm")
+        return cls._scispacy_nlp
+
+    @classmethod
+    def extract_clinical_terms(cls, text, limit=50):
+        """
+        Run scispaCy NER over already-extracted PDF text and return the
+        most frequently mentioned clinical entities as [(term, count), ...],
+        sorted by count desc. Terms are deduplicated case-insensitively
+        (keeping the first-seen casing for display). Raises ImportError if
+        scispacy/spacy aren't installed, or OSError if the model isn't
+        downloaded — callers should catch both and show a setup hint
+        rather than a raw traceback.
+        """
+        if not text.strip():
+            return []
+        nlp = cls._get_scispacy_pipeline()
+        doc = nlp(text)
+
+        counts, display = {}, {}
+        for ent in doc.ents:
+            term = ent.text.strip()
+            if len(term) < 2:
+                continue
+            key = term.lower()
+            counts[key] = counts.get(key, 0) + 1
+            display.setdefault(key, term)
+
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+        return [(display[key], count) for key, count in ranked]
 
     # ---- Stats: system-wide date-range queries -------------------------
 

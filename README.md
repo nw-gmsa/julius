@@ -26,6 +26,14 @@ export FHIR_PASSWORD="demo123"
 python3 app.py
 ```
 
+**Note on first install**: `requirements.txt` now includes `scispacy`
+and its `en_core_sci_sm` model (~150MB), needed for the clinical-term
+extraction on the report/variants page. This makes the first
+`pip install` noticeably slower than before — that's expected. If you'd
+rather skip it for now, remove the last two lines from
+`requirements.txt`; the app still works fine without it, the
+clinical-terms table just shows a setup message instead of results.
+
 Then open **http://localhost:5050**. Search by patient name, NHS
 number, or FHIR patient ID, then click through to see that patient's
 genomic test orders and reports. Use the **Daily stats** link for a
@@ -79,6 +87,15 @@ day-by-day breakdown of orders/reports across all patients.
   parsing — it can't tell a reported variant from an incidental mention
   (e.g. in a methods section), and finds nothing on scanned/image-only
   PDFs (no text layer to search). Treat it as a rough signal.
+- **Clinical term extraction (scispaCy)** — alongside the keyword scan,
+  each report's PDF text also runs through scispaCy's `en_core_sci_sm`
+  model for biomedical named-entity recognition, showing the most
+  frequently mentioned clinical terms. Both extractions now share a
+  single `extract_pdf_text()` call rather than re-parsing the PDF twice.
+  The scispaCy model is a large (~150MB), lazily-loaded, one-time-per-process
+  download — see setup below. If it's not installed, the page still
+  shows the keyword-scan results with a clear setup message in place of
+  the clinical-terms table, rather than failing the whole page.
 - **Geography** — each order/report row also resolves its patient
   (`subject`) and derives:
   - **ICS** from `Patient.managingOrganization`'s name.
@@ -135,6 +152,15 @@ day-by-day breakdown of orders/reports across all patients.
    "Extract variant types" result next to the PDF itself and see if
    the counts look right — the term list is the first thing to adjust
    if your reports phrase things differently.
+9. **scispaCy is untested against a real report** — I couldn't
+   install/run it in this sandbox (no network access here), so the
+   integration is written correctly against scispaCy's documented API
+   but hasn't actually been exercised end-to-end. Run it against a
+   real report PDF first and expect some noise in the results —
+   `en_core_sci_sm` tags broad entity spans without categorizing them
+   (disease vs. gene vs. procedure), so you'll get a mix of genuinely
+   useful clinical terms and less useful ones (e.g. fragments of
+   headers or boilerplate).
 
 ## What I'd extend first
 
@@ -162,3 +188,8 @@ day-by-day breakdown of orders/reports across all patients.
    alongside/instead of the PDF, or the PDF has a consistent findings
    table pdfplumber's `extract_tables()` could parse directly) rather
    than text-mining free-form report prose.
+6. **Typed clinical entities** — `en_core_sci_sm` gives untyped entity
+   spans. Swapping in `en_ner_bc5cdr_md` (disease/chemical) or
+   `en_ner_bionlp13cg_md` (genes/cell types), or adding scispaCy's
+   UMLS `EntityLinker` component, would let you group results by
+   category (disease vs. gene vs. procedure) instead of one flat list.

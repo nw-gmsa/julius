@@ -197,14 +197,32 @@ def report_variants(report_id):
         abort(404, description="Attachment had neither inline data nor a URL.")
     if content_type and "pdf" not in content_type.lower():
         return (f"This attachment is '{content_type}', not a PDF — "
-                f"variant extraction only works on PDF report documents."), 415
+                f"variant/clinical-term extraction only works on PDF report documents."), 415
 
     try:
-        variant_counts = client.extract_variant_types(data)
+        text = client.extract_pdf_text(data)
     except Exception as e:
         return f"Could not extract text from PDF: {e}", 500
 
-    return render_template("variants.html", report_id=report_id, variant_counts=variant_counts)
+    variant_counts = client.extract_variant_types(text)
+
+    clinical_terms, clinical_error = [], None
+    try:
+        clinical_terms = client.extract_clinical_terms(text)
+    except ImportError:
+        clinical_error = ("scispaCy isn't installed. Run "
+                           "`pip install -r requirements.txt` (see README for the model download step).")
+    except OSError:
+        clinical_error = ("The scispaCy model 'en_core_sci_sm' isn't downloaded yet — see README for the install command.")
+    except Exception as e:
+        clinical_error = f"Clinical term extraction failed: {e}"
+
+    return render_template(
+        "variants.html", report_id=report_id,
+        variant_counts=variant_counts,
+        clinical_terms=clinical_terms, clinical_error=clinical_error,
+        has_text=bool(text.strip()),
+    )
 
 
 @app.route("/report/<report_id>/pdf")
