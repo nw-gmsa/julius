@@ -1,0 +1,446 @@
+"""
+Thin wrapper around a FHIR R4 server's REST API, conforming to the
+NHS North West Genomics IG (https://nw-gmsa.github.io/en/), focused on
+the resources you need for genomic test orders/reports:
+
+  - Patient            (to search/identify a patient)
+  - ServiceRequest      (genomic test ORDERS)
+  - DiagnosticReport    (genomic test REPORTS)
+  - Observation         (individual result values referenced by a report)
+
+No FHIR client library is used on purpose — the R4 REST API is just
+JSON over HTTP, and keeping this dependency-free makes it easy to see
+exactly what's being requested and adapt it to your server's quirks.
+
+Category codes below come straight from the IG's published profiles,
+not guesses:
+  - ServiceRequest.category:GenomicProcedure  -> SNOMED 116148004
+    (https://nw-gmsa.github.io/en/StructureDefinition-ServiceRequest.html)
+  - DiagnosticReport.category:Genetics        -> v2-0074 code "GE"
+    (https://nw-gmsa.github.io/en/StructureDefinition-DiagnosticReport.html)
+"""
+import os
+import base64
+import requests
+from requests.auth import HTTPBasicAuth
+from urllib3.exceptions import InsecureRequestWarning
+
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
+SERVICE_REQUEST_CATEGORY = "http://snomed.info/sct|116148004"
+DIAGNOSTIC_REPORT_CATEGORY = "http://terminology.hl7.org/CodeSystem/v2-0074|GE"
+
+
+class FhirClient:
+    def __init__(self, base_url=None, user=None, password=None, verify_ssl=None):
+        self.base_url = (base_url or os.environ.get("FHIR_BASE_URL", "")).rstrip("/")
+        # Basic auth, as configured for this server.
+        self.user = user or os.environ.get("FHIR_USER", "sqluser")
+        self.password = password or os.environ.get("FHIR_PASSWORD", "demo123")
+        if verify_ssl is None:
+            # Internal IP + likely self-signed cert -> default to NOT verifying.
+            # Override with FHIR_VERIFY_SSL=true if your server has a real cert.
+            verify_ssl = os.environ.get("FHIR_VERIFY_SSL", "false").lower() == "true"
+        self.verify_ssl = verify_ssl
+        self._ref_cache = {}  # reference string -> resolved resource (or None); process-lifetime only
+
+    def _auth(self):
+        return HTTPBasicAuth(self.user, self.password) if self.user else None
+
+    def _headers(self):
+        return {"Accept": "application/fhir+json"}
+
+    def _get(self, path, params=None):
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        resp = requests.get(
+            url, headers=self._headers(), params=params or {},
+            auth=self._auth(), verify=self.verify_ssl, timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    @staticmethod
+    def _entries(bundle):
+        """Pull resources out of a FHIR Bundle, ignoring missing/empty ones."""
+        return [e["resource"] for e in bundle.get("entry", []) if "resource" in e]
+
+    def _search_all(self, resource_type, params, max_pages=10):
+        """Search + follow Bundle.link[rel=next] pages, up to max_pages.
+        Used for stats queries which aren't scoped to one patient and can
+        span many results."""
+        results = []
+        bundle = self._get(resource_type, params)
+        results.extend(self._entries(bundle))
+        pages = 1
+        while pages < max_pages:
+            next_url = next((l["url"] for l in bundle.get("link", []) if l.get("relation") == "next"), None)
+            if not next_url:
+                break
+            resp = requests.get(next_url, headers=self._headers(), auth=self._auth(),
+                                 verify=self.verify_ssl, timeout=15)
+            resp.raise_for_status()
+            bundle = resp.json()
+            results.extend(self._entries(bundle))
+            pages += 1
+        return results
+
+    # ---- Patient -----------------------------------------------------
+
+    def search_patients(self, name=None, patient_id=None, nhs_number=None):
+        if patient_id:
+            try:
+                return [self._get(f"Patient/{patient_id}")]
+            except requests.HTTPError:
+                return []
+        if nhs_number:
+            # Patients in this IG carry an NHSIdentifier; search by identifier
+            # rather than by name for a reliable, unambiguous match.
+            bundle = self._get("Patient", {"identifier": nhs_number, "_count": 20})
+            return self._entries(bundle)
+        bundle = self._get("Patient", {"name": name, "_count": 20})
+        return self._entries(bundle)
+
+    # ---- Genomic test orders (ServiceRequest) -------------------------
+
+    def lab_orders_for_patient(self, patient_id):
+        params = {
+            "patient": patient_id,
+            "category": SERVICE_REQUEST_CATEGORY,
+            "_sort": "-authored",
+            "_count": 50,
+        }
+        try:
+            bundle = self._get("ServiceRequest", params)
+            entries = self._entries(bundle)
+            if entries:
+                return entries
+        except requests.HTTPError:
+            pass
+        # Fallback without the category filter, in case this server instance
+        # doesn't populate category or slices it differently.
+        bundle = self._get("ServiceRequest", {"patient": patient_id, "_sort": "-authored", "_count": 50})
+        return self._entries(bundle)
+
+    # ---- Genomic test reports (DiagnosticReport + Observation) --------
+
+    def lab_reports_for_patient(self, patient_id):
+        params = {
+            "patient": patient_id,
+            "category": DIAGNOSTIC_REPORT_CATEGORY,
+            "_sort": "-date",
+            "_count": 50,
+        }
+        try:
+            bundle = self._get("DiagnosticReport", params)
+            entries = self._entries(bundle)
+            if entries:
+                return entries
+        except requests.HTTPError:
+            pass
+        bundle = self._get("DiagnosticReport", {"patient": patient_id, "_sort": "-date", "_count": 50})
+        return self._entries(bundle)
+
+    def observations_for_report(self, report):
+        """Resolve the Observation resources a DiagnosticReport points to."""
+        obs = []
+        for ref in report.get("result", []):
+            ref_id = ref.get("reference", "")  # e.g. "Observation/123"
+            if not ref_id:
+                continue
+            try:
+                obs.append(self._get(ref_id))
+            except requests.HTTPError:
+                continue
+        return obs
+
+    def get_report(self, report_id):
+        """Fetch a single DiagnosticReport by ID (used to re-fetch presentedForm
+        when serving a PDF, since we don't keep search results in server state)."""
+        return self._get(f"DiagnosticReport/{report_id}")
+
+    @staticmethod
+    def get_presented_form(report, index=0):
+        forms = report.get("presentedForm", [])
+        if index < 0 or index >= len(forms):
+            return None
+        return forms[index]
+
+    def fetch_attachment_bytes(self, attachment):
+        """
+        Resolve a FHIR Attachment (as used in DiagnosticReport.presentedForm)
+        to raw bytes + content type. Attachments are either inlined as base64
+        in `.data`, or point elsewhere via `.url` (a Binary resource on this
+        server, or an external document URL) that needs a follow-up fetch
+        with the same credentials.
+        """
+        if attachment.get("data"):
+            content_type = attachment.get("contentType", "application/octet-stream")
+            return base64.b64decode(attachment["data"]), content_type
+
+        url = attachment.get("url")
+        if not url:
+            return None, None
+        full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
+        resp = requests.get(
+            full_url,
+            headers={"Accept": attachment.get("contentType", "application/pdf")},
+            auth=self._auth(), verify=self.verify_ssl, timeout=30,
+        )
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", attachment.get("contentType", "application/octet-stream"))
+        return resp.content, content_type
+
+    # ---- Stats: system-wide date-range queries -------------------------
+
+    def orders_in_range(self, start_date, end_date):
+        """All genomic test orders authored within [start_date, end_date]
+        (ISO dates), across all patients — used by the daily stats screen."""
+        params = {
+            "authored": [f"ge{start_date}", f"le{end_date}"],
+            "category": SERVICE_REQUEST_CATEGORY,
+            "_count": 100,
+        }
+        try:
+            entries = self._search_all("ServiceRequest", params)
+            if entries:
+                return entries
+        except requests.HTTPError:
+            pass
+        return self._search_all("ServiceRequest", {
+            "authored": [f"ge{start_date}", f"le{end_date}"], "_count": 100,
+        })
+
+    def reports_in_range(self, start_date, end_date):
+        """All genomic test reports dated within [start_date, end_date]
+        (ISO dates), across all patients — used by the daily stats screen."""
+        params = {
+            "date": [f"ge{start_date}", f"le{end_date}"],
+            "category": DIAGNOSTIC_REPORT_CATEGORY,
+            "_count": 100,
+        }
+        try:
+            entries = self._search_all("DiagnosticReport", params)
+            if entries:
+                return entries
+        except requests.HTTPError:
+            pass
+        return self._search_all("DiagnosticReport", {
+            "date": [f"ge{start_date}", f"le{end_date}"], "_count": 100,
+        })
+
+    @staticmethod
+    def _code_text(codeable_concept):
+        """Minimal CodeableConcept -> text, for use in aggregation (the fuller
+        version used for on-screen display lives in app.py as a Jinja filter)."""
+        if not codeable_concept:
+            return None
+        if codeable_concept.get("text"):
+            return codeable_concept["text"]
+        codings = codeable_concept.get("coding", [])
+        if codings:
+            return codings[0].get("display") or codings[0].get("code")
+        return None
+
+    def order_organisation(self, order):
+        """Requesting organisation for a ServiceRequest — same reference chain
+        as requester_display(), but organisation name only (no practitioner)."""
+        requester_ref = order.get("requester")
+        if not requester_ref:
+            return None
+        resource = self.resolve_reference(requester_ref)
+        if resource is None:
+            return requester_ref.get("display")
+        rtype = resource.get("resourceType")
+        if rtype == "Organization":
+            return resource.get("name") or requester_ref.get("display")
+        if rtype == "PractitionerRole":
+            org_ref = resource.get("organization")
+            if org_ref:
+                org = self.resolve_reference(org_ref)
+                if org:
+                    return org.get("name")
+        return requester_ref.get("display")
+
+    def order_indication(self, order):
+        """Genomic disease / clinical indication for a ServiceRequest, from
+        reasonCode (bound to Genomic Clinical Indication Codes in the IG)."""
+        labels = [self._code_text(rc) for rc in order.get("reasonCode", [])]
+        labels = [l for l in labels if l]
+        return "; ".join(labels) if labels else "Unspecified"
+
+    def report_organisation(self, report):
+        """Performing organisation for a DiagnosticReport, from `performer`
+        (mixed list of Organization/Practitioner/PractitionerRole refs per
+        the profile — we pick the first one that resolves to an Organization)."""
+        for ref in report.get("performer", []):
+            resource = self.resolve_reference(ref)
+            if resource and resource.get("resourceType") == "Organization":
+                return resource.get("name")
+        performers = report.get("performer", [])
+        return performers[0].get("display") if performers else None
+
+    def report_indication(self, report):
+        """
+        Genomic disease / clinical indication for a DiagnosticReport.
+        DiagnosticReport itself has no reasonCode, so we follow `basedOn`
+        back to the originating ServiceRequest and use its reasonCode —
+        the same value set as order_indication(). Falls back to
+        `conclusionCode` (the report's own clinical conclusion) if the
+        order can't be resolved, though that's a related-but-different
+        field (interpretation of results, not indication for testing).
+        """
+        for ref in report.get("basedOn", []):
+            sr = self.resolve_reference(ref)
+            if sr and sr.get("resourceType") == "ServiceRequest":
+                labels = [self._code_text(rc) for rc in sr.get("reasonCode", [])]
+                labels = [l for l in labels if l]
+                if labels:
+                    return "; ".join(labels)
+        labels = [self._code_text(cc) for cc in report.get("conclusionCode", [])]
+        labels = [l for l in labels if l]
+        return "; ".join(labels) if labels else "Unspecified"
+
+    # ---- Geography: ICS and country from Patient ----------------------
+
+    def patient_for(self, resource):
+        """Resolve the Patient a ServiceRequest/DiagnosticReport's `subject`
+        (or `patient`) reference points to."""
+        ref = resource.get("subject") or resource.get("patient")
+        return self.resolve_reference(ref) if ref else None
+
+    def patient_ics(self, patient):
+        """The patient's Integrated Care System, from managingOrganization."""
+        if not patient:
+            return None
+        org_ref = patient.get("managingOrganization")
+        if not org_ref:
+            return None
+        org = self.resolve_reference(org_ref)
+        if not org:
+            return org_ref.get("display")
+        return org.get("name") or org_ref.get("display")
+
+    _COUNTRY_CODES = {"X24": "England", "W00": "Wales"}
+
+    @classmethod
+    def _find_country_code(cls, obj):
+        """
+        Recursively scan an identifier entry for one of the known country
+        codes (X24 = England, W00 = Wales). This IG doesn't put a single
+        well-known field on the identifier for this, so rather than assume
+        one exact path (e.g. assigner.identifier.value), we check anywhere
+        it could plausibly appear — system, value, assigner, extensions —
+        and use whichever we find first. Verify against a real Patient
+        record and narrow this if it turns out to live somewhere specific.
+        """
+        if isinstance(obj, dict):
+            for v in obj.values():
+                found = cls._find_country_code(v)
+                if found:
+                    return found
+        elif isinstance(obj, list):
+            for v in obj:
+                found = cls._find_country_code(v)
+                if found:
+                    return found
+        elif isinstance(obj, str):
+            for code in cls._COUNTRY_CODES:
+                if code in obj:
+                    return code
+        return None
+
+    def patient_country(self, patient):
+        """Country (England/Wales) inferred from the NHS number identifier's
+        associated code (X24/W00) — see _find_country_code for how/why this
+        searches broadly rather than one fixed field."""
+        if not patient:
+            return None
+        for identifier in patient.get("identifier", []):
+            code = self._find_country_code(identifier)
+            if code:
+                return self._COUNTRY_CODES[code]
+        return None
+
+    # ---- Specimens -------------------------------------------------
+
+    def resolve_specimens(self, resource):
+        """Resolve the Specimen resources a ServiceRequest or DiagnosticReport
+        points to via its `specimen` reference list."""
+        specimens = []
+        for ref in resource.get("specimen", []):
+            spec = self.resolve_reference(ref)
+            if spec:
+                specimens.append(spec)
+        return specimens
+
+    # ---- Requester resolution -----------------------------------------
+
+    def resolve_reference(self, ref):
+        """Fetch whatever resource a Reference object points to, or None.
+        Cached for the lifetime of the process, since stats aggregation
+        resolves the same organisations/practitioners over and over."""
+        ref_id = ref.get("reference", "") if ref else ""
+        if not ref_id:
+            return None
+        if ref_id in self._ref_cache:
+            return self._ref_cache[ref_id]
+        try:
+            resource = self._get(ref_id)
+        except requests.HTTPError:
+            resource = None
+        self._ref_cache[ref_id] = resource
+        return resource
+
+    @staticmethod
+    def _practitioner_name(practitioner):
+        names = practitioner.get("name", [])
+        if not names:
+            return None
+        n = names[0]
+        given = " ".join(n.get("given", []))
+        family = n.get("family", "")
+        prefix = " ".join(n.get("prefix", []))
+        full = " ".join(p for p in [prefix, given, family] if p)
+        return full or None
+
+    def requester_display(self, order):
+        """
+        Resolve ServiceRequest.requester (PractitionerRole | Organization per
+        the IG) into a human-readable "Dr X (Org Y)" style string.
+        """
+        requester_ref = order.get("requester")
+        if not requester_ref:
+            return "—"
+
+        resource = self.resolve_reference(requester_ref)
+        if resource is None:
+            # Couldn't dereference it (auth, deleted, cross-server ref, etc).
+            # Fall back to whatever display text was inlined on the reference.
+            return requester_ref.get("display") or requester_ref.get("reference", "—")
+
+        rtype = resource.get("resourceType")
+
+        if rtype == "Organization":
+            return resource.get("name") or requester_ref.get("display") or "—"
+
+        if rtype == "PractitionerRole":
+            practitioner_name = None
+            practitioner_ref = resource.get("practitioner")
+            if practitioner_ref:
+                practitioner = self.resolve_reference(practitioner_ref)
+                if practitioner:
+                    practitioner_name = self._practitioner_name(practitioner)
+
+            org_name = None
+            org_ref = resource.get("organization")
+            if org_ref:
+                org = self.resolve_reference(org_ref)
+                if org:
+                    org_name = org.get("name")
+
+            if practitioner_name and org_name:
+                return f"{practitioner_name} ({org_name})"
+            return practitioner_name or org_name or requester_ref.get("display") or "—"
+
+        # Unexpected resource type — show what we can.
+        return requester_ref.get("display") or resource.get("id", "—")

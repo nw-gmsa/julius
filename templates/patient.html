@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Patient {{ patient_id }}</h1>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <h2>Specimens ({{ specimens|length }})</h2>
+  {% if specimens %}
+    <table>
+      <tr><th>Type</th><th>Date collected</th><th>Date received</th><th>ID</th></tr>
+      {% for s in specimens %}
+        <tr>
+          <td>{{ s.type|code_text }}</td>
+          <td>{{ s|specimen_collected }}</td>
+          <td>{{ s|specimen_received }}</td>
+          <td class="muted">{{ s.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No specimens found.</p>
+  {% endif %}
+
+  <h2>Genomic test orders ({{ orders|length }})</h2>
+  {% if orders %}
+    <table>
+      <tr><th>Test</th><th>Status</th><th>Ordered</th><th>Requested by</th><th>ID</th></tr>
+      {% for o in orders %}
+        <tr>
+          <td>{{ o.code|code_text }}</td>
+          <td>{{ o.status or "—" }}</td>
+          <td>{{ o.authoredOn or "—" }}</td>
+          <td>{{ order_requester.get(o.id, "—") }}</td>
+          <td class="muted">{{ o.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No lab orders found.</p>
+  {% endif %}
+
+  <h2>Genomic test reports ({{ reports|length }})</h2>
+  {% if reports %}
+    {% for r in reports %}
+      <div class="card">
+        <strong>{{ r.code|code_text }}</strong>
+        <span class="muted">— {{ r.status or "—" }}, {{ r.effectiveDateTime or r.issued or "no date" }}</span>
+        {% if r.presentedForm %}
+          <p>
+            {% for pf in r.presentedForm %}
+              <a href="/report/{{ r.id }}/pdf?index={{ loop.index0 }}" target="_blank">
+                📄 {{ pf.title or "View report document" }}{% if pf.contentType %} ({{ pf.contentType }}){% endif %}
+              </a>{% if not loop.last %} &nbsp;|&nbsp; {% endif %}
+            {% endfor %}
+          </p>
+        {% endif %}
+        {% set obs_list = report_obs.get(r.id, []) %}
+        {% if obs_list %}
+          <table>
+            <tr><th>Result</th><th>Value</th><th>Reference range</th><th>Flag</th></tr>
+            {% for o in obs_list %}
+              <tr>
+                <td>{{ o.code|code_text }}</td>
+                <td>{{ o|obs_value }}</td>
+                <td>
+                  {% if o.referenceRange %}
+                    {{ o.referenceRange[0].text or
+                       (o.referenceRange[0].low.value ~ '–' ~ o.referenceRange[0].high.value
+                        if o.referenceRange[0].low and o.referenceRange[0].high else "—") }}
+                  {% else %}—{% endif %}
+                </td>
+                <td>{{ o.interpretation[0]|code_text if o.interpretation else "—" }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        {% else %}
+          <p class="muted">No resolvable Observation results for this report.</p>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="muted">No lab reports found.</p>
+  {% endif %}
+{% endblock %}

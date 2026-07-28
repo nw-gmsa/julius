@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Daily processing stats</h1>
+
+  <form action="/stats" method="get">
+    <p>
+      From <input type="date" name="start" value="{{ start }}">
+      to <input type="date" name="end" value="{{ end }}">
+      <button type="submit">Update</button>
+    </p>
+  </form>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <p class="muted">{{ order_count }} orders and {{ report_count }} reports in this range.</p>
+
+  <h2>Orders by day</h2>
+  {% if order_by_day %}
+    <table>
+      <tr><th>Date</th><th>Orders</th></tr>
+      {% for day, count in order_by_day|sort %}
+        <tr><td>{{ day }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders in this range.</p>
+  {% endif %}
+
+  <h2>Reports by day</h2>
+  {% if report_by_day %}
+    <table>
+      <tr><th>Date</th><th>Reports</th></tr>
+      {% for day, count in report_by_day|sort %}
+        <tr><td>{{ day }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No reports in this range.</p>
+  {% endif %}
+
+  <h2>Orders by requesting organisation</h2>
+  {% if order_by_org %}
+    <table>
+      <tr><th>Requesting organisation</th><th>Orders</th></tr>
+      {% for org, count in order_by_org %}
+        <tr><td>{{ org }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders in this range.</p>
+  {% endif %}
+
+  <h2>Orders by genomic disease / indication</h2>
+  {% if order_by_indication %}
+    <table>
+      <tr><th>Indication</th><th>Orders</th></tr>
+      {% for indication, count in order_by_indication %}
+        <tr><td>{{ indication }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders in this range.</p>
+  {% endif %}
+
+  <h2>Orders by patient ICS</h2>
+  <p class="muted">Integrated Care System, from the patient's managingOrganization.</p>
+  {% if order_by_ics %}
+    <table>
+      <tr><th>ICS</th><th>Orders</th></tr>
+      {% for ics, count in order_by_ics %}
+        <tr><td>{{ ics }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders in this range.</p>
+  {% endif %}
+
+  <h2>Orders by country</h2>
+  {% if order_by_country %}
+    <table>
+      <tr><th>Country</th><th>Orders</th></tr>
+      {% for country, count in order_by_country %}
+        <tr><td>{{ country }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders in this range.</p>
+  {% endif %}
+
+  <h2>Reports by performing organisation</h2>
+  {% if report_by_org %}
+    <table>
+      <tr><th>Performing organisation</th><th>Reports</th></tr>
+      {% for org, count in report_by_org %}
+        <tr><td>{{ org }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No reports in this range.</p>
+  {% endif %}
+
+  <h2>Reports by genomic disease / indication</h2>
+  <p class="muted">Resolved from the originating order's reason code where possible, falling back to the report's own conclusion code.</p>
+  {% if report_by_indication %}
+    <table>
+      <tr><th>Indication</th><th>Reports</th></tr>
+      {% for indication, count in report_by_indication %}
+        <tr><td>{{ indication }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No reports in this range.</p>
+  {% endif %}
+
+  <h2>Reports by patient ICS</h2>
+  <p class="muted">Integrated Care System, from the patient's managingOrganization.</p>
+  {% if report_by_ics %}
+    <table>
+      <tr><th>ICS</th><th>Reports</th></tr>
+      {% for ics, count in report_by_ics %}
+        <tr><td>{{ ics }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No reports in this range.</p>
+  {% endif %}
+
+  <h2>Reports by country</h2>
+  {% if report_by_country %}
+    <table>
+      <tr><th>Country</th><th>Reports</th></tr>
+      {% for country, count in report_by_country %}
+        <tr><td>{{ country }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No reports in this range.</p>
+  {% endif %}
+{% endblock %}

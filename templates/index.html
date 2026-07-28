@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Search for a patient</h1>
+  <p class="muted">Server: <code>{{ base_url or "not configured — set FHIR_BASE_URL" }}</code></p>
+
+  <form action="/search" method="get">
+    <p>
+      <input type="text" name="name" placeholder="Patient name" value="{{ searched_name or '' }}">
+      or
+      <input type="text" name="nhs_number" placeholder="NHS number" value="{{ searched_nhs or '' }}">
+      or
+      <input type="text" name="patient_id" placeholder="Patient ID" value="{{ searched_id or '' }}">
+      <button type="submit">Search</button>
+    </p>
+  </form>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  {% if patients is defined %}
+    <h2>Results ({{ patients|length }})</h2>
+    {% if patients %}
+      <table>
+        <tr><th>Name</th><th>ID</th><th>DOB</th><th></th></tr>
+        {% for p in patients %}
+          <tr>
+            <td>{{ p|human_name }}</td>
+            <td>{{ p.id }}</td>
+            <td>{{ p.birthDate or "—" }}</td>
+            <td><a href="/patient/{{ p.id }}">View lab data →</a></td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">No matches.</p>
+    {% endif %}
+  {% endif %}
+{% endblock %}
