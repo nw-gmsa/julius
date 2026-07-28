@@ -177,6 +177,36 @@ def stats():
     )
 
 
+@app.route("/report/<report_id>/variants")
+def report_variants(report_id):
+    index = int(request.args.get("index", 0))
+    try:
+        report = client.get_report(report_id)
+    except Exception as e:
+        return f"Could not load report: {e}", 502
+
+    attachment = client.get_presented_form(report, index)
+    if attachment is None:
+        abort(404, description="This report has no attached document at that index.")
+
+    try:
+        data, content_type = client.fetch_attachment_bytes(attachment)
+    except Exception as e:
+        return f"Could not fetch attachment: {e}", 502
+    if data is None:
+        abort(404, description="Attachment had neither inline data nor a URL.")
+    if content_type and "pdf" not in content_type.lower():
+        return (f"This attachment is '{content_type}', not a PDF — "
+                f"variant extraction only works on PDF report documents."), 415
+
+    try:
+        variant_counts = client.extract_variant_types(data)
+    except Exception as e:
+        return f"Could not extract text from PDF: {e}", 500
+
+    return render_template("variants.html", report_id=report_id, variant_counts=variant_counts)
+
+
 @app.route("/report/<report_id>/pdf")
 def report_pdf(report_id):
     index = int(request.args.get("index", 0))

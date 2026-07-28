@@ -66,6 +66,19 @@ day-by-day breakdown of orders/reports across all patients.
   Organisation/practitioner lookups are cached in-process for the
   life of the server, since the same few organisations show up
   repeatedly across a day's worth of orders.
+- **Report PDFs & variant extraction** — `presentedForm.url` points at a
+  **FHIR Binary resource** (e.g. `Binary/abc123`), not a static file.
+  `fetch_attachment_bytes()` requests it as `application/fhir+json` (which
+  reliably returns the Binary resource — a JSON object with `contentType`
+  and base64 `data`) and decodes that, falling back to using raw bytes
+  directly if a server ignores the Accept header. The "🧬 Extract variant
+  types" link on each report runs that PDF's text layer through a
+  **keyword scan** (`extract_variant_types()`, via `pdfplumber`) for known
+  variant-type terms (missense, frameshift, splice site, CNV, etc.) and
+  shows mention counts. This is plain keyword-spotting, not HGVS/VCF
+  parsing — it can't tell a reported variant from an incidental mention
+  (e.g. in a methods section), and finds nothing on scanned/image-only
+  PDFs (no text layer to search). Treat it as a rough signal.
 - **Geography** — each order/report row also resolves its patient
   (`subject`) and derives:
   - **ICS** from `Patient.managingOrganization`'s name.
@@ -111,6 +124,17 @@ day-by-day breakdown of orders/reports across all patients.
    reference cache helps when the same patients recur, but a date
    range with many distinct patients will be noticeably slower than
    the org-only version was.
+7. **Binary content negotiation** — I request Binary resources as
+   `application/fhir+json` and decode `.data`, which should work on
+   any spec-compliant server, but I couldn't test it against yours.
+   If "View PDF" 404s or comes back empty, check what a direct
+   `GET Binary/<id>` with that Accept header actually returns.
+8. **Variant extraction accuracy** — the keyword list in
+   `VARIANT_TYPE_TERMS` is generic HGVS/genomics terminology, not
+   tuned to this IG's actual report wording. Open a real report's
+   "Extract variant types" result next to the PDF itself and see if
+   the counts look right — the term list is the first thing to adjust
+   if your reports phrase things differently.
 
 ## What I'd extend first
 
@@ -132,3 +156,9 @@ day-by-day breakdown of orders/reports across all patients.
    bundling related resources into the original query would cut this
    down substantially, and would speed up the stats screen's org
    resolution too (despite the in-process cache).
+5. **Better variant extraction** — the current approach is a keyword
+   scan; a real implementation would want structured variant data
+   (many genomics reports include a `Genomics-Variant` FHIR profile
+   alongside/instead of the PDF, or the PDF has a consistent findings
+   table pdfplumber's `extract_tables()` could parse directly) rather
+   than text-mining free-form report prose.

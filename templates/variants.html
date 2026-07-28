@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Variant types mentioned in report {{ report_id }}</h1>
+  <p class="muted">
+    Heuristic keyword scan of the report PDF's text layer — not HGVS/VCF
+    parsing. Counts aren't mutually exclusive (e.g. a "frameshift deletion"
+    mention adds to both that bucket and isn't otherwise separated out).
+    Treat as a rough signal, not a definitive variant list.
+  </p>
+
+  {% if variant_counts %}
+    <table>
+      <tr><th>Variant type</th><th>Mentions</th></tr>
+      {% for term, count in variant_counts.items() %}
+        <tr><td>{{ term }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No known variant-type terms found in this document's text layer. If the PDF is scanned/image-only, it has no extractable text — this method won't find anything.</p>
+  {% endif %}
+{% endblock %}

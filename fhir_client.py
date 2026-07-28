@@ -168,10 +168,15 @@ class FhirClient:
     def fetch_attachment_bytes(self, attachment):
         """
         Resolve a FHIR Attachment (as used in DiagnosticReport.presentedForm)
-        to raw bytes + content type. Attachments are either inlined as base64
-        in `.data`, or point elsewhere via `.url` (a Binary resource on this
-        server, or an external document URL) that needs a follow-up fetch
-        with the same credentials.
+        to raw bytes + content type.
+
+        Attachments here are either inlined as base64 in `.data`, or point
+        via `.url` at a **FHIR Binary resource** (e.g. "Binary/abc123") —
+        not a plain static file. We request it as FHIR JSON
+        (`Accept: application/fhir+json`), which reliably returns a Binary
+        resource — a JSON object with `contentType` and base64-encoded
+        `data` — and decode that. If a server ignores the Accept header and
+        returns raw bytes instead, we fall back to using those directly.
         """
         if attachment.get("data"):
             content_type = attachment.get("contentType", "application/octet-stream")
@@ -181,14 +186,76 @@ class FhirClient:
         if not url:
             return None, None
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
+
         resp = requests.get(
             full_url,
-            headers={"Accept": attachment.get("contentType", "application/pdf")},
+            headers={"Accept": "application/fhir+json"},
             auth=self._auth(), verify=self.verify_ssl, timeout=30,
         )
         resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", attachment.get("contentType", "application/octet-stream"))
+
+        ctype_header = resp.headers.get("Content-Type", "")
+        if "json" in ctype_header or "fhir" in ctype_header:
+            binary_resource = resp.json()
+            data_b64 = binary_resource.get("data")
+            if not data_b64:
+                return None, None
+            content_type = binary_resource.get("contentType") or attachment.get("contentType", "application/octet-stream")
+            return base64.b64decode(data_b64), content_type
+
+        # Server ignored the Accept header and returned raw bytes directly.
+        content_type = ctype_header or attachment.get("contentType", "application/octet-stream")
         return resp.content, content_type
+
+    # ---- Variant extraction from PDF reports ---------------------------
+
+    #: Heuristic keyword list for spotting variant-type mentions in report
+    #: text. This is a plain-text keyword scan, not HGVS/VCF parsing — it
+    #: will miss anything phrased unusually and can't confirm a match is
+    #: describing an actually-reported variant vs. incidental text (e.g. a
+    #: methods section). Treat results as a rough signal, not ground truth.
+    VARIANT_TYPE_TERMS = [
+        "frameshift deletion", "frameshift insertion", "frameshift duplication", "frameshift variant",
+        "in-frame deletion", "in-frame insertion", "in-frame duplication",
+        "splice donor variant", "splice acceptor variant", "splice site variant", "splice region variant",
+        "missense variant", "nonsense variant", "synonymous variant",
+        "stop gained", "stop lost", "start lost",
+        "copy number gain", "copy number loss", "copy number variant",
+        "structural variant", "single nucleotide variant",
+        "deletion", "duplication", "insertion", "substitution",
+        "translocation", "inversion", "indel", "snv", "cnv",
+    ]
+
+    @classmethod
+    def extract_variant_types(cls, pdf_bytes):
+        """
+        Extract text from a PDF (via pdfplumber) and count mentions of known
+        variant-type terms. Returns {term: count}, sorted by count desc,
+        omitting terms with zero matches. More specific terms (e.g.
+        "frameshift deletion") are matched independently of their generic
+        substrings ("deletion"), so one phrase can add to more than one
+        bucket — intentional for a rough-signal tool, but means counts
+        aren't mutually exclusive.
+        """
+        import pdfplumber
+        import io
+        import re
+
+        text_parts = []
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+        text = "\n".join(text_parts).lower()
+
+        counts = {}
+        for term in cls.VARIANT_TYPE_TERMS:
+            pattern = r"\b" + re.escape(term) + r"s?\b"
+            n = len(re.findall(pattern, text))
+            if n:
+                counts[term] = n
+        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
     # ---- Stats: system-wide date-range queries -------------------------
 
