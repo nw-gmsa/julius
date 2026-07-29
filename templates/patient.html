@@ -23,20 +23,28 @@
     <p class="muted">No specimens found.</p>
   {% endif %}
 
+  {% macro render_order_chain(nodes, depth=0) %}
+    {% for node in nodes %}
+      <tr>
+        <td style="padding-left: {{ depth * 24 }}px">
+          {% if depth %}↳ {% endif %}{{ node.order.code|code_text }}
+        </td>
+        <td>{{ node.order.status or "—" }}</td>
+        <td>{{ node.order.authoredOn or "—" }}</td>
+        <td>{{ order_requester.get(node.order.id, "—") }}</td>
+        <td class="muted">{{ node.order.id }}</td>
+      </tr>
+      {{ render_order_chain(node.children, depth + 1) }}
+    {% endfor %}
+  {% endmacro %}
+
   <h2>Genomic test orders ({{ orders|length }})</h2>
   {% if orders %}
     <table>
       <tr><th>Test</th><th>Status</th><th>Ordered</th><th>Requested by</th><th>ID</th></tr>
-      {% for o in orders %}
-        <tr>
-          <td>{{ o.code|code_text }}</td>
-          <td>{{ o.status or "—" }}</td>
-          <td>{{ o.authoredOn or "—" }}</td>
-          <td>{{ order_requester.get(o.id, "—") }}</td>
-          <td class="muted">{{ o.id }}</td>
-        </tr>
-      {% endfor %}
+      {{ render_order_chain(order_chains) }}
     </table>
+    <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
   {% else %}
     <p class="muted">No lab orders found.</p>
   {% endif %}

@@ -30,6 +30,15 @@ requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 SERVICE_REQUEST_CATEGORY = "http://snomed.info/sct|116148004"
 DIAGNOSTIC_REPORT_CATEGORY = "http://terminology.hl7.org/CodeSystem/v2-0074|GE"
 
+# _include params for the patient-scoped order/report searches, so a
+# patient's requester/specimen/result resources come back in the same
+# Bundle instead of one follow-up GET each. ":iterate" (R4 name for the
+# older ":recurse" modifier) is needed to reach the Practitioner/
+# Organization a PractitionerRole requester points to, one hop further.
+SERVICE_REQUEST_INCLUDES = ["ServiceRequest:requester", "ServiceRequest:specimen"]
+SERVICE_REQUEST_ITERATE_INCLUDES = ["PractitionerRole:practitioner", "PractitionerRole:organization"]
+DIAGNOSTIC_REPORT_INCLUDES = ["DiagnosticReport:result", "DiagnosticReport:specimen"]
+
 
 class FhirClient:
     def __init__(self, base_url=None, user=None, password=None, verify_ssl=None):
@@ -63,6 +72,33 @@ class FhirClient:
     def _entries(bundle):
         """Pull resources out of a FHIR Bundle, ignoring missing/empty ones."""
         return [e["resource"] for e in bundle.get("entry", []) if "resource" in e]
+
+    @staticmethod
+    def _split_bundle(bundle):
+        """
+        Split a Bundle's entries into (matches, included) using
+        Bundle.entry.search.mode: "match" is a primary search result,
+        "include" is a resource pulled in via _include/_include:iterate.
+        Entries missing search.mode entirely are treated as matches (that's
+        the default meaning when the element is absent).
+        """
+        matches, included = [], []
+        for entry in bundle.get("entry", []):
+            resource = entry.get("resource")
+            if not resource:
+                continue
+            mode = (entry.get("search") or {}).get("mode", "match")
+            (included if mode == "include" else matches).append(resource)
+        return matches, included
+
+    def _cache_included(self, included):
+        """Pre-populate the reference cache from a Bundle's _include'd
+        resources, so resolve_reference() serves them without a follow-up
+        GET for the rest of this process's lifetime."""
+        for resource in included:
+            rtype, rid = resource.get("resourceType"), resource.get("id")
+            if rtype and rid:
+                self._ref_cache[f"{rtype}/{rid}"] = resource
 
     def _search_all(self, resource_type, params, max_pages=10):
         """Search + follow Bundle.link[rel=next] pages, up to max_pages.
@@ -103,54 +139,107 @@ class FhirClient:
     # ---- Genomic test orders (ServiceRequest) -------------------------
 
     def lab_orders_for_patient(self, patient_id):
-        params = {
+        base_params = {
             "patient": patient_id,
-            "category": SERVICE_REQUEST_CATEGORY,
             "_sort": "-authored",
             "_count": 50,
+            "_include": SERVICE_REQUEST_INCLUDES,
+            "_include:iterate": SERVICE_REQUEST_ITERATE_INCLUDES,
         }
         try:
-            bundle = self._get("ServiceRequest", params)
-            entries = self._entries(bundle)
-            if entries:
-                return entries
+            bundle = self._get("ServiceRequest", {**base_params, "category": SERVICE_REQUEST_CATEGORY})
+            matches, included = self._split_bundle(bundle)
+            if matches:
+                self._cache_included(included)
+                return matches
         except requests.HTTPError:
             pass
         # Fallback without the category filter, in case this server instance
         # doesn't populate category or slices it differently.
-        bundle = self._get("ServiceRequest", {"patient": patient_id, "_sort": "-authored", "_count": 50})
-        return self._entries(bundle)
+        bundle = self._get("ServiceRequest", base_params)
+        matches, included = self._split_bundle(bundle)
+        self._cache_included(included)
+        return matches
+
+    @staticmethod
+    def build_order_chains(orders):
+        """
+        Arrange a flat list of ServiceRequest orders into parent/child chains
+        via `basedOn` (the IG's link from a reanalysis/cascade-testing
+        request back to its originating order). Returns a list of root nodes
+        (orders with no resolvable parent within this list), each shaped
+        {"order": order, "children": [...]} recursively.
+
+        A parent is only resolved if the referenced ServiceRequest is itself
+        present in `orders` — if it's missing (e.g. paginated away), the
+        order becomes a root rather than being dropped. Would-be cycles
+        (shouldn't happen per spec, but `basedOn` is server-supplied data)
+        are also treated as roots instead of linked, so one bad reference
+        can't hang rendering.
+        """
+        by_id = {o["id"]: o for o in orders if o.get("id")}
+        nodes = {oid: {"order": o, "children": []} for oid, o in by_id.items()}
+
+        def parent_id(order):
+            for ref in order.get("basedOn", []):
+                ref_str = ref.get("reference", "")
+                if ref_str.startswith("ServiceRequest/"):
+                    candidate = ref_str.split("/", 1)[1]
+                    if candidate in by_id and candidate != order.get("id"):
+                        return candidate
+            return None
+
+        def creates_cycle(child_id, candidate_parent_id):
+            current, steps = candidate_parent_id, 0
+            while current is not None and steps <= len(by_id):
+                if current == child_id:
+                    return True
+                current = parent_id(by_id[current])
+                steps += 1
+            return False
+
+        roots = []
+        for oid, order in by_id.items():
+            pid = parent_id(order)
+            if pid and not creates_cycle(oid, pid):
+                nodes[pid]["children"].append(nodes[oid])
+            else:
+                roots.append(nodes[oid])
+        return roots
 
     # ---- Genomic test reports (DiagnosticReport + Observation) --------
 
     def lab_reports_for_patient(self, patient_id):
-        params = {
+        base_params = {
             "patient": patient_id,
-            "category": DIAGNOSTIC_REPORT_CATEGORY,
             "_sort": "-date",
             "_count": 50,
+            "_include": DIAGNOSTIC_REPORT_INCLUDES,
         }
         try:
-            bundle = self._get("DiagnosticReport", params)
-            entries = self._entries(bundle)
-            if entries:
-                return entries
+            bundle = self._get("DiagnosticReport", {**base_params, "category": DIAGNOSTIC_REPORT_CATEGORY})
+            matches, included = self._split_bundle(bundle)
+            if matches:
+                self._cache_included(included)
+                return matches
         except requests.HTTPError:
             pass
-        bundle = self._get("DiagnosticReport", {"patient": patient_id, "_sort": "-date", "_count": 50})
-        return self._entries(bundle)
+        bundle = self._get("DiagnosticReport", base_params)
+        matches, included = self._split_bundle(bundle)
+        self._cache_included(included)
+        return matches
 
     def observations_for_report(self, report):
-        """Resolve the Observation resources a DiagnosticReport points to."""
+        """Resolve the Observation resources a DiagnosticReport points to.
+        Goes through resolve_reference() (the process-wide reference cache),
+        so Observations already pulled in by lab_reports_for_patient's
+        `_include=DiagnosticReport:result` are served from cache instead of
+        being re-fetched one at a time."""
         obs = []
         for ref in report.get("result", []):
-            ref_id = ref.get("reference", "")  # e.g. "Observation/123"
-            if not ref_id:
-                continue
-            try:
-                obs.append(self._get(ref_id))
-            except requests.HTTPError:
-                continue
+            resource = self.resolve_reference(ref)
+            if resource:
+                obs.append(resource)
         return obs
 
     def get_report(self, report_id):

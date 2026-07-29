@@ -112,9 +112,11 @@ def patient_detail(patient_id):
     except Exception as e:
         error = str(e)
     specimens = list(specimens_by_id.values())
+    order_chains = client.build_order_chains(orders)
     return render_template(
         "patient.html", patient_id=patient_id,
-        orders=orders, reports=reports, report_obs=report_obs,
+        orders=orders, order_chains=order_chains,
+        reports=reports, report_obs=report_obs,
         order_requester=order_requester, specimens=specimens, error=error,
     )
 
