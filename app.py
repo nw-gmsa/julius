@@ -129,6 +129,38 @@ def group_count(rows, key):
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
+def pivot_by_day(rows, key, top_n=10):
+    """
+    [{"date": ..., key: value, ...}, ...] -> {"days": [...], "columns": [...], "table": {day: {column: count}}}.
+
+    A day-by-`key` cross-tab (e.g. day-by-organisation, day-by-indication) so
+    trends over time are visible, rather than just a range-wide total per
+    value. `columns` is capped at the `top_n` most frequent values overall
+    (by total count desc); anything past that is folded into an "Other"
+    column so a field with many distinct values (e.g. free-text indications)
+    doesn't blow the table out sideways. `days` is chronological, with an
+    "Unknown" bucket (missing/unparseable date) sorted last.
+    """
+    totals = {}
+    for row in rows:
+        totals[row[key]] = totals.get(row[key], 0) + 1
+    ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+    columns = [value for value, _ in ranked[:top_n]]
+    column_set = set(columns)
+    if len(ranked) > top_n:
+        columns.append("Other")
+
+    table = {}
+    for row in rows:
+        day, value = row["date"], row[key]
+        column = value if value in column_set else "Other"
+        table.setdefault(day, {})
+        table[day][column] = table[day].get(column, 0) + 1
+
+    days = sorted(table, key=lambda d: (d == "Unknown", d))
+    return {"days": days, "columns": columns, "table": table}
+
+
 def group_clinical_terms_by_category(terms):
     """FhirClient.extract_clinical_terms()'s flat, count-sorted list ->
     [(category, [term, ...]), ...], categories alphabetical with "Unlinked"
@@ -190,6 +222,10 @@ def stats():
         report_by_indication=group_count(report_rows, "indication"),
         report_by_ics=group_count(report_rows, "ics"),
         report_by_country=group_count(report_rows, "country"),
+        order_pivot_org=pivot_by_day(order_rows, "organisation"),
+        order_pivot_indication=pivot_by_day(order_rows, "indication"),
+        report_pivot_org=pivot_by_day(report_rows, "organisation"),
+        report_pivot_indication=pivot_by_day(report_rows, "indication"),
     )
 
 

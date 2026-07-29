@@ -1,5 +1,23 @@
 {% extends "base.html" %}
 {% block content %}
+  {% macro render_pivot(pivot, row_label, count_label) %}
+    {% if pivot.days %}
+      <table>
+        <tr><th>{{ row_label }}</th>{% for col in pivot.columns %}<th>{{ col }}</th>{% endfor %}<th>Total</th></tr>
+        {% for day in pivot.days %}
+          {% set row = pivot.table.get(day, {}) %}
+          <tr>
+            <td>{{ day }}</td>
+            {% for col in pivot.columns %}<td>{{ row.get(col, 0) }}</td>{% endfor %}
+            <td><strong>{{ row.values()|sum }}</strong></td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">No {{ count_label }} in this range.</p>
+    {% endif %}
+  {% endmacro %}
+
   <h1>Daily processing stats</h1>
 
   <form action="/stats" method="get">
@@ -52,6 +70,10 @@
     <p class="muted">No orders in this range.</p>
   {% endif %}
 
+  <h3>Orders by day &times; organisation</h3>
+  <p class="muted">Top 10 organisations by volume; the rest are folded into "Other".</p>
+  {{ render_pivot(order_pivot_org, "Date", "orders") }}
+
   <h2>Orders by genomic disease / indication</h2>
   {% if order_by_indication %}
     <table>
@@ -63,6 +85,10 @@
   {% else %}
     <p class="muted">No orders in this range.</p>
   {% endif %}
+
+  <h3>Orders by day &times; indication</h3>
+  <p class="muted">Top 10 indications by volume; the rest are folded into "Other".</p>
+  {{ render_pivot(order_pivot_indication, "Date", "orders") }}
 
   <h2>Orders by patient ICS</h2>
   <p class="muted">Integrated Care System, from the patient's managingOrganization.</p>
@@ -101,6 +127,10 @@
     <p class="muted">No reports in this range.</p>
   {% endif %}
 
+  <h3>Reports by day &times; organisation</h3>
+  <p class="muted">Top 10 organisations by volume; the rest are folded into "Other".</p>
+  {{ render_pivot(report_pivot_org, "Date", "reports") }}
+
   <h2>Reports by genomic disease / indication</h2>
   <p class="muted">Resolved from the originating order's reason code where possible, falling back to the report's own conclusion code.</p>
   {% if report_by_indication %}
@@ -113,6 +143,10 @@
   {% else %}
     <p class="muted">No reports in this range.</p>
   {% endif %}
+
+  <h3>Reports by day &times; indication</h3>
+  <p class="muted">Top 10 indications by volume; the rest are folded into "Other".</p>
+  {{ render_pivot(report_pivot_indication, "Date", "reports") }}
 
   <h2>Reports by patient ICS</h2>
   <p class="muted">Integrated Care System, from the patient's managingOrganization.</p>
