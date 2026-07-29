@@ -533,6 +533,15 @@ class FhirClient:
         ServiceRequest id to its most-recently-issued linked
         DiagnosticReport (there should usually be at most one, but this
         picks the latest if a reflex/repeat test produced more).
+
+        Both are built by filtering on `resourceType` across every resource
+        the search returned (matches + included) rather than trusting
+        Bundle.entry.search.mode to have sorted "match" (ServiceRequest)
+        from "include" (everything else) correctly — some servers don't
+        reliably set search.mode on _include/_revinclude'd entries, which
+        would otherwise misfile a linked DiagnosticReport as if it were an
+        order (with none of the ServiceRequest's own fields) and leave
+        reports_by_order_id empty.
         """
         base_params = {
             "_count": 100,
@@ -547,12 +556,25 @@ class FhirClient:
             matches, included = [], []
         if not matches:
             matches, included = self._search_all_split("ServiceRequest", base_params)
-        self._cache_included(included)
+        self._cache_included(matches + included)
 
-        orders = [o for o in matches if self._is_ctdna_order(o)]
+        # Some servers don't reliably set Bundle.entry.search.mode on
+        # _include/_revinclude'd entries (it's an easy detail to miss when
+        # hand-rolling _revinclude support) — when that happens, _split_bundle
+        # defaults those entries to "match", so a linked DiagnosticReport can
+        # end up in `matches` instead of `included` (and get misread as if it
+        # were a ServiceRequest "order", with none of its fields). Pool both
+        # lists and filter by resourceType instead of trusting search.mode to
+        # have sorted them correctly.
+        all_resources = matches + included
+        orders_by_id = {
+            o["id"]: o for o in all_resources
+            if o.get("resourceType") == "ServiceRequest" and o.get("id") and self._is_ctdna_order(o)
+        }
+        orders = list(orders_by_id.values())
 
         reports_by_order_id = {}
-        for resource in included:
+        for resource in all_resources:
             if resource.get("resourceType") != "DiagnosticReport":
                 continue
             for ref in resource.get("basedOn", []):

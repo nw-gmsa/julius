@@ -151,7 +151,16 @@ date, date reported, and conclusion code, one row per order.
   the same constant the patient-page queries use). Returns
   `(orders, reports_by_order_id)` — the latter maps an order's id to its
   most-recently-issued linked report, since a reflex/repeat test could
-  produce more than one.
+  produce more than one. **Both are built by filtering `resourceType`
+  across `matches + included` combined, not by trusting
+  `Bundle.entry.search.mode`** — some servers don't reliably tag
+  `search.mode` on `_include`/`_revinclude`'d entries, which would
+  otherwise misfile a linked `DiagnosticReport` into `matches` (getting
+  read as if it were an order, with none of the ServiceRequest's fields —
+  empty order date/specimen data) and leave `reports_by_order_id` unable
+  to find it at all. This was a real bug, not just a theoretical one — fix
+  it the same way if a similar split-then-filter pattern shows up
+  elsewhere.
 - **The outstanding/completed split happens in `app.ctdna_summary()`**, not
   in `fhir_client.py`: "outstanding" is any `ServiceRequest.status` other
   than `completed`, shown regardless of age; "completed" orders are only
@@ -276,10 +285,13 @@ haven't been exercised against a live NHS North West Genomics IG server:
    what `code.text`/`code.coding[].display` actually says on a known ctDNA
    order and adjust the match list (or switch to an exact code check).
 8. **`_revinclude=DiagnosticReport:based-on`** (used by `ctdna_orders()`) —
-   same caveat as #6: falls back to no linked report at all (not a
-   per-order GET) if a server doesn't support `_revinclude`, since there's
-   no equivalent of the patient-page fallback here. If reports never show
-   up on `/ctdna`, confirm the server supports this search modifier.
+   falls back to no linked report at all (not a per-order GET) if a server
+   doesn't support `_revinclude` at all, since there's no equivalent of the
+   patient-page fallback here. If reports never show up on `/ctdna`,
+   confirm the server supports this search modifier. (Separately, a server
+   that supports `_revinclude` but doesn't tag `Bundle.entry.search.mode`
+   on the results is handled — see the ctDNA summary section above — but
+   worth knowing this is a real quirk this app has hit.)
 9. **ODS code system URI** (`organisation_ods_code`) — assumes
    `identifier.system == "https://fhir.nhs.uk/Id/ods-organization-code"` on
    a resolved Organization, falling back to any system-less identifier.

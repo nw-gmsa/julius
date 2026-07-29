@@ -105,7 +105,13 @@ turnaround.
   yet, unlike `/stats`. `ctdna_orders()` queries `ServiceRequest` system-wide
   with no date bound (paginating like `/stats` does, same 1,000-record cap)
   and pulls in each order's specimen/patient/requester plus any linked
-  `DiagnosticReport` via `_include`/`_revinclude` in the same query. Rows are
+  `DiagnosticReport` via `_include`/`_revinclude` in the same query. Since
+  some servers don't reliably tag `Bundle.entry.search.mode` on
+  `_include`/`_revinclude`'d entries (which would otherwise misfile a
+  linked report as if it were an order — the fix for a real bug reported
+  against this screen), orders and linked reports are identified by
+  `resourceType` across the whole result set rather than by trusting that
+  tag. Rows are
   **split by managing organisation**, resolved from
   `ServiceRequest.requester` via the same reference chain as the stats
   screen's org breakdown (`order_organisation_resource()`): either the
