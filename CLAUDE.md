@@ -116,6 +116,60 @@ by day, organisation, indication, ICS, and country.
 - Stats resolves one `Patient` per order/report for ICS/country — a date range
   with many distinct patients will be noticeably slower than an org-only
   aggregation would be, even with the reference cache.
+- Beyond the range-wide `group_count()` breakdowns, `app.pivot_by_day()`
+  builds a day-by-organisation and day-by-indication cross-tab for both
+  orders and reports (`order_pivot_org`/`order_pivot_indication`/
+  `report_pivot_org`/`report_pivot_indication`), so trends over the date
+  range are visible rather than just totals. Each returns
+  `{"days": [...], "columns": [...], "table": {day: {column: count}}}`;
+  `columns` caps at the 10 most frequent values (by total count across the
+  whole range), folding everything else into an "Other" column so a
+  high-cardinality field (free-text indications especially) can't blow the
+  table out sideways. `stats.html`'s `render_pivot()` macro renders any of
+  the four from that same shape.
+
+### ctDNA summary (`/ctdna`)
+
+A cross-patient turnaround-time view for **ctDNA** (circulating tumour DNA)
+genomic test orders: order date, sample collection date, sample received
+date, date reported, and conclusion code, one row per order.
+
+- **ctDNA detection is text-based, not code-based**:
+  `FhirClient._is_ctdna_order()` checks `ServiceRequest.code`'s text against
+  `CTDNA_TEXT_MATCHES` ("ctdna", "circulating tumour/tumor dna", "cfdna",
+  etc.), since this IG has no single confirmed Genomic Test Directory/
+  SNOMED code specifically for ctDNA. Swap for an exact `code.coding[].code`
+  check if a server's ctDNA tests use a consistent one — see README.
+- **`FhirClient.ctdna_orders()`** queries `ServiceRequest` system-wide with
+  **no date bound** (via `_search_all_split()`, the split-aware sibling of
+  `_search_all()` — both share pagination logic, capped at the same
+  1,000-record default), bundling each order's `specimen`/`patient`/
+  `requester` via `_include`, and any linked `DiagnosticReport` via
+  `_revinclude=DiagnosticReport:based-on` (+ `_include:iterate` for that
+  report's own specimen and the Organization/Practitioner behind a
+  PractitionerRole requester — reuses `SERVICE_REQUEST_ITERATE_INCLUDES`,
+  the same constant the patient-page queries use). Returns
+  `(orders, reports_by_order_id)` — the latter maps an order's id to its
+  most-recently-issued linked report, since a reflex/repeat test could
+  produce more than one.
+- **The outstanding/completed split happens in `app.ctdna_summary()`**, not
+  in `fhir_client.py`: "outstanding" is any `ServiceRequest.status` other
+  than `completed`, shown regardless of age; "completed" orders are only
+  included if their linked report's `issued` date (or the order's
+  `authoredOn` if no report resolved) falls within a rolling 30-day window
+  from today. There's no date-range picker on this screen (unlike
+  `/stats`) — the 30-day cutoff is currently fixed.
+- Rows sort Outstanding-before-Completed, most-recently-ordered first
+  within each group (two stable sorts on `rows`, applied in that order so
+  both hold at once), **then split by managing organisation** via
+  `app.group_rows_by_organisation()` (same alphabetical-with-"Unknown"-last
+  pattern as `group_clinical_terms_by_category()`). The organisation itself
+  comes from `FhirClient.order_organisation()` — the existing stats-screen
+  helper — which resolves `ServiceRequest.requester` as either an
+  Organization directly, or a PractitionerRole whose `.organization` points
+  at one; unresolvable requesters group under "Unknown".
+  `ctdna.html` loops over `rows_by_org`, rendering one `<h2>` + table per
+  organisation.
 
 ### Report PDFs & variant/clinical-term extraction
 
@@ -198,6 +252,16 @@ haven't been exercised against a live NHS North West Genomics IG server:
    per-resource GETs if the server ignores or errors on these params, so
    correctness doesn't depend on it, but if patient pages are slower than
    expected, confirm the server actually honours `_include` and `:iterate`.
+7. **ctDNA text matching** (`_is_ctdna_order` / `CTDNA_TEXT_MATCHES`) — no
+   confirmed code for ctDNA testing in this IG, so orders are matched by
+   `code` text. If `/ctdna` comes back empty against a real server, check
+   what `code.text`/`code.coding[].display` actually says on a known ctDNA
+   order and adjust the match list (or switch to an exact code check).
+8. **`_revinclude=DiagnosticReport:based-on`** (used by `ctdna_orders()`) —
+   same caveat as #6: falls back to no linked report at all (not a
+   per-order GET) if a server doesn't support `_revinclude`, since there's
+   no equivalent of the patient-page fallback here. If reports never show
+   up on `/ctdna`, confirm the server supports this search modifier.
 
 ## Natural next steps (not yet implemented)
 

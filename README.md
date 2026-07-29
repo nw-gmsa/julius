@@ -44,7 +44,9 @@ restarting the app) reuse the cached files.
 Then open **http://localhost:5050**. Search by patient name, NHS
 number, or FHIR patient ID, then click through to see that patient's
 genomic test orders and reports. Use the **Daily stats** link for a
-day-by-day breakdown of orders/reports across all patients.
+day-by-day breakdown of orders/reports across all patients, or the
+**ctDNA summary** link for a cross-patient list of ctDNA order/result
+turnaround.
 
 ## What's actually happening
 
@@ -80,7 +82,36 @@ day-by-day breakdown of orders/reports across all patients.
   the report's own `conclusionCode` if that link can't be resolved.
   Organisation/practitioner lookups are cached in-process for the
   life of the server, since the same few organisations show up
-  repeatedly across a day's worth of orders.
+  repeatedly across a day's worth of orders. On top of the day/org/
+  indication/ICS/country range totals, each of "by organisation" and
+  "by indication" also gets a **day &times; that field pivot table**
+  (`pivot_by_day()` in `app.py`), so trends over time are visible rather
+  than just a range-wide count. To keep those tables from blowing out
+  sideways when a field has many distinct values, only the top 10 values
+  (by total count) get their own column — everything else is folded into
+  an "Other" column.
+- **ctDNA summary** (`/ctdna`) is a cross-patient turnaround-time view: order
+  date, sample collection date, sample received date, date reported, and
+  conclusion code, for genomic test orders that look like **ctDNA**
+  (circulating tumour DNA) tests. This IG has no single confirmed Genomic
+  Test Directory / SNOMED code specifically for ctDNA, so `_is_ctdna_order()`
+  in `fhir_client.py` matches on the order's code text ("ctDNA", "circulating
+  tumour/tumor DNA", "cfDNA", etc.) instead of an exact code — swap this for
+  an exact code check if your server's ctDNA tests use a consistent one. The
+  initial view shows **all outstanding orders** (any `ServiceRequest.status`
+  other than `completed`) regardless of age, plus **orders completed in the
+  last 30 days** (bounded by the linked report's `issued` date, or the order
+  date if no report resolved) — there's no date-range picker on this screen
+  yet, unlike `/stats`. `ctdna_orders()` queries `ServiceRequest` system-wide
+  with no date bound (paginating like `/stats` does, same 1,000-record cap)
+  and pulls in each order's specimen/patient/requester plus any linked
+  `DiagnosticReport` via `_include`/`_revinclude` in the same query. Rows are
+  **split by managing organisation**, resolved from
+  `ServiceRequest.requester` via the same reference chain as the stats
+  screen's org breakdown (`order_organisation()`): either the requester
+  *is* an Organization directly, or it's a PractitionerRole whose
+  `.organization` points at one. A requester that can't be resolved either
+  way groups under "Unknown".
 - **Report PDFs & variant extraction** — `presentedForm.url` points at a
   **FHIR Binary resource** (e.g. `Binary/abc123`), not a static file.
   `fetch_attachment_bytes()` requests it as `application/fhir+json` (which
@@ -175,6 +206,20 @@ day-by-day breakdown of orders/reports across all patients.
    Genome*, "breast cancer" → *Neoplastic Process* — but the threshold
    and how much ends up "Unlinked" is worth checking against real report
    wording, and adjusting if it's too strict/loose.
+10. **ctDNA text matching** — `/ctdna` identifies ctDNA orders by checking
+    `ServiceRequest.code`'s text for "ctDNA"/"circulating tumour DNA"/"cfDNA"
+    etc. (`CTDNA_TEXT_MATCHES` in `fhir_client.py`), since I don't have a
+    confirmed Genomic Test Directory code for it. If your server's ctDNA
+    tests come back empty on this screen, check what `code.text`/
+    `code.coding[].display` actually looks like for a real ctDNA order and
+    either adjust the match list or switch to an exact code check.
+11. **"Completed in the last 30 days" cutoff** on `/ctdna` is a rolling
+    window from today, bounded by the linked report's `issued` date — not a
+    calendar month and not configurable yet (no date-range picker like
+    `/stats` has). Outstanding orders (anything not `status: completed`)
+    are shown with no date bound at all, which could be slow or show a lot
+    of very old orders if this server has long-lived active `ServiceRequest`s
+    that were never marked completed.
 
 ## What I'd extend first
 
@@ -182,11 +227,7 @@ day-by-day breakdown of orders/reports across all patients.
    records per resource type and stop; for patients with long
    histories you'll want to follow the `Bundle.link[rel=next]` URL
    (the stats screen already does this via `_search_all`).
-2. **Cross-tab the stats** — currently day/organisation/indication
-   are three separate breakdowns; a day-by-organisation or
-   day-by-indication pivot table would show trends over time rather
-   than just range totals.
-3. **Better variant extraction** — the current approach is a keyword
+2. **Better variant extraction** — the current approach is a keyword
    scan; a real implementation would want structured variant data
    (many genomics reports include a `Genomics-Variant` FHIR profile
    alongside/instead of the PDF, or the PDF has a consistent findings

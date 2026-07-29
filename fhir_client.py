@@ -100,13 +100,16 @@ class FhirClient:
             if rtype and rid:
                 self._ref_cache[f"{rtype}/{rid}"] = resource
 
-    def _search_all(self, resource_type, params, max_pages=10):
-        """Search + follow Bundle.link[rel=next] pages, up to max_pages.
-        Used for stats queries which aren't scoped to one patient and can
-        span many results."""
-        results = []
+    def _search_all_split(self, resource_type, params, max_pages=10):
+        """Like _search_all(), but keeps _include/_revinclude'd resources
+        separate from primary matches (see _split_bundle), across however
+        many pages are followed. Used for system-wide queries that aren't
+        scoped to one patient and can span many results."""
+        all_matches, all_included = [], []
         bundle = self._get(resource_type, params)
-        results.extend(self._entries(bundle))
+        matches, included = self._split_bundle(bundle)
+        all_matches.extend(matches)
+        all_included.extend(included)
         pages = 1
         while pages < max_pages:
             next_url = next((l["url"] for l in bundle.get("link", []) if l.get("relation") == "next"), None)
@@ -116,9 +119,19 @@ class FhirClient:
                                  verify=self.verify_ssl, timeout=15)
             resp.raise_for_status()
             bundle = resp.json()
-            results.extend(self._entries(bundle))
+            matches, included = self._split_bundle(bundle)
+            all_matches.extend(matches)
+            all_included.extend(included)
             pages += 1
-        return results
+        return all_matches, all_included
+
+    def _search_all(self, resource_type, params, max_pages=10):
+        """Search + follow Bundle.link[rel=next] pages, up to max_pages,
+        returning every resource in the response regardless of
+        match/include (see _search_all_split for a version that keeps them
+        apart)."""
+        matches, _included = self._search_all_split(resource_type, params, max_pages)
+        return matches
 
     # ---- Patient -----------------------------------------------------
 
@@ -477,6 +490,83 @@ class FhirClient:
         return self._search_all("DiagnosticReport", {
             "date": [f"ge{start_date}", f"le{end_date}"], "_count": 100,
         })
+
+    # ---- ctDNA summary: system-wide, no date bound ---------------------
+
+    #: Best-effort text match for ctDNA (circulating tumour DNA) genomic
+    #: test orders. This IG doesn't have one confirmed Genomic Test
+    #: Directory / SNOMED code specifically for ctDNA testing, so this
+    #: matches on the order's code text instead of an exact code — if your
+    #: server's ctDNA tests use a consistent `code.coding[].code`, swap
+    #: _is_ctdna_order() below for an exact code check, which is more
+    #: reliable than text matching.
+    CTDNA_TEXT_MATCHES = (
+        "ctdna", "circulating tumour dna", "circulating tumor dna",
+        "circulating cell-free dna", "cell-free dna", "cfdna",
+    )
+
+    @classmethod
+    def _is_ctdna_order(cls, order):
+        text = (cls._code_text(order.get("code")) or "").lower()
+        return any(term in text for term in cls.CTDNA_TEXT_MATCHES)
+
+    def ctdna_orders(self):
+        """
+        All genomic test orders (ServiceRequest) that look like ctDNA tests
+        (see _is_ctdna_order), system-wide, with no date bound — the ctDNA
+        summary screen needs every outstanding order regardless of age, not
+        just a recent window (unlike orders_in_range, used by /stats).
+
+        Each order's specimen, patient, and requester (for managing-
+        organisation grouping via order_organisation()) come back in the
+        same query via `_include`, and any DiagnosticReport whose `basedOn`
+        points at one of these orders comes back via
+        `_revinclude=DiagnosticReport:based-on` (plus that report's own
+        specimen via `_include:iterate`, in case a server attaches the
+        specimen to the report rather than the order, and the Practitioner/
+        Organization behind a PractitionerRole requester, one hop further).
+        Paginates up to `_search_all_split`'s default cap (1,000 records) —
+        see README for what to do if this ever hits that.
+
+        Returns (orders, reports_by_order_id): `orders` is the filtered
+        ctDNA ServiceRequest list; `reports_by_order_id` maps a
+        ServiceRequest id to its most-recently-issued linked
+        DiagnosticReport (there should usually be at most one, but this
+        picks the latest if a reflex/repeat test produced more).
+        """
+        base_params = {
+            "_count": 100,
+            "_include": ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"],
+            "_revinclude": "DiagnosticReport:based-on",
+            "_include:iterate": SERVICE_REQUEST_ITERATE_INCLUDES + ["DiagnosticReport:specimen"],
+        }
+        try:
+            matches, included = self._search_all_split(
+                "ServiceRequest", {**base_params, "category": SERVICE_REQUEST_CATEGORY})
+        except requests.HTTPError:
+            matches, included = [], []
+        if not matches:
+            matches, included = self._search_all_split("ServiceRequest", base_params)
+        self._cache_included(included)
+
+        orders = [o for o in matches if self._is_ctdna_order(o)]
+
+        reports_by_order_id = {}
+        for resource in included:
+            if resource.get("resourceType") != "DiagnosticReport":
+                continue
+            for ref in resource.get("basedOn", []):
+                ref_str = ref.get("reference", "")
+                if not ref_str.startswith("ServiceRequest/"):
+                    continue
+                order_id = ref_str.split("/", 1)[1]
+                existing = reports_by_order_id.get(order_id)
+                issued = resource.get("issued") or resource.get("effectiveDateTime") or ""
+                existing_issued = (existing.get("issued") or existing.get("effectiveDateTime") or "") if existing else ""
+                if existing is None or issued > existing_issued:
+                    reports_by_order_id[order_id] = resource
+
+        return orders, reports_by_order_id
 
     @staticmethod
     def _code_text(codeable_concept):

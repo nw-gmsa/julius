@@ -161,6 +161,20 @@ def pivot_by_day(rows, key, top_n=10):
     return {"days": days, "columns": columns, "table": table}
 
 
+def group_rows_by_organisation(rows):
+    """ctdna_summary()'s flat, pre-sorted row list -> [(organisation,
+    [row, ...]), ...], alphabetical with "Unknown" last; rows keep their
+    incoming (Outstanding-first, most-recent-first) order within an
+    organisation."""
+    groups = {}
+    for row in rows:
+        groups.setdefault(row["organisation"], []).append(row)
+    orgs = sorted(o for o in groups if o != "Unknown")
+    if "Unknown" in groups:
+        orgs.append("Unknown")
+    return [(org, groups[org]) for org in orgs]
+
+
 def group_clinical_terms_by_category(terms):
     """FhirClient.extract_clinical_terms()'s flat, count-sorted list ->
     [(category, [term, ...]), ...], categories alphabetical with "Unlinked"
@@ -227,6 +241,69 @@ def stats():
         report_pivot_org=pivot_by_day(report_rows, "organisation"),
         report_pivot_indication=pivot_by_day(report_rows, "indication"),
     )
+
+
+@app.route("/ctdna")
+def ctdna_summary():
+    error = None
+    rows = []
+    try:
+        orders, reports_by_order = client.ctdna_orders()
+        cutoff = (date.today() - timedelta(days=30)).isoformat()
+
+        for order in orders:
+            order_id = order.get("id")
+            # "Outstanding" = any status other than "completed" (draft,
+            # active, on-hold, revoked, ...) — shown regardless of age.
+            # "Completed" orders are bounded to the last month below.
+            is_completed = order.get("status") == "completed"
+            report = reports_by_order.get(order_id)
+            reported_date = None
+            if report:
+                reported_date = (report.get("issued") or report.get("effectiveDateTime") or "")[:10] or None
+
+            if is_completed:
+                # Bound "completed" by when it was reported (the actual
+                # completion event), falling back to order date if no
+                # report resolved.
+                completion_date = reported_date or (order.get("authoredOn") or "")[:10]
+                if not completion_date or completion_date < cutoff:
+                    continue
+
+            specimens = client.resolve_specimens(order)
+            if not specimens and report:
+                specimens = client.resolve_specimens(report)
+            specimen = specimens[0] if specimens else None
+            patient = client.patient_for(order)
+            conclusion = "; ".join(
+                code_text(cc) for cc in (report.get("conclusionCode") or [])
+            ) if report else ""
+
+            rows.append({
+                "order_id": order_id,
+                "organisation": client.order_organisation(order) or "Unknown",
+                "patient_id": patient.get("id") if patient else None,
+                "patient_name": human_name(patient) if patient else "Unknown",
+                "test": code_text(order.get("code")),
+                "status": "Completed" if is_completed else "Outstanding",
+                "order_date_raw": order.get("authoredOn") or "",
+                "order_date": order.get("authoredOn") or "—",
+                "collected_date": specimen_collected(specimen) if specimen else "—",
+                "received_date": specimen_received(specimen) if specimen else "—",
+                "reported_date": reported_date or "—",
+                "conclusion": conclusion or "—",
+            })
+
+        # Most recently ordered first within each group; Outstanding above
+        # Completed (two stable sorts so both orderings hold at once).
+        rows.sort(key=lambda r: r["order_date_raw"], reverse=True)
+        rows.sort(key=lambda r: r["status"] != "Outstanding")
+        rows_by_org = group_rows_by_organisation(rows)
+    except Exception as e:
+        error = str(e)
+        rows_by_org = []
+
+    return render_template("ctdna.html", rows_by_org=rows_by_org, error=error)
 
 
 @app.route("/report/<report_id>/variants")
