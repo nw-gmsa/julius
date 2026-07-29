@@ -129,6 +129,20 @@ def group_count(rows, key):
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
+def group_clinical_terms_by_category(terms):
+    """FhirClient.extract_clinical_terms()'s flat, count-sorted list ->
+    [(category, [term, ...]), ...], categories alphabetical with "Unlinked"
+    always last; terms keep their incoming (count desc) order within a
+    category."""
+    groups = {}
+    for term in terms:
+        groups.setdefault(term["category"], []).append(term)
+    categories = sorted(c for c in groups if c != "Unlinked")
+    if "Unlinked" in groups:
+        categories.append("Unlinked")
+    return [(category, groups[category]) for category in categories]
+
+
 @app.route("/stats")
 def stats():
     end = request.args.get("end") or date.today().isoformat()
@@ -208,21 +222,23 @@ def report_variants(report_id):
 
     variant_counts = client.extract_variant_types(text)
 
-    clinical_terms, clinical_error = [], None
+    clinical_by_category, clinical_error = [], None
     try:
         clinical_terms = client.extract_clinical_terms(text)
+        clinical_by_category = group_clinical_terms_by_category(clinical_terms)
     except ImportError:
         clinical_error = ("scispaCy isn't installed. Run "
                            "`pip install -r requirements.txt` (see README for the model download step).")
     except OSError:
-        clinical_error = ("The scispaCy model 'en_core_sci_sm' isn't downloaded yet — see README for the install command.")
+        clinical_error = ("The scispaCy model 'en_core_sci_sm' or UMLS knowledge base isn't downloaded "
+                           "yet — see README for the install/first-run details.")
     except Exception as e:
         clinical_error = f"Clinical term extraction failed: {e}"
 
     return render_template(
         "variants.html", report_id=report_id,
         variant_counts=variant_counts,
-        clinical_terms=clinical_terms, clinical_error=clinical_error,
+        clinical_by_category=clinical_by_category, clinical_error=clinical_error,
         has_text=bool(text.strip()),
     )
 

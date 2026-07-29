@@ -135,15 +135,27 @@ Both extraction features share a single `extract_pdf_text()` call (via
   methods section), and finds nothing on scanned/image-only PDFs. Treat it as
   a rough signal; the term list is the first thing to adjust if reports phrase
   things differently than expected.
-- **Clinical term extraction** (`extract_clinical_terms()`) — runs the PDF
-  text through scispaCy's `en_core_sci_sm` model (lazily loaded once per
-  process into `FhirClient._scispacy_nlp`) for biomedical NER, showing the
-  most frequently mentioned terms. `en_core_sci_sm` gives *untyped* entity
-  spans (no disease/gene/procedure distinction) — swap in `en_ner_bc5cdr_md`
-  or `en_ner_bionlp13cg_md`, or add scispaCy's UMLS `EntityLinker`, for typed
-  extraction. Raises `ImportError`/`OSError` if scispacy/the model aren't
-  installed — `app.py` catches both and shows a setup message rather than
-  failing the page.
+- **Clinical term extraction + UMLS linking** (`extract_clinical_terms()`) —
+  runs the PDF text through scispaCy's `en_core_sci_sm` model for biomedical
+  NER, then resolves each entity to its best-matching UMLS concept via a
+  `scispacy_linker` (`EntityLinker`) pipe, added alongside the NER model in
+  `_get_scispacy_pipeline()` (both lazily loaded once per process into
+  `FhirClient._scispacy_nlp`). A candidate is only accepted if its score
+  clears `linker_threshold` (default 0.85); otherwise the entity is returned
+  with `"category": "Unlinked"` rather than a guessed concept. Linked
+  entities get their category from the *official* UMLS semantic type name —
+  via `linker.kb.semantic_type_tree` (scispaCy's `UmlsKnowledgeBase` builds
+  this automatically, no extra code needed), not a hand-maintained mapping.
+  Returns `[{"term", "count", "cui", "canonical_name", "category"}, ...]`;
+  `app.group_clinical_terms_by_category()` groups that into
+  `[(category, [term, ...]), ...]` (alphabetical, "Unlinked" last) for
+  `variants.html` to render as one sub-table per category. Raises
+  `ImportError`/`OSError` if scispacy/the NER model/UMLS KB aren't
+  installed/downloaded — `app.py` catches both and shows a setup message
+  rather than failing the page. The UMLS KB + ANN index (~1GB, separate
+  from the ~150MB NER model) downloads lazily on first use and is cached
+  under `~/.scispacy` after that — end-to-end verified against synthetic
+  clinical text in this environment (not yet against a real IG report).
 
 ### Geography (ICS / country)
 
@@ -171,9 +183,11 @@ haven't been exercised against a live NHS North West Genomics IG server:
    empty, check what `GET Binary/<id>` with `Accept: application/fhir+json`
    actually returns.
 3. **Country code lookup** (`_find_country_code`) — see Geography above.
-4. **scispaCy integration** — written against the documented API but never run
-   against a real report end-to-end; expect some noise (header/boilerplate
-   fragments mixed in with genuinely useful terms).
+4. **scispaCy + UMLS linking** — verified end-to-end against synthetic
+   clinical text (real model, real cached UMLS KB, real grouping/rendering),
+   but not yet against an actual IG report PDF; expect some noise (header/
+   boilerplate fragments) and check whether `linker_threshold` (0.85) sends
+   too much — or too little — to "Unlinked" for real report wording.
 5. **Stats date search params** (`authored`/`date`) are correct per FHIR spec
    but this server's indexing of them wasn't confirmed — if `/stats` comes
    back empty for a range known to have data, test the same query directly

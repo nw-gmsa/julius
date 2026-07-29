@@ -28,22 +28,32 @@
     <p class="muted">No known variant-type terms found.</p>
   {% endif %}
 
-  <h2>Clinical terms (scispaCy NER)</h2>
+  <h2>Clinical terms (scispaCy NER + UMLS linking)</h2>
   <p class="muted">
     Named-entity recognition over the report text using scispaCy's
-    <code>en_core_sci_sm</code> model — broad biomedical entity spans
-    (conditions, genes, procedures, findings, etc.), not typed by category.
-    This is model output, not a curated list — expect some noise.
+    <code>en_core_sci_sm</code> model, with each entity linked to its
+    best-matching UMLS concept via scispaCy's <code>EntityLinker</code> and
+    grouped by that concept's semantic type. Entities that don't confidently
+    match a UMLS concept appear under "Unlinked". This is model output, not
+    a curated list — expect some noise.
   </p>
   {% if clinical_error %}
     <div class="error">{{ clinical_error }}</div>
-  {% elif clinical_terms %}
-    <table>
-      <tr><th>Term</th><th>Mentions</th></tr>
-      {% for term, count in clinical_terms %}
-        <tr><td>{{ term }}</td><td>{{ count }}</td></tr>
-      {% endfor %}
-    </table>
+  {% elif clinical_by_category %}
+    {% for category, terms in clinical_by_category %}
+      <h3>{{ category }} ({{ terms|length }})</h3>
+      <table>
+        <tr><th>Term</th><th>UMLS concept</th><th>CUI</th><th>Mentions</th></tr>
+        {% for t in terms %}
+          <tr>
+            <td>{{ t.term }}</td>
+            <td>{{ t.canonical_name or "—" }}</td>
+            <td class="muted">{{ t.cui or "—" }}</td>
+            <td>{{ t.count }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endfor %}
   {% else %}
     <p class="muted">No clinical entities found.</p>
   {% endif %}

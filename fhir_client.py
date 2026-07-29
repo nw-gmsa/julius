@@ -363,31 +363,56 @@ class FhirClient:
     def _get_scispacy_pipeline(cls):
         if cls._scispacy_nlp is None:
             import spacy
+            import scispacy.linking  # noqa: F401 - registers the "scispacy_linker" spaCy factory
+
             # en_core_sci_sm is scispaCy's general-purpose biomedical NER
             # model — broad "clinical entity" spans, not typed as
             # disease/gene/chemical specifically. For typed extraction, swap
             # in en_ner_bc5cdr_md (disease/chemical) or en_ner_bionlp13cg_md
             # (genes/cell types) instead — see README.
-            cls._scispacy_nlp = spacy.load("en_core_sci_sm")
+            nlp = spacy.load("en_core_sci_sm")
+            # UMLS EntityLinker: resolves each NER span to its best-matching
+            # UMLS concept (CUI + canonical name + semantic type), so results
+            # can be grouped by category (disease/gene/procedure/...) instead
+            # of a flat list of raw text spans. First use downloads scispaCy's
+            # UMLS knowledge base + approximate-nearest-neighbour index
+            # (~1GB, separate from and larger than the NER model above) —
+            # cached under ~/.scispacy after that.
+            nlp.add_pipe("scispacy_linker", config={"linker_name": "umls"})
+            cls._scispacy_nlp = nlp
         return cls._scispacy_nlp
 
     @classmethod
-    def extract_clinical_terms(cls, text, limit=50):
+    def extract_clinical_terms(cls, text, limit=50, linker_threshold=0.85):
         """
-        Run scispaCy NER over already-extracted PDF text and return the
-        most frequently mentioned clinical entities as [(term, count), ...],
-        sorted by count desc. Terms are deduplicated case-insensitively
-        (keeping the first-seen casing for display). Raises ImportError if
-        scispacy/spacy aren't installed, or OSError if the model isn't
-        downloaded — callers should catch both and show a setup hint
-        rather than a raw traceback.
+        Run scispaCy NER + UMLS entity linking over already-extracted PDF
+        text. Returns the most frequently mentioned clinical entities as a
+        list of dicts — {"term", "count", "cui", "canonical_name",
+        "category"} — sorted by count desc. Terms are deduplicated
+        case-insensitively (keeping the first-seen casing for "term").
+
+        Each entity is linked to its highest-scoring UMLS candidate (from
+        `Span._.kb_ents`) if that score clears `linker_threshold`; below
+        that, or with no candidates at all, the entity is left unlinked
+        ("category": "Unlinked", cui/canonical_name None) rather than
+        guessing. `category` is the linked concept's first semantic type
+        (TUI), resolved to its official UMLS name via the semantic type
+        tree that scispaCy's UMLS knowledge base loads automatically
+        (`linker.kb.semantic_type_tree`) — falling back to the raw TUI code
+        for the rare type missing from that tree.
+
+        Raises ImportError if scispacy/spacy aren't installed, or OSError if
+        the NER model or UMLS knowledge base isn't downloaded — callers
+        should catch both and show a setup hint rather than a raw traceback.
         """
         if not text.strip():
             return []
         nlp = cls._get_scispacy_pipeline()
+        linker = nlp.get_pipe("scispacy_linker")
+        type_tree = linker.kb.semantic_type_tree
         doc = nlp(text)
 
-        counts, display = {}, {}
+        counts, display, link = {}, {}, {}
         for ent in doc.ents:
             term = ent.text.strip()
             if len(term) < 2:
@@ -395,9 +420,25 @@ class FhirClient:
             key = term.lower()
             counts[key] = counts.get(key, 0) + 1
             display.setdefault(key, term)
+            if key in link:
+                continue
+
+            candidates = [c for c in ent._.kb_ents if c[1] >= linker_threshold]
+            if candidates:
+                cui, _score = max(candidates, key=lambda c: c[1])
+                entity = linker.kb.cui_to_entity[cui]
+                tui = entity.types[0] if entity.types else None
+                category = "Unlinked"
+                if tui and tui in type_tree.type_id_to_node:
+                    category = type_tree.get_canonical_name(tui)
+                elif tui:
+                    category = tui
+                link[key] = {"cui": cui, "canonical_name": entity.canonical_name, "category": category}
+            else:
+                link[key] = {"cui": None, "canonical_name": None, "category": "Unlinked"}
 
         ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
-        return [(display[key], count) for key, count in ranked]
+        return [{"term": display[key], "count": count, **link[key]} for key, count in ranked]
 
     # ---- Stats: system-wide date-range queries -------------------------
 

@@ -26,13 +26,20 @@ export FHIR_PASSWORD="demo123"
 python3 app.py
 ```
 
-**Note on first install**: `requirements.txt` now includes `scispacy`
+**Note on first install**: `requirements.txt` includes `scispacy`
 and its `en_core_sci_sm` model (~150MB), needed for the clinical-term
 extraction on the report/variants page. This makes the first
 `pip install` noticeably slower than before — that's expected. If you'd
 rather skip it for now, remove the last two lines from
 `requirements.txt`; the app still works fine without it, the
 clinical-terms table just shows a setup message instead of results.
+
+**Note on first use of the clinical-terms page**: on top of the model
+above, the UMLS entity-linking step downloads scispaCy's UMLS knowledge
+base + nearest-neighbour index (~1GB) the first time `/report/<id>/variants`
+is opened — expect that first request to take noticeably longer while it
+downloads and caches under `~/.scispacy`. Subsequent requests (even after
+restarting the app) reuse the cached files.
 
 Then open **http://localhost:5050**. Search by patient name, NHS
 number, or FHIR patient ID, then click through to see that patient's
@@ -87,15 +94,22 @@ day-by-day breakdown of orders/reports across all patients.
   parsing — it can't tell a reported variant from an incidental mention
   (e.g. in a methods section), and finds nothing on scanned/image-only
   PDFs (no text layer to search). Treat it as a rough signal.
-- **Clinical term extraction (scispaCy)** — alongside the keyword scan,
-  each report's PDF text also runs through scispaCy's `en_core_sci_sm`
-  model for biomedical named-entity recognition, showing the most
-  frequently mentioned clinical terms. Both extractions now share a
-  single `extract_pdf_text()` call rather than re-parsing the PDF twice.
-  The scispaCy model is a large (~150MB), lazily-loaded, one-time-per-process
-  download — see setup below. If it's not installed, the page still
-  shows the keyword-scan results with a clear setup message in place of
-  the clinical-terms table, rather than failing the whole page.
+- **Clinical term extraction (scispaCy + UMLS linking)** — alongside the
+  keyword scan, each report's PDF text also runs through scispaCy's
+  `en_core_sci_sm` model for biomedical named-entity recognition. Each
+  entity is then resolved to its best-matching UMLS concept via scispaCy's
+  `EntityLinker` (CUI + canonical name + semantic type), and the
+  clinical-terms table is grouped by that semantic type (Disease or
+  Syndrome, Gene or Genome, Laboratory Procedure, etc.) instead of one flat
+  list — entities that don't link confidently show up under "Unlinked".
+  Both extractions share a single `extract_pdf_text()` call rather than
+  re-parsing the PDF twice. The NER model is a ~150MB one-time-per-process
+  download; the UMLS knowledge base + nearest-neighbour index the linker
+  uses is separate and much bigger (~1GB), downloaded lazily on first use
+  and cached under `~/.scispacy` after that — see setup below. If scispaCy
+  isn't installed, the page still shows the keyword-scan results with a
+  clear setup message in place of the clinical-terms table, rather than
+  failing the whole page.
 - **Geography** — each order/report row also resolves its patient
   (`subject`) and derives:
   - **ICS** from `Patient.managingOrganization`'s name.
@@ -152,44 +166,29 @@ day-by-day breakdown of orders/reports across all patients.
    "Extract variant types" result next to the PDF itself and see if
    the counts look right — the term list is the first thing to adjust
    if your reports phrase things differently.
-9. **scispaCy is untested against a real report** — I couldn't
-   install/run it in this sandbox (no network access here), so the
-   integration is written correctly against scispaCy's documented API
-   but hasn't actually been exercised end-to-end. Run it against a
-   real report PDF first and expect some noise in the results —
-   `en_core_sci_sm` tags broad entity spans without categorizing them
-   (disease vs. gene vs. procedure), so you'll get a mix of genuinely
-   useful clinical terms and less useful ones (e.g. fragments of
-   headers or boilerplate).
+9. **UMLS linker threshold/coverage** — `extract_clinical_terms()` only
+   links an entity to a UMLS concept if the top candidate scores
+   ≥ `linker_threshold` (default 0.85); below that, or with no candidate
+   at all, it's shown under "Unlinked" rather than guessing. I did run
+   this end-to-end against synthetic clinical text (not a real IG
+   report) and got sensible results — e.g. "TP53 gene" → *Gene or
+   Genome*, "breast cancer" → *Neoplastic Process* — but the threshold
+   and how much ends up "Unlinked" is worth checking against real report
+   wording, and adjusting if it's too strict/loose.
 
 ## What I'd extend first
 
-1. **`basedOn` chains** — the IG uses `ServiceRequest.basedOn` to
-   link reanalysis/cascade-testing requests to their parent order.
-   Rendering that as a chain rather than a flat list would make
-   multi-stage genomic workflows much clearer (and would make the
-   stats screen's indication lookup for reports more direct, too).
-2. **Pagination on patient pages** — right now they grab up to 50
+1. **Pagination on patient pages** — right now they grab up to 50
    records per resource type and stop; for patients with long
    histories you'll want to follow the `Bundle.link[rel=next]` URL
    (the stats screen already does this via `_search_all`).
-3. **Cross-tab the stats** — currently day/organisation/indication
+2. **Cross-tab the stats** — currently day/organisation/indication
    are three separate breakdowns; a day-by-organisation or
    day-by-indication pivot table would show trends over time rather
    than just range totals.
-4. **`_include`/`_revinclude`** — patient pages still resolve
-   Observations, specimens, and requesters with one HTTP call each;
-   bundling related resources into the original query would cut this
-   down substantially, and would speed up the stats screen's org
-   resolution too (despite the in-process cache).
-5. **Better variant extraction** — the current approach is a keyword
+3. **Better variant extraction** — the current approach is a keyword
    scan; a real implementation would want structured variant data
    (many genomics reports include a `Genomics-Variant` FHIR profile
    alongside/instead of the PDF, or the PDF has a consistent findings
    table pdfplumber's `extract_tables()` could parse directly) rather
    than text-mining free-form report prose.
-6. **Typed clinical entities** — `en_core_sci_sm` gives untyped entity
-   spans. Swapping in `en_ner_bc5cdr_md` (disease/chemical) or
-   `en_ner_bionlp13cg_md` (genes/cell types), or adding scispaCy's
-   UMLS `EntityLinker` component, would let you group results by
-   category (disease vs. gene vs. procedure) instead of one flat list.
