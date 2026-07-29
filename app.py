@@ -29,6 +29,18 @@ def code_text(codeable_concept):
     return "—"
 
 
+def code_value(codeable_concept):
+    """First coding's raw `.code` from a FHIR CodeableConcept — ignores
+    `.text`/`.display`, for when the code itself (not a human-readable
+    label) is what's wanted, e.g. the ctDNA summary's Test column."""
+    if not codeable_concept:
+        return "—"
+    codings = codeable_concept.get("coding", [])
+    if codings:
+        return codings[0].get("code") or "—"
+    return "—"
+
+
 def obs_value(obs):
     """Pull whichever value[x] field is populated on an Observation."""
     if "valueQuantity" in obs:
@@ -279,18 +291,24 @@ def ctdna_summary():
                 code_text(cc) for cc in (report.get("conclusionCode") or [])
             ) if report else ""
 
+            org_resource = client.order_organisation_resource(order)
+            org_name = (org_resource.get("name") if org_resource else None) or client.order_organisation(order) or "Unknown"
+            ods_code = client.organisation_ods_code(org_resource) if org_resource else None
+            organisation = f"{org_name} ({ods_code})" if ods_code else org_name
+
             rows.append({
                 "order_id": order_id,
-                "organisation": client.order_organisation(order) or "Unknown",
+                "organisation": organisation,
                 "patient_id": patient.get("id") if patient else None,
                 "patient_name": human_name(patient) if patient else "Unknown",
-                "test": code_text(order.get("code")),
+                "test": code_value(order.get("code")),
                 "status": "Completed" if is_completed else "Outstanding",
                 "order_date_raw": order.get("authoredOn") or "",
                 "order_date": order.get("authoredOn") or "—",
                 "collected_date": specimen_collected(specimen) if specimen else "—",
                 "received_date": specimen_received(specimen) if specimen else "—",
                 "reported_date": reported_date or "—",
+                "igene_id": client.igene_report_identifier(order, report) or "—",
                 "conclusion": conclusion or "—",
             })
 

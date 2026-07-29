@@ -6,11 +6,16 @@
     regardless of age, plus orders completed in the last month, split by
     managing organisation (resolved from <code>ServiceRequest.requester</code>
     — either an Organization directly, or the Organization referenced by a
-    PractitionerRole requester). ctDNA orders are identified by a
-    best-effort text match on the order's test code, since this IG has no
-    single confirmed code for ctDNA testing — see
-    <code>_is_ctdna_order()</code> in <code>fhir_client.py</code> if this
-    needs tightening for your server.
+    PractitionerRole requester), shown with its NHS ODS code where the
+    Organization resource has one. "Test code" is the raw
+    <code>ServiceRequest.code.coding[].code</code> value, not its display
+    text. ctDNA orders are identified by a best-effort text match on the
+    order's test code text, since this IG has no single confirmed code for
+    ctDNA testing — see <code>_is_ctdna_order()</code> in
+    <code>fhir_client.py</code> if this needs tightening for your server.
+    "iGene report ID" is the identifier carried under the
+    <code>https://fhir.nwgenomics.nhs.uk/iGene/ReportIdentifier</code>
+    system, checked on the order first and then the report.
   </p>
 
   {% if error %}
@@ -24,11 +29,12 @@
         <tr>
           <th>Patient</th>
           <th>Status</th>
-          <th>Test</th>
+          <th>Test code</th>
           <th>Order date</th>
           <th>Sample collected</th>
           <th>Sample received</th>
           <th>Date reported</th>
+          <th>iGene report ID</th>
           <th>Conclusion code</th>
         </tr>
         {% for row in rows %}
@@ -46,6 +52,7 @@
             <td>{{ row.collected_date }}</td>
             <td>{{ row.received_date }}</td>
             <td>{{ row.reported_date }}</td>
+            <td>{{ row.igene_id }}</td>
             <td>{{ row.conclusion }}</td>
           </tr>
         {% endfor %}

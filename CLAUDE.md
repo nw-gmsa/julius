@@ -163,13 +163,31 @@ date, date reported, and conclusion code, one row per order.
   within each group (two stable sorts on `rows`, applied in that order so
   both hold at once), **then split by managing organisation** via
   `app.group_rows_by_organisation()` (same alphabetical-with-"Unknown"-last
-  pattern as `group_clinical_terms_by_category()`). The organisation itself
-  comes from `FhirClient.order_organisation()` — the existing stats-screen
-  helper — which resolves `ServiceRequest.requester` as either an
-  Organization directly, or a PractitionerRole whose `.organization` points
-  at one; unresolvable requesters group under "Unknown".
+  pattern as `group_clinical_terms_by_category()`). The organisation
+  resource itself comes from `FhirClient.order_organisation_resource()`,
+  which resolves `ServiceRequest.requester` down to the Organization
+  resource (not just its name) — either it *is* an Organization directly, or
+  it's a PractitionerRole whose `.organization` points at one; unresolvable
+  requesters fall back to `order_organisation()`'s display-text handling, or
+  "Unknown". `organisation_ods_code()` then pulls the NHS ODS code from that
+  resource's `identifier` (matching `system ==
+  ODS_ORGANIZATION_CODE_SYSTEM`, falling back to any system-less
+  identifier — unverified against a real server, see README), and
+  `app.ctdna_summary()` appends it to the org name as `"Name (ODS)"` before
+  grouping, so the group key and the displayed heading are the same string.
   `ctdna.html` loops over `rows_by_org`, rendering one `<h2>` + table per
   organisation.
+- **Test code column** uses `app.code_value()`, not the `code_text` filter
+  used everywhere else — it returns the first coding's raw `.code`
+  (e.g. the Genomic Test Directory code), ignoring `.text`/`.display`
+  entirely. This is the one column on this screen that deliberately shows a
+  code instead of a human-readable label.
+- **iGene report ID column** uses `FhirClient.igene_report_identifier(order,
+  report)`, which checks `identifier.system ==
+  IGENE_REPORT_IDENTIFIER_SYSTEM` (`https://fhir.nwgenomics.nhs.uk/iGene/
+  ReportIdentifier`) on the order first, then the report — not confirmed
+  which resource this server actually populates it on, so both are checked
+  rather than assuming one.
 
 ### Report PDFs & variant/clinical-term extraction
 
@@ -262,6 +280,17 @@ haven't been exercised against a live NHS North West Genomics IG server:
    per-order GET) if a server doesn't support `_revinclude`, since there's
    no equivalent of the patient-page fallback here. If reports never show
    up on `/ctdna`, confirm the server supports this search modifier.
+9. **ODS code system URI** (`organisation_ods_code`) — assumes
+   `identifier.system == "https://fhir.nhs.uk/Id/ods-organization-code"` on
+   a resolved Organization, falling back to any system-less identifier.
+   Not confirmed against a real server; if ODS codes never appear next to
+   organisation names on `/ctdna`, sample a real `Organization.identifier`
+   array and adjust.
+10. **iGene report identifier location** (`igene_report_identifier`) —
+    checks the order's `identifier` list, then falls back to the report's;
+    not confirmed which resource this server actually carries it on (or
+    whether it's populated at all). If the "iGene report ID" column is
+    always "—", check a real order/report pair directly.
 
 ## Natural next steps (not yet implemented)
 

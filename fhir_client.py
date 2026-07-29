@@ -601,6 +601,82 @@ class FhirClient:
                     return org.get("name")
         return requester_ref.get("display")
 
+    def order_organisation_resource(self, order):
+        """
+        Resolve ServiceRequest.requester down to the Organization resource
+        itself (not just its name) — same reference chain as
+        order_organisation()/requester_display(): either the requester *is*
+        an Organization, or it's a PractitionerRole whose `.organization`
+        points at one. Returns None if the requester is missing,
+        unresolvable, or neither shape. Used by the ctDNA summary screen,
+        which also wants the Organization's ODS code alongside its name
+        (see organisation_ods_code()).
+        """
+        requester_ref = order.get("requester")
+        if not requester_ref:
+            return None
+        resource = self.resolve_reference(requester_ref)
+        if resource is None:
+            return None
+        rtype = resource.get("resourceType")
+        if rtype == "Organization":
+            return resource
+        if rtype == "PractitionerRole":
+            org_ref = resource.get("organization")
+            if org_ref:
+                return self.resolve_reference(org_ref)
+        return None
+
+    #: NHS ODS (Organisation Data Service) identifier system — the standard
+    #: FHIR identifier system for an NHS organisation's short ODS code (e.g.
+    #: "RW3" for a trust). Not confirmed against this specific server; if an
+    #: Organization's ODS code lives under a different/no system value,
+    #: organisation_ods_code() falls back to the first system-less
+    #: identifier it finds.
+    ODS_ORGANIZATION_CODE_SYSTEM = "https://fhir.nhs.uk/Id/ods-organization-code"
+
+    @classmethod
+    def organisation_ods_code(cls, organisation):
+        """The NHS ODS code from an Organization resource's `identifier`
+        list, or None if it has no identifiers (or none matching, per the
+        fallback above)."""
+        if not organisation:
+            return None
+        identifiers = organisation.get("identifier", [])
+        for ident in identifiers:
+            if ident.get("system") == cls.ODS_ORGANIZATION_CODE_SYSTEM:
+                return ident.get("value")
+        for ident in identifiers:
+            if not ident.get("system"):
+                return ident.get("value")
+        return None
+
+    #: iGene report identifier system (NW Genomics IG-specific) — a local
+    #: cross-reference id, e.g. into the iGene LIMS, that may be carried on
+    #: either the ServiceRequest or the DiagnosticReport depending on the
+    #: server, hence checking both in igene_report_identifier() below.
+    IGENE_REPORT_IDENTIFIER_SYSTEM = "https://fhir.nwgenomics.nhs.uk/iGene/ReportIdentifier"
+
+    @staticmethod
+    def _identifier_value(resource, system):
+        """First identifier value on `resource` whose `system` matches, or
+        None if `resource` is falsy or has no matching identifier."""
+        if not resource:
+            return None
+        for ident in resource.get("identifier", []):
+            if ident.get("system") == system:
+                return ident.get("value")
+        return None
+
+    @classmethod
+    def igene_report_identifier(cls, order, report):
+        """The iGene report identifier (see IGENE_REPORT_IDENTIFIER_SYSTEM),
+        checked on the order first, then the report (`report` may be None) —
+        either resource might carry it depending on how a server populates
+        this IG-specific identifier."""
+        return (cls._identifier_value(order, cls.IGENE_REPORT_IDENTIFIER_SYSTEM)
+                or cls._identifier_value(report, cls.IGENE_REPORT_IDENTIFIER_SYSTEM))
+
     def order_indication(self, order):
         """Genomic disease / clinical indication for a ServiceRequest, from
         reasonCode (bound to Genomic Clinical Indication Codes in the IG)."""

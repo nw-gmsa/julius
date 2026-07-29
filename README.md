@@ -108,10 +108,24 @@ turnaround.
   `DiagnosticReport` via `_include`/`_revinclude` in the same query. Rows are
   **split by managing organisation**, resolved from
   `ServiceRequest.requester` via the same reference chain as the stats
-  screen's org breakdown (`order_organisation()`): either the requester
-  *is* an Organization directly, or it's a PractitionerRole whose
+  screen's org breakdown (`order_organisation_resource()`): either the
+  requester *is* an Organization directly, or it's a PractitionerRole whose
   `.organization` points at one. A requester that can't be resolved either
-  way groups under "Unknown".
+  way groups under "Unknown". The organisation heading also shows its NHS
+  **ODS code** (`organisation_ods_code()`), read from the Organization
+  resource's `identifier` where `system` is
+  `https://fhir.nhs.uk/Id/ods-organization-code` — not confirmed against a
+  real server, so if it never shows up, check what system value your
+  server's Organization identifiers actually use. The **Test code** column
+  shows the raw `ServiceRequest.code.coding[].code` value (not `.text`/
+  `.display`) — deliberately, so it lines up with the Genomic Test
+  Directory code list rather than a free-text label. The **iGene report
+  ID** column (`igene_report_identifier()`) shows the identifier under the
+  NW Genomics IG-specific system
+  `https://fhir.nwgenomics.nhs.uk/iGene/ReportIdentifier`, checked on the
+  `ServiceRequest` first and falling back to the linked `DiagnosticReport`,
+  since it's not confirmed which resource actually carries it on a given
+  server.
 - **Report PDFs & variant extraction** — `presentedForm.url` points at a
   **FHIR Binary resource** (e.g. `Binary/abc123`), not a static file.
   `fetch_attachment_bytes()` requests it as `application/fhir+json` (which
@@ -220,6 +234,20 @@ turnaround.
     are shown with no date bound at all, which could be slow or show a lot
     of very old orders if this server has long-lived active `ServiceRequest`s
     that were never marked completed.
+12. **ODS code system URI** — `organisation_ods_code()` looks for
+    `identifier.system == "https://fhir.nhs.uk/Id/ods-organization-code"` on
+    the resolved Organization, falling back to the first identifier with no
+    `system` at all. I haven't confirmed this is the system value this
+    server's Organization resources actually use — if ODS codes never show
+    up next to organisation names on `/ctdna`, print a sample
+    `Organization.identifier` array and adjust.
+13. **iGene report identifier location** — `igene_report_identifier()`
+    checks the `ServiceRequest`'s `identifier` list first, then the linked
+    `DiagnosticReport`'s, for one with system
+    `https://fhir.nwgenomics.nhs.uk/iGene/ReportIdentifier`. I don't know
+    which resource this server actually populates it on (or whether it's
+    populated at all) — if the "iGene report ID" column is always empty,
+    check a real order/report pair directly.
 
 ## What I'd extend first
 
