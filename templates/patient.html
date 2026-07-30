@@ -56,7 +56,7 @@
     {% for node in nodes %}
       <tr>
         <td style="padding-left: {{ depth * 24 }}px">
-          {% if depth %}↳ {% endif %}{{ node.order.code|code_value }}
+          {% if depth %}↳ {% endif %}{{ (node.order.code|test_directory_code) or "—" }}
         </td>
         <td>{{ node.order.status or "—" }}</td>
         <td>{{ node.order.intent or "—" }}</td>
@@ -86,9 +86,11 @@
   {% if reports %}
     {% for r in reports %}
       <div class="card">
-        <strong>{{ r.code|code_text }}</strong>
+        <strong>{{ (r.code|test_directory_code) or "—" }}</strong>
         <span class="muted">— {{ r.status or "—" }}, {{ r.effectiveDateTime or r.issued or "no date" }}</span>
         <span class="muted">— Report ID: {{ (r|report_identifier) or "—" }}</span>
+        <span class="muted">— Conclusion code: {{ r|conclusion_code_reference }}</span>
+        <span class="muted">— Results interpreter: {{ report_interpreters.get(r.id, "—") }}</span>
         {% if r.presentedForm %}
           <p>
             {% for pf in r.presentedForm %}

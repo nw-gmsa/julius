@@ -7,9 +7,11 @@
     managing organisation (resolved from <code>ServiceRequest.requester</code>
     — either an Organization directly, or the Organization referenced by a
     PractitionerRole requester), shown with its NHS ODS code where the
-    Organization resource has one. "Test code" is the raw
-    <code>ServiceRequest.code.coding[].code</code> value, not its display
-    text. ctDNA orders are identified by a best-effort text match on the
+    Organization resource has one. "Test code" is the coding under
+    <code>https://fhir.nhs.uk/CodeSystem/England-GenomicTestDirectory</code>
+    specifically (not its display text, and not any other coding the same
+    CodeableConcept might carry). ctDNA orders are identified by a
+    best-effort text match on the
     order's test code text, since this IG has no single confirmed code for
     ctDNA testing — see <code>_is_ctdna_order()</code> in
     <code>fhir_client.py</code> if this needs tightening for your server.

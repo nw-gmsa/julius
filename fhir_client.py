@@ -295,6 +295,44 @@ class FhirClient:
                 roots.append(nodes[oid])
         return roots
 
+    def active_filler_orders(self):
+        """
+        All active genomic test orders (ServiceRequest) with
+        `intent=filler-order` — i.e. orders as seen from the filler/lab
+        system's side, as opposed to a placer/requesting-system order —
+        system-wide, for the work order screen. Not scoped to one patient,
+        so each order's specimen/patient/requester come back in the same
+        query via `_include` (same shape as ctdna_orders()), and results
+        paginate up to `_search_all_split`'s default cap (1,000 records) —
+        see README for what to do if that's ever hit.
+
+        Like ctdna_orders(), orders are identified by `resourceType` across
+        `matches + included` combined rather than by trusting
+        `Bundle.entry.search.mode` (see that method's docstring for the
+        real bug this pattern fixes on servers that don't reliably tag it).
+        """
+        base_params = {
+            "intent": "filler-order",
+            "status": "active",
+            "_count": 100,
+            "_include": ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"],
+            "_include:iterate": SERVICE_REQUEST_ITERATE_INCLUDES,
+        }
+        try:
+            matches, included = self._search_all_split(
+                "ServiceRequest", {**base_params, "category": SERVICE_REQUEST_CATEGORY})
+        except requests.HTTPError:
+            matches, included = [], []
+        if not matches:
+            matches, included = self._search_all_split("ServiceRequest", base_params)
+        self._cache_included(matches + included)
+
+        orders_by_id = {
+            o["id"]: o for o in (matches + included)
+            if o.get("resourceType") == "ServiceRequest" and o.get("id")
+        }
+        return list(orders_by_id.values())
+
     # ---- Genomic test reports (DiagnosticReport + Observation) --------
 
     def lab_reports_for_patient(self, patient_id):
@@ -858,6 +896,28 @@ class FhirClient:
         """The iGene specimen identifier (see SPECIMEN_IDENTIFIER_SYSTEM)."""
         return cls._identifier_value(specimen, cls.SPECIMEN_IDENTIFIER_SYSTEM)
 
+    #: England's National Genomic Test Directory CodeSystem — the value set
+    #: ServiceRequest.code/DiagnosticReport.code are bound to in this IG (see
+    #: module docstring). A CodeableConcept here can carry more than one
+    #: coding (e.g. an NGTD code alongside a local/SNOMED one), so
+    #: test_directory_code() below picks the coding by this system
+    #: specifically rather than assuming coding[0] is the right one.
+    GENOMIC_TEST_DIRECTORY_SYSTEM = "https://fhir.nhs.uk/CodeSystem/England-GenomicTestDirectory"
+
+    @classmethod
+    def test_directory_code(cls, codeable_concept):
+        """The Genomic Test Directory code from a ServiceRequest.code/
+        DiagnosticReport.code CodeableConcept — i.e. the coding whose
+        `system` is GENOMIC_TEST_DIRECTORY_SYSTEM, ignoring any other
+        coding (or `.text`/`.display`) the CodeableConcept might also carry.
+        Returns None if there's no coding with that system at all."""
+        if not codeable_concept:
+            return None
+        for coding in codeable_concept.get("coding", []):
+            if coding.get("system") == cls.GENOMIC_TEST_DIRECTORY_SYSTEM:
+                return coding.get("code")
+        return None
+
     @staticmethod
     def _identifier_by_type(resource, type_code):
         """Identifier value from `resource.identifier` whose `.type.coding`
@@ -923,6 +983,46 @@ class FhirClient:
         labels = [self._code_text(cc) for cc in report.get("conclusionCode", [])]
         labels = [l for l in labels if l]
         return "; ".join(labels) if labels else "Unspecified"
+
+    def results_interpreter_display(self, report):
+        """
+        Display string for DiagnosticReport.resultsInterpreter — the
+        person/organisation who interpreted or authorised the report's
+        results (e.g. a reporting clinical scientist or consultant),
+        0..* references to Practitioner | PractitionerRole | Organization
+        per FHIR R4. Each entry resolves to "Name (Type)": for a
+        PractitionerRole, the underlying Practitioner's own name is used
+        where it resolves (same drill-down as requester_display()), since a
+        bare role reference is rarely meaningful by itself; Type is the
+        resolved resource's FHIR resourceType (Practitioner/
+        PractitionerRole/Organization), or "Unknown" for a reference that
+        couldn't be dereferenced at all. Joined with "; " since a report
+        can carry more than one interpreter (e.g. a scientist and an
+        authorising consultant). Returns "—" if resultsInterpreter is
+        absent or empty, matching requester_display()'s no-data convention.
+        """
+        entries = []
+        for ref in report.get("resultsInterpreter", []):
+            resource = self.resolve_reference(ref)
+            if resource is None:
+                name = ref.get("display") or ref.get("reference") or "Unknown"
+                entries.append(f"{name} (Unknown)")
+                continue
+
+            rtype = resource.get("resourceType")
+            if rtype == "Practitioner":
+                name = self._practitioner_name(resource) or ref.get("display") or "Unknown"
+            elif rtype == "PractitionerRole":
+                practitioner_ref = resource.get("practitioner")
+                practitioner = self.resolve_reference(practitioner_ref) if practitioner_ref else None
+                name = (practitioner and self._practitioner_name(practitioner)) or ref.get("display") or "Unknown"
+            elif rtype == "Organization":
+                name = resource.get("name") or ref.get("display") or "Unknown"
+            else:
+                name = ref.get("display") or resource.get("id") or "Unknown"
+
+            entries.append(f"{name} ({rtype or 'Unknown'})")
+        return "; ".join(entries) if entries else "—"
 
     # ---- Geography: ICS and country from Patient ----------------------
 

@@ -80,9 +80,30 @@ def reason_code_reference(order):
     return "; ".join(codes) if codes else "—"
 
 
+def conclusion_code_reference(report):
+    """Raw code(s) behind DiagnosticReport.conclusionCode, each paired with
+    a plain-language description (the coding's `.display`, falling back to
+    the CodeableConcept's own `.text` — see code_text()) as "CODE -
+    Description"; joined with "; " for multiple conclusionCode entries. An
+    entry with no description available (or one identical to the code
+    itself) shows just the code; an entry with no code at all is skipped."""
+    entries = []
+    for cc in report.get("conclusionCode", []):
+        code = code_value(cc)
+        if not code or code == "—":
+            continue
+        description = code_text(cc)
+        if description and description not in ("—", code):
+            entries.append(f"{code} - {description}")
+        else:
+            entries.append(code)
+    return "; ".join(entries) if entries else "—"
+
+
 app.jinja_env.filters["human_name"] = human_name
 app.jinja_env.filters["code_text"] = code_text
 app.jinja_env.filters["code_value"] = code_value
+app.jinja_env.filters["test_directory_code"] = FhirClient.test_directory_code
 app.jinja_env.filters["obs_value"] = obs_value
 app.jinja_env.filters["specimen_collected"] = specimen_collected
 app.jinja_env.filters["specimen_received"] = specimen_received
@@ -91,6 +112,7 @@ app.jinja_env.filters["placer_identifier"] = FhirClient.placer_identifier
 app.jinja_env.filters["filler_identifier"] = FhirClient.filler_identifier
 app.jinja_env.filters["report_identifier"] = FhirClient.report_identifier
 app.jinja_env.filters["reason_code_reference"] = reason_code_reference
+app.jinja_env.filters["conclusion_code_reference"] = conclusion_code_reference
 
 
 @app.route("/", methods=["GET"])
@@ -125,6 +147,7 @@ def patient_detail(patient_id):
     error = None
     patient = None
     orders, reports, report_obs, order_requester = [], [], {}, {}
+    report_interpreters = {}
     specimens_by_id = {}
     medical_record_numbers = []
     try:
@@ -138,6 +161,7 @@ def patient_detail(patient_id):
         reports = client.lab_reports_for_patient(patient_id)
         for r in reports:
             report_obs[r["id"]] = client.observations_for_report(r)
+            report_interpreters[r["id"]] = client.results_interpreter_display(r)
             for spec in client.resolve_specimens(r):
                 specimens_by_id[spec["id"]] = spec
     except Exception as e:
@@ -152,8 +176,30 @@ def patient_detail(patient_id):
         general_practitioner=client.general_practitioner_display(patient),
         patient_ics=client.patient_ics_display(patient),
         orders=orders, order_chains=order_chains,
-        reports=reports, report_obs=report_obs,
+        reports=reports, report_obs=report_obs, report_interpreters=report_interpreters,
         order_requester=order_requester, specimens=specimens, error=error,
+    )
+
+
+@app.route("/work-orders")
+def work_orders():
+    error = None
+    orders, order_chains, order_requester, order_patient = [], [], {}, {}
+    try:
+        orders = client.active_filler_orders()
+        for o in orders:
+            order_requester[o["id"]] = client.requester_display(o)
+            patient = client.patient_for(o)
+            order_patient[o["id"]] = {
+                "id": patient.get("id") if patient else None,
+                "name": human_name(patient) if patient else "Unknown",
+            }
+        order_chains = client.build_order_chains(orders)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "work_orders.html", orders=orders, order_chains=order_chains,
+        order_requester=order_requester, order_patient=order_patient, error=error,
     )
 
 
@@ -325,7 +371,7 @@ def ctdna_summary():
                 "organisation": organisation,
                 "patient_id": patient.get("id") if patient else None,
                 "patient_name": human_name(patient) if patient else "Unknown",
-                "test": code_value(order.get("code")),
+                "test": FhirClient.test_directory_code(order.get("code")) or "—",
                 "status": "Completed" if is_completed else "Outstanding",
                 "order_date_raw": order.get("authoredOn") or "",
                 "order_date": order.get("authoredOn") or "—",
