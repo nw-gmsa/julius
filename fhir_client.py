@@ -1419,16 +1419,18 @@ class FhirClient:
         orders = self._search_all("ServiceRequest", {"_count": 100})
         return [o for o in orders if not o.get("subject")]
 
-    def _delete_service_requests(self, orders):
-        """Shared bulk-delete for a list of ServiceRequest resources.
+    def _delete_resources(self, resource_type, resources):
+        """Shared bulk-delete for a list of resources of the same
+        `resource_type` (e.g. "ServiceRequest", "DiagnosticReport").
         Returns {"deleted": [...], "failed": [...]} like
-        clear_down_patient(). Used by clear_down_orphaned_service_requests()
-        and clear_down_orders_with_unknown_patient()."""
+        clear_down_patient(). Used by clear_down_orphaned_service_requests(),
+        clear_down_orders_with_unknown_patient(), and
+        clear_down_bcrabl_reports_without_components()."""
         deleted, failed = [], []
-        for o in orders:
-            if not o.get("id"):
+        for r in resources:
+            if not r.get("id"):
                 continue
-            ref = f"ServiceRequest/{o['id']}"
+            ref = f"{resource_type}/{r['id']}"
             (deleted if self._delete(ref) else failed).append(ref)
         return {"deleted": deleted, "failed": failed}
 
@@ -1436,7 +1438,7 @@ class FhirClient:
         """DELETE every ServiceRequest with no `subject` reference (see
         orphaned_service_requests()). Returns {"deleted": [...], "failed":
         [...]} like clear_down_patient()."""
-        return self._delete_service_requests(self.orphaned_service_requests())
+        return self._delete_resources("ServiceRequest", self.orphaned_service_requests())
 
     def orders_with_unknown_patient(self, orders):
         """
@@ -1456,7 +1458,30 @@ class FhirClient:
         """DELETE every order in `orders` whose patient can't be resolved
         (see orders_with_unknown_patient()). Returns {"deleted": [...],
         "failed": [...]} like clear_down_patient()."""
-        return self._delete_service_requests(self.orders_with_unknown_patient(orders))
+        return self._delete_resources("ServiceRequest", self.orders_with_unknown_patient(orders))
+
+    def bcrabl_reports_without_components(self, reports):
+        """
+        Filters `reports` (e.g. from bcrabl_reports()) down to the ones
+        with no component-level results at all — none of their linked
+        Observations (if any) carry a non-empty `component` array. Used by
+        the Cepheid Test Results screen's "delete reports with no
+        component-level results" action, for reports whose results table
+        would show nothing useful anyway (see component_rows() in app.py).
+        """
+        results = []
+        for report in reports:
+            observations = self.observations_for_report(report)
+            if not any(obs.get("component") for obs in observations):
+                results.append(report)
+        return results
+
+    def clear_down_bcrabl_reports_without_components(self, reports):
+        """DELETE every report in `reports` with no component-level
+        results (see bcrabl_reports_without_components()). Returns
+        {"deleted": [...], "failed": [...]} like clear_down_patient()."""
+        return self._delete_resources(
+            "DiagnosticReport", self.bcrabl_reports_without_components(reports))
 
     # ---- Requester resolution -----------------------------------------
 

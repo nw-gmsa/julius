@@ -344,6 +344,61 @@ method; only `admin_patients_clear_down()` and `admin_orphaned_clear_down()`
 do. Same no-auth/no-CSRF caveat as above, more so given the larger blast
 radius (multiple patients, or every orphaned order, per click).
 
+### Cepheid Test Results (`/cepheid-results`)
+
+Cross-patient, system-wide, no date bound: `DiagnosticReport`s with a
+BCRABL code. `FhirClient.bcrabl_reports()` matches
+`coding[].code == "BCRABL"` (`_is_bcrabl_report()`/`BCRABL_CODE`) across
+*any* coding regardless of `system` — a known exact code but unconfirmed
+system, distinct from both the Genomic Test Directory code (confirmed
+system, matched via `test_directory_code()`) and ctDNA (no confirmed code
+at all, text-matched via `_is_ctdna_order()`). Query shape mirrors
+`ctdna_orders()`/`active_filler_orders()`: `_include`s specimen/patient/
+result plus the originating order via `_include=DiagnosticReport:based-on`
+— a **forward** include this time (the report references the order via
+its own `basedOn`, so no revinclude is needed, unlike `ctdna_orders()`
+which searches from the ServiceRequest side and needs `_revinclude` to
+reach the report) — and identifies reports by `resourceType` across
+`matches + included` combined, same `Bundle.entry.search.mode` caveat as
+the other system-wide queries.
+
+`order_for_report(report)` resolves a report's `basedOn` down to the
+ServiceRequest specifically (basedOn can reference other types per spec,
+though this IG only ever uses ServiceRequest) — much simpler than
+`ctdna_orders()`'s reverse order-id→report lookup, since here the
+direction is the natural one (report → order via a direct reference, not
+order → report via a reverse search).
+
+**The results table is component-level, not Observation-level** — the
+whole point of this screen. `app.component_rows(observations)` flattens
+every linked Observation's `.component` array into one row per component
+(`{"label", "value", "reference_range", "flag"}`), reusing `obs_value()`
+directly on each component dict (a component's `value[x]` fields are
+shaped the same as its parent Observation's, so no separate value
+extraction was needed) rather than `obs_value()`'s existing
+component-joining branch (which produces one summary string per
+Observation — fine for the patient page's generic Observation table, not
+granular enough for this screen's per-component rows). An Observation
+with no `component` array contributes zero rows here.
+
+**Delete reports with no component-level results**
+(`/cepheid-results/clear-down-no-components`, destructive) —
+`bcrabl_reports_without_components(reports)` filters to reports where
+*no* linked Observation has a non-empty `component` array (i.e. exactly
+the ones `component_rows()` produces nothing for);
+`clear_down_bcrabl_reports_without_components()` deletes them. Single
+POST, no separate confirm route — same reasoning as the admin screen's
+orphaned-`ServiceRequest` delete and the test orders unknown-patient
+delete: a mechanical, well-defined criterion, not tied to a specific
+identifiable patient, and already visible in full on the same GET page.
+This is also where `_delete_resources(resource_type, resources)` was
+introduced — the old `_delete_service_requests()` generalized to take a
+resource type, since this delete targets `DiagnosticReport` rather than
+`ServiceRequest`; `clear_down_orphaned_service_requests()` and
+`clear_down_orders_with_unknown_patient()` were updated to call the
+generalized version, no behaviour change. Reuses
+`admin_clear_down_result.html` with `back_url="/cepheid-results"`.
+
 ### Report PDFs & variant/clinical-term extraction
 
 `DiagnosticReport.presentedForm.url` points at a **FHIR Binary resource**

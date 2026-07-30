@@ -694,7 +694,40 @@ def cepheid_results():
     except Exception as e:
         error = str(e)
 
-    return render_template("cepheid_results.html", rows=rows, error=error)
+    no_component_results_count = sum(1 for r in rows if not r["components"])
+    return render_template(
+        "cepheid_results.html", rows=rows,
+        no_component_results_count=no_component_results_count, error=error,
+    )
+
+
+@app.route("/cepheid-results/clear-down-no-components", methods=["POST"])
+def cepheid_results_clear_down_no_components():
+    """
+    Deletes every currently-listed BCRABL DiagnosticReport with no
+    component-level results at all
+    (client.clear_down_bcrabl_reports_without_components()). Single POST,
+    no separate confirm route — same reasoning as the admin screen's
+    orphaned-ServiceRequest delete and the test orders unknown-patient
+    delete: this is a mechanical, well-defined criterion (no component
+    data to show), not tied to a specific identifiable patient, and
+    /cepheid-results's GET already shows "No component-level results
+    found on this report's Observations" against every one of these
+    before this button is reachable.
+    """
+    error = None
+    result = {"deleted": [], "failed": []}
+    try:
+        reports = client.bcrabl_reports()
+        result = client.clear_down_bcrabl_reports_without_components(reports)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html",
+        title="BCRABL reports without component results — clear-down result",
+        back_url="/cepheid-results", back_label="Back to Cepheid Test Results",
+        deleted=result["deleted"], failed=result["failed"], error=error,
+    )
 
 
 @app.route("/report/<report_id>/variants")

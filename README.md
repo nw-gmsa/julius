@@ -133,6 +133,29 @@ active filler-order test orders.
   `ServiceRequest` first and falling back to the linked `DiagnosticReport`,
   since it's not confirmed which resource actually carries it on a given
   server.
+- **Cepheid Test Results** (`/cepheid-results`) shows `DiagnosticReport`s
+  with a **BCRABL** code (`bcrabl_reports()`) — BCR-ABL1 quantitative
+  monitoring results, e.g. from a Cepheid GeneXpert. Matched by
+  `coding[].code == "BCRABL"` regardless of `system` (`_is_bcrabl_report()`)
+  since the exact code is known but not which coding system carries it on
+  this server — unlike the Genomic Test Directory code (a confirmed
+  system) or ctDNA (no confirmed code at all, so text-matched instead).
+  System-wide, no date bound. Each report is shown with its originating
+  order (via `basedOn` → `order_for_report()`) and specimen, plus a
+  **results table built from every linked Observation's `component`
+  entries** rather than the Observations' own top-level values
+  (`component_rows()` in `app.py`) — this screen is specifically about
+  the BCR-ABL1/ABL1-control/%IS breakdown carried as components on a
+  panel-style Observation, not a single result value. An Observation with
+  no `component` array contributes nothing to this table. A **"Delete
+  reports with no component-level results"** button (destructive,
+  irreversible; single `POST`, no separate confirm — same reasoning as the
+  admin screen's orphaned-`ServiceRequest` delete) removes every currently-
+  listed BCRABL report where *none* of its linked Observations carry a
+  `component` array at all (`bcrabl_reports_without_components()`/
+  `clear_down_bcrabl_reports_without_components()`) — i.e. exactly the
+  reports whose card already shows "No component-level results found" on
+  this same page.
 - **Work orders** (`/work-orders`) is a cross-patient worklist of active
   test orders — `ServiceRequest` with `intent=filler-order` and
   `status=active`, system-wide (`active_filler_orders()`), i.e. orders as
@@ -337,6 +360,20 @@ active filler-order test orders.
     which resource this server actually populates it on (or whether it's
     populated at all) — if the "iGene report ID" column is always empty,
     check a real order/report pair directly.
+14. **BCRABL code system** — `_is_bcrabl_report()` matches
+    `coding[].code == "BCRABL"` regardless of `system`, since I don't know
+    which coding system this server puts it under (NGTD, LOINC, a local
+    code, or all three on the same report). If `/cepheid-results` comes
+    back empty against a real server, check a known BCR-ABL report's
+    `code.coding` directly and confirm the code value really is `BCRABL`
+    (case-sensitive exact match here, unlike ctDNA's text search).
+15. **BCR-ABL results assume component-level values** — `component_rows()`
+    only reads `Observation.component`, not a top-level `value[x]` on the
+    Observation itself. If a server reports BCR-ABL1/ABL1/%IS as separate
+    Observations each with their own top-level value (no components at
+    all), this screen's results table will show nothing for that report —
+    untested against a real Cepheid result, since I don't have one to
+    check the actual resource shape against.
 
 ## What I'd extend first
 
