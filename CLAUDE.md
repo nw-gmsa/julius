@@ -399,6 +399,17 @@ resource type, since this delete targets `DiagnosticReport` rather than
 generalized version, no behaviour change. Reuses
 `admin_clear_down_result.html` with `back_url="/cepheid-results"`.
 
+Each row also carries **`meta.lastUpdated`** (read straight off the report,
+no helper needed) and **every `identifier` on the report** via
+`app.all_identifiers(resource)` — a generic "show all of them" formatter
+(`"value (label)"`, label being the identifier system URI's last path
+segment), distinct from the single-system identifier lookups elsewhere
+(`report_identifier()`, `specimen_identifier()`, etc.) that each pick out
+one specific known system. This is the one place in the app that shows a
+resource's full identifier list rather than one targeted value — reuse
+`all_identifiers()` rather than a bespoke loop if another screen needs the
+same "just show me everything" treatment.
+
 ### Report PDFs & variant/clinical-term extraction
 
 `DiagnosticReport.presentedForm.url` points at a **FHIR Binary resource**

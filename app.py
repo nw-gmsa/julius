@@ -41,6 +41,30 @@ def code_value(codeable_concept):
     return "—"
 
 
+def all_identifiers(resource):
+    """Every `identifier` entry on a resource, formatted as "value
+    (label)" strings — label is the system URI's last path segment (short
+    and readable rather than the full URI), or just "value" if an entry
+    has no system. Used where every identifier matters (e.g. the Cepheid
+    Test Results screen), unlike the various single-system identifier
+    lookups elsewhere (report_identifier(), specimen_identifier(), etc.)
+    that pick out one specific one by a known system."""
+    if not resource:
+        return []
+    entries = []
+    for ident in resource.get("identifier", []):
+        value = ident.get("value")
+        if not value:
+            continue
+        system = ident.get("system")
+        if system:
+            label = system.rstrip("/").rsplit("/", 1)[-1]
+            entries.append(f"{value} ({label})")
+        else:
+            entries.append(value)
+    return entries
+
+
 def obs_value(obs):
     """Pull whichever value[x] field is populated on an Observation."""
     if "valueQuantity" in obs:
@@ -679,6 +703,8 @@ def cepheid_results():
                 "status": report.get("status") or "—",
                 "date_reported_raw": report.get("issued") or report.get("effectiveDateTime") or "",
                 "date_reported": report.get("issued") or report.get("effectiveDateTime") or "—",
+                "last_updated": (report.get("meta") or {}).get("lastUpdated") or "—",
+                "identifiers": all_identifiers(report),
                 "patient_id": patient.get("id") if patient else None,
                 "patient_name": human_name(patient) if patient else "Unknown",
                 "order_id": order.get("id") if order else "—",

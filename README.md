@@ -141,8 +141,12 @@ active filler-order test orders.
   this server — unlike the Genomic Test Directory code (a confirmed
   system) or ctDNA (no confirmed code at all, so text-matched instead).
   System-wide, no date bound. Each report is shown with its originating
-  order (via `basedOn` → `order_for_report()`) and specimen, plus a
-  **results table built from every linked Observation's `component`
+  order (via `basedOn` → `order_for_report()`), specimen,
+  **`meta.lastUpdated`**, **every `identifier` on the report** (not just
+  the iGene one — `all_identifiers()` in `app.py`, formatted as "value
+  (label)" where label is the identifier system's last path segment, for
+  a short readable tag rather than the full system URI), and a **results
+  table built from every linked Observation's `component`
   entries** rather than the Observations' own top-level values
   (`component_rows()` in `app.py`) — this screen is specifically about
   the BCR-ABL1/ABL1-control/%IS breakdown carried as components on a
