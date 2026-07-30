@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Work orders</h1>
+  <p class="muted">
+    All active genomic test orders with <code>ServiceRequest.intent</code> =
+    "filler-order" — i.e. orders as seen from the filler/lab system's side —
+    across all patients. Same layout as the "Genomic test orders" table on a
+    patient's page, plus a Patient column since this spans multiple patients.
+  </p>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  {% macro render_order_chain(nodes, depth=0) %}
+    {% for node in nodes %}
+      <tr>
+        <td>
+          {% set p = order_patient.get(node.order.id) %}
+          {% if p and p.id %}
+            <a href="/patient/{{ p.id }}">{{ p.name }}</a>
+          {% else %}
+            {{ p.name if p else "Unknown" }}
+          {% endif %}
+        </td>
+        <td style="padding-left: {{ depth * 24 }}px">
+          {% if depth %}↳ {% endif %}{{ (node.order.code|test_directory_code) or "—" }}
+        </td>
+        <td>{{ node.order.status or "—" }}</td>
+        <td>{{ node.order.intent or "—" }}</td>
+        <td>{{ node.order.authoredOn or "—" }}</td>
+        <td>{{ order_requester.get(node.order.id, "—") }}</td>
+        <td>{{ (node.order|placer_identifier) or "—" }}</td>
+        <td>{{ (node.order|filler_identifier) or "—" }}</td>
+        <td>{{ node.order|reason_code_reference }}</td>
+        <td class="muted">{{ node.order.id }}</td>
+      </tr>
+      {{ render_order_chain(node.children, depth + 1) }}
+    {% endfor %}
+  {% endmacro %}
+
+  <h2>Active work orders ({{ orders|length }})</h2>
+  {% if orders %}
+    <table>
+      <tr>
+        <th>Patient</th><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th>
+        <th>Requested by</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>ID</th>
+      </tr>
+      {{ render_order_chain(order_chains) }}
+    </table>
+    <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
+  {% else %}
+    <p class="muted">No active filler-order test orders found.</p>
+  {% endif %}
+{% endblock %}

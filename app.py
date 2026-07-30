@@ -181,12 +181,167 @@ def patient_detail(patient_id):
     )
 
 
-@app.route("/work-orders")
-def work_orders():
+@app.route("/patient/<patient_id>/clear-down", methods=["GET", "POST"])
+def patient_clear_down(patient_id):
+    """
+    GET shows a confirmation page listing exactly what will be deleted;
+    only POST actually deletes anything (client.clear_down_patient()).
+    Deliberately not a single bare "delete" link — this is an irreversible
+    action against a live FHIR server, so it gets the same GET-confirms/
+    POST-mutates split as any other destructive control, rather than
+    firing on the first click.
+    """
+    if request.method == "POST":
+        error = None
+        result = {"deleted": [], "failed": []}
+        try:
+            result = client.clear_down_patient(patient_id)
+        except Exception as e:
+            error = str(e)
+        return render_template(
+            "patient_clear_down_result.html", patient_id=patient_id,
+            deleted=result["deleted"], failed=result["failed"], error=error,
+        )
+
+    error = None
+    orders, reports, specimens = [], [], []
+    try:
+        orders = client.lab_orders_for_patient(patient_id)
+        reports = client.lab_reports_for_patient(patient_id)
+        specimens_by_id = {}
+        for resource in orders + reports:
+            for spec in client.resolve_specimens(resource):
+                specimens_by_id[spec["id"]] = spec
+        specimens = list(specimens_by_id.values())
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "patient_clear_down_confirm.html", patient_id=patient_id,
+        orders=orders, reports=reports, specimens=specimens, error=error,
+    )
+
+
+@app.route("/admin")
+def admin():
+    """
+    Admin screen: find test/synthetic patients by NHS number range, and
+    orphaned (no-patient) ServiceRequests, each with its own destructive
+    clear-down action below. This GET only searches/lists — nothing is
+    deleted until one of the POST routes below runs.
+    """
+    error = None
+    test_patients, orphaned_orders = [], []
+    try:
+        test_patients = [
+            {
+                "id": p.get("id"),
+                "name": human_name(p),
+                "nhs_number": FhirClient.nhs_number(p) or "—",
+            }
+            for p in client.patients_in_nhs_number_ranges()
+        ]
+        orphaned_orders = [
+            {
+                "id": o.get("id"),
+                "test": FhirClient.test_directory_code(o.get("code")) or "—",
+                "status": o.get("status") or "—",
+                "authoredOn": o.get("authoredOn") or "—",
+            }
+            for o in client.orphaned_service_requests()
+        ]
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin.html", test_patients=test_patients, orphaned_orders=orphaned_orders, error=error,
+    )
+
+
+@app.route("/admin/patients/confirm", methods=["POST"])
+def admin_patients_confirm():
+    """
+    Confirmation page for the selected test patients: re-resolves each one
+    and its order/report/specimen counts, so the final delete step (below)
+    shows exactly what's about to be lost per patient rather than just an
+    ID list. Nothing is deleted here — this is still a preview.
+    """
+    patient_ids = request.form.getlist("patient_id")
+    error = None
+    rows = []
+    try:
+        for pid in patient_ids:
+            patient = client.get_patient(pid)
+            orders = client.lab_orders_for_patient(pid)
+            reports = client.lab_reports_for_patient(pid)
+            specimens_by_id = {}
+            for resource in orders + reports:
+                for spec in client.resolve_specimens(resource):
+                    specimens_by_id[spec["id"]] = spec
+            rows.append({
+                "id": pid,
+                "name": human_name(patient) if patient else "Unknown",
+                "nhs_number": FhirClient.nhs_number(patient) or "—",
+                "order_count": len(orders),
+                "report_count": len(reports),
+                "specimen_count": len(specimens_by_id),
+            })
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_patients_confirm.html", rows=rows, patient_ids=patient_ids, error=error,
+    )
+
+
+@app.route("/admin/patients/clear-down", methods=["POST"])
+def admin_patients_clear_down():
+    """Actually deletes the confirmed patients (Patient record + all their
+    Specimens/DiagnosticReports/ServiceRequests) via
+    clear_down_patient_and_record() — the only route in this pair that
+    mutates anything."""
+    patient_ids = request.form.getlist("patient_id")
+    error = None
+    deleted, failed = [], []
+    try:
+        for pid in patient_ids:
+            result = client.clear_down_patient_and_record(pid)
+            deleted.extend(result["deleted"])
+            failed.extend(result["failed"])
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html", title="Patient clear-down result",
+        deleted=deleted, failed=failed, error=error,
+    )
+
+
+@app.route("/admin/orphaned/clear-down", methods=["POST"])
+def admin_orphaned_clear_down():
+    """Deletes every orphaned (no-subject) ServiceRequest found on the
+    admin screen. No separate confirm step — the admin screen's GET
+    already lists every one of them in full before this button is
+    reachable, unlike the per-patient action which re-confirms with
+    per-patient counts."""
+    error = None
+    result = {"deleted": [], "failed": []}
+    try:
+        result = client.clear_down_orphaned_service_requests()
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html", title="Orphaned ServiceRequest clear-down result",
+        deleted=result["deleted"], failed=result["failed"], error=error,
+    )
+
+
+def _order_worklist(fetch_orders):
+    """Shared logic behind /work-orders and /test-orders: fetch a flat
+    active-order list via `fetch_orders`, then build the per-order
+    requester/patient lookups and basedOn chain tree both screens render
+    the same way (only the intent filter behind `fetch_orders` and the
+    template differ)."""
     error = None
     orders, order_chains, order_requester, order_patient = [], [], {}, {}
     try:
-        orders = client.active_filler_orders()
+        orders = fetch_orders()
         for o in orders:
             order_requester[o["id"]] = client.requester_display(o)
             patient = client.patient_for(o)
@@ -197,8 +352,23 @@ def work_orders():
         order_chains = client.build_order_chains(orders)
     except Exception as e:
         error = str(e)
+    return orders, order_chains, order_requester, order_patient, error
+
+
+@app.route("/work-orders")
+def work_orders():
+    orders, order_chains, order_requester, order_patient, error = _order_worklist(client.active_filler_orders)
     return render_template(
         "work_orders.html", orders=orders, order_chains=order_chains,
+        order_requester=order_requester, order_patient=order_patient, error=error,
+    )
+
+
+@app.route("/test-orders")
+def test_orders():
+    orders, order_chains, order_requester, order_patient, error = _order_worklist(client.active_placer_orders)
+    return render_template(
+        "test_orders.html", orders=orders, order_chains=order_chains,
         order_requester=order_requester, order_patient=order_patient, error=error,
     )
 

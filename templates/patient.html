@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
   <h1>Patient {{ patient_id }}</h1>
+  <p><a class="danger-link" href="/patient/{{ patient_id }}/clear-down">🗑 Clear down patient data</a></p>
 
   {% if error %}
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>

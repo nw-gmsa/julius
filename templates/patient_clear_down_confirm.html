@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Clear down patient {{ patient_id }}</h1>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <div class="danger-box">
+    <strong>This will permanently delete the following from the FHIR server.</strong>
+    This cannot be undone — there is no "trash" or recovery step.
+    <ul>
+      <li>{{ orders|length }} genomic test order(s) (ServiceRequest)</li>
+      <li>{{ reports|length }} genomic test report(s) (DiagnosticReport)</li>
+      <li>{{ specimens|length }} specimen(s) (Specimen)</li>
+    </ul>
+    <p class="muted">
+      The Patient resource itself and any Observation results are <strong>not</strong>
+      deleted — only the orders, reports, and specimens listed above.
+    </p>
+  </div>
+
+  {% if orders %}
+    <h2>Orders to be deleted</h2>
+    <table>
+      <tr><th>Test</th><th>Status</th><th>Ordered</th><th>ID</th></tr>
+      {% for o in orders %}
+        <tr>
+          <td>{{ (o.code|test_directory_code) or "—" }}</td>
+          <td>{{ o.status or "—" }}</td>
+          <td>{{ o.authoredOn or "—" }}</td>
+          <td class="muted">{{ o.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+  {% if reports %}
+    <h2>Reports to be deleted</h2>
+    <table>
+      <tr><th>Test</th><th>Status</th><th>Date</th><th>ID</th></tr>
+      {% for r in reports %}
+        <tr>
+          <td>{{ (r.code|test_directory_code) or "—" }}</td>
+          <td>{{ r.status or "—" }}</td>
+          <td>{{ r.effectiveDateTime or r.issued or "—" }}</td>
+          <td class="muted">{{ r.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+  {% if specimens %}
+    <h2>Specimens to be deleted</h2>
+    <table>
+      <tr><th>Type</th><th>ID</th></tr>
+      {% for s in specimens %}
+        <tr>
+          <td>{{ s.type|code_text }}</td>
+          <td class="muted">{{ s.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+  <form method="post" action="/patient/{{ patient_id }}/clear-down">
+    <button type="submit" class="danger">Yes, permanently delete all of this</button>
+    &nbsp;
+    <a href="/patient/{{ patient_id }}">Cancel</a>
+  </form>
+{% endblock %}

@@ -19,10 +19,14 @@
     a { color: #2b5fad; text-decoration: none; }
     a:hover { text-decoration: underline; }
     code { background: #f2f2f2; padding: 1px 5px; border-radius: 3px; }
+    .danger-box { background: #fdecea; border: 1px solid #f5c2c0; padding: 14px 16px; border-radius: 4px; margin: 1.5rem 0; }
+    a.danger-link { color: #b3261e; font-weight: 600; }
+    button.danger { background: #b3261e; color: #fff; border: none; border-radius: 4px; }
+    button.danger:hover { background: #8f1e18; }
   </style>
 </head>
 <body>
-  <p><a href="/">&larr; FHIR Lab Explorer</a> &nbsp;|&nbsp; <a href="/stats">Daily stats</a> &nbsp;|&nbsp; <a href="/ctdna">ctDNA summary</a></p>
+  <p><a href="/">&larr; FHIR Lab Explorer</a> &nbsp;|&nbsp; <a href="/stats">Daily stats</a> &nbsp;|&nbsp; <a href="/ctdna">ctDNA summary</a> &nbsp;|&nbsp; <a href="/work-orders">Work orders</a> &nbsp;|&nbsp; <a href="/test-orders">Test orders</a> &nbsp;|&nbsp; <a href="/admin" class="danger-link">Admin</a></p>
   {% block content %}{% endblock %}
 </body>
 </html>

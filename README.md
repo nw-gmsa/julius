@@ -44,9 +44,10 @@ restarting the app) reuse the cached files.
 Then open **http://localhost:5050**. Search by patient name, NHS
 number, or FHIR patient ID, then click through to see that patient's
 genomic test orders and reports. Use the **Daily stats** link for a
-day-by-day breakdown of orders/reports across all patients, or the
+day-by-day breakdown of orders/reports across all patients, the
 **ctDNA summary** link for a cross-patient list of ctDNA order/result
-turnaround.
+turnaround, or the **Work orders** link for a cross-patient worklist of
+active filler-order test orders.
 
 ## What's actually happening
 
@@ -132,6 +133,66 @@ turnaround.
   `ServiceRequest` first and falling back to the linked `DiagnosticReport`,
   since it's not confirmed which resource actually carries it on a given
   server.
+- **Work orders** (`/work-orders`) is a cross-patient worklist of active
+  test orders — `ServiceRequest` with `intent=filler-order` and
+  `status=active`, system-wide (`active_filler_orders()`), i.e. orders as
+  seen from the filler/lab system's side rather than the requesting
+  system's. Same table layout and `basedOn` chain rendering
+  (`build_order_chains()`) as a patient page's "Genomic test orders" table,
+  plus a Patient column since it spans multiple patients. First version —
+  no filtering/date range yet, and no splitting by organisation the way
+  `/ctdna` does.
+- **Test orders** (`/test-orders`) is the placer-side counterpart to Work
+  orders — same screen, same `active_filler_orders()`/`active_placer_orders()`
+  query shape (both built on a shared `_active_orders_with_intent()`), but
+  filters `ServiceRequest.intent` to "order" or "original-order" instead of
+  "filler-order". The two intent values are joined into one comma-separated
+  search param (`intent=order,original-order`) for FHIR's OR-within-a-param
+  semantics — a repeated `intent=` parameter name would mean AND instead,
+  which no single order's one `intent` value could ever satisfy.
+- **Clear down patient data** (`/patient/<id>/clear-down`) — a **destructive,
+  irreversible** button on the patient page that deletes every Specimen,
+  DiagnosticReport, and ServiceRequest for that patient from the FHIR server
+  (`clear_down_patient()`). Meant for resetting a test/demo patient between
+  runs, not for real clinical records. `GET` shows a confirmation page
+  listing exactly what will be deleted (counts + a table of each
+  order/report/specimen); only `POST` (the confirm button's form) actually
+  deletes anything, so a plain link/crawler/back-button can't trigger it by
+  accident. Reports and orders are deleted before specimens (in case a
+  server enforces referential integrity — unverified either way). Continues
+  past individual failures and reports a `{"deleted": [...], "failed":
+  [...]}` breakdown rather than stopping at the first one, since a partial
+  clear-down is still useful to see. **This route has no authentication or
+  CSRF protection** (matching the rest of this app, which has none either),
+  so don't expose this app beyond a trusted network/test environment if
+  this button is enabled.
+- **Admin screen** (`/admin`) — another **destructive, irreversible** area,
+  this time bulk/system-wide rather than per-patient:
+  - **Test patients by NHS number range**: `patients_in_nhs_number_ranges()`
+    fetches every Patient system-wide (FHIR identifier search can't do
+    numeric ranges, so this filters client-side) and flags anyone whose NHS
+    number falls in the conventional synthetic/test ranges
+    400,000,000–499,999,999 or 600,000,000–799,999,999
+    (`FhirClient.NHS_NUMBER_TEST_RANGES`). You tick which ones to remove;
+    a confirm step re-resolves each selected patient's order/report/
+    specimen counts before the final delete, which — unlike the per-patient
+    clear-down button above — also deletes **the Patient resource itself**
+    (`clear_down_patient_and_record()`), since fully purging synthetic test
+    patients is the point here.
+  - **Orphaned ServiceRequests**: `orphaned_service_requests()` finds every
+    `ServiceRequest` with no `subject` reference at all (tries the
+    `subject:missing=true` search modifier first, falling back to fetching
+    everything and filtering client-side if that modifier isn't supported —
+    unverified against this server). No per-row selection — it's an
+    all-or-nothing "delete every orphan found" action
+    (`clear_down_orphaned_service_requests()`), with the full list already
+    shown on the same page as the delete button (no separate confirm step,
+    since nothing there identifies a specific patient the way the patient
+    clear-down does).
+  - Same safety pattern as the per-patient clear-down: `GET` only
+    searches/lists, `POST` is the only thing that deletes. **No auth/CSRF
+    protection** here either — same caveat as above, more so given the
+    blast radius (multiple patients, or every orphaned order, in one go).
 - **Report PDFs & variant extraction** — `presentedForm.url` points at a
   **FHIR Binary resource** (e.g. `Binary/abc123`), not a static file.
   `fetch_attachment_bytes()` requests it as `application/fhir+json` (which

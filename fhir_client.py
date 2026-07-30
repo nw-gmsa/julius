@@ -68,6 +68,26 @@ class FhirClient:
         resp.raise_for_status()
         return resp.json()
 
+    def _delete(self, path):
+        """DELETE a single resource by relative path (e.g.
+        "ServiceRequest/123"). Returns True if the resource is gone
+        afterwards (a successful delete, or a 404 — already gone counts as
+        cleared), False on any other failure. Never raises: a clear-down
+        should keep going and report what it could/couldn't delete rather
+        than aborting at the first failure."""
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        try:
+            resp = requests.delete(
+                url, headers=self._headers(),
+                auth=self._auth(), verify=self.verify_ssl, timeout=15,
+            )
+            if resp.status_code == 404:
+                return True
+            resp.raise_for_status()
+            return True
+        except requests.RequestException:
+            return False
+
     @staticmethod
     def _entries(bundle):
         """Pull resources out of a FHIR Bundle, ignoring missing/empty ones."""
@@ -295,16 +315,23 @@ class FhirClient:
                 roots.append(nodes[oid])
         return roots
 
-    def active_filler_orders(self):
+    def _active_orders_with_intent(self, intent):
         """
-        All active genomic test orders (ServiceRequest) with
-        `intent=filler-order` — i.e. orders as seen from the filler/lab
-        system's side, as opposed to a placer/requesting-system order —
-        system-wide, for the work order screen. Not scoped to one patient,
-        so each order's specimen/patient/requester come back in the same
-        query via `_include` (same shape as ctdna_orders()), and results
-        paginate up to `_search_all_split`'s default cap (1,000 records) —
-        see README for what to do if that's ever hit.
+        Shared implementation behind active_filler_orders()/
+        active_placer_orders(): active genomic test orders (ServiceRequest)
+        whose `intent` matches, system-wide, for the work orders/test
+        orders screens. `intent` is a single value, or several comma-joined
+        into one string for FHIR search's OR semantics — a repeated
+        `intent=` *parameter name* means AND instead (as used elsewhere in
+        this file for date ranges), which no single resource's one `intent`
+        value could ever satisfy, so multiple intents must go in one
+        comma-joined param, not a list.
+
+        Not scoped to one patient, so each order's specimen/patient/
+        requester come back in the same query via `_include` (same shape
+        as ctdna_orders()), and results paginate up to
+        `_search_all_split`'s default cap (1,000 records) — see README for
+        what to do if that's ever hit.
 
         Like ctdna_orders(), orders are identified by `resourceType` across
         `matches + included` combined rather than by trusting
@@ -312,7 +339,7 @@ class FhirClient:
         real bug this pattern fixes on servers that don't reliably tag it).
         """
         base_params = {
-            "intent": "filler-order",
+            "intent": intent,
             "status": "active",
             "_count": 100,
             "_include": ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"],
@@ -332,6 +359,20 @@ class FhirClient:
             if o.get("resourceType") == "ServiceRequest" and o.get("id")
         }
         return list(orders_by_id.values())
+
+    def active_filler_orders(self):
+        """All active genomic test orders with `intent=filler-order` — i.e.
+        orders as seen from the filler/lab system's side. Used by the work
+        orders screen. See _active_orders_with_intent()."""
+        return self._active_orders_with_intent("filler-order")
+
+    def active_placer_orders(self):
+        """All active genomic test orders with `intent` of "order" or
+        "original-order" — i.e. orders as seen from the placer/requesting
+        system's side, as opposed to active_filler_orders()'s filler-order
+        orders. Used by the test orders screen. See
+        _active_orders_with_intent()."""
+        return self._active_orders_with_intent("order,original-order")
 
     # ---- Genomic test reports (DiagnosticReport + Observation) --------
 
@@ -1183,6 +1224,140 @@ class FhirClient:
             if spec:
                 specimens.append(spec)
         return specimens
+
+    # ---- Patient data clear-down (destructive) -------------------------
+
+    def clear_down_patient(self, patient_id):
+        """
+        DELETE every Specimen, DiagnosticReport, and ServiceRequest
+        resource for a patient from the FHIR server — irreversible. Meant
+        for resetting a test/demo patient's genomic test data between runs,
+        not for use against real clinical records. Patient and Observation
+        resources are left alone — only the three resource types the
+        clear-down button is documented as deleting are touched.
+
+        Deletes reports and orders before specimens, on the theory that a
+        server enforcing referential integrity is more likely to reject
+        deleting a Specimen still referenced by a live DiagnosticReport/
+        ServiceRequest than the reverse — FHIR doesn't mandate this
+        ordering though, so a real server's behaviour here is unverified.
+
+        Returns {"deleted": [...], "failed": [...]}, each a list of
+        "ResourceType/id" strings, so the caller can show exactly what
+        happened rather than a single pass/fail flag — a partial
+        clear-down (e.g. one order the server refuses to delete) is still
+        useful information, not a reason to hide everything else that did
+        get deleted.
+        """
+        orders = self.lab_orders_for_patient(patient_id)
+        reports = self.lab_reports_for_patient(patient_id)
+
+        specimens_by_id = {}
+        for resource in orders + reports:
+            for spec in self.resolve_specimens(resource):
+                if spec.get("id"):
+                    specimens_by_id[spec["id"]] = spec
+
+        deleted, failed = [], []
+
+        def attempt(ref):
+            (deleted if self._delete(ref) else failed).append(ref)
+
+        for r in reports:
+            if r.get("id"):
+                attempt(f"DiagnosticReport/{r['id']}")
+        for o in orders:
+            if o.get("id"):
+                attempt(f"ServiceRequest/{o['id']}")
+        for spec_id in specimens_by_id:
+            attempt(f"Specimen/{spec_id}")
+
+        return {"deleted": deleted, "failed": failed}
+
+    def clear_down_patient_and_record(self, patient_id):
+        """
+        Like clear_down_patient(), but also deletes the Patient resource
+        itself afterwards — used by the admin screen's bulk test-patient
+        clear-down, where (unlike the per-patient "Clear down patient
+        data" button on the patient page) removing the Patient record too
+        is exactly the point: purging synthetic/test patients entirely,
+        not just their genomic test data.
+        """
+        result = self.clear_down_patient(patient_id)
+        ref = f"Patient/{patient_id}"
+        (result["deleted"] if self._delete(ref) else result["failed"]).append(ref)
+        return result
+
+    #: Inclusive (low, high) integer ranges — parsed from the NHS number
+    #: identifier value — conventionally reserved for synthetic/test
+    #: patients rather than real ones: "4xx" (400,000,000-499,999,999) and
+    #: "6xx"/"7xx" (600,000,000-799,999,999). Used by the admin screen to
+    #: find test patients to purge; adjust here if your environment uses
+    #: different test-number conventions.
+    NHS_NUMBER_TEST_RANGES = [
+        (400_000_000, 499_999_999),
+        (600_000_000, 799_999_999),
+    ]
+
+    def patients_in_nhs_number_ranges(self, ranges=None):
+        """
+        Every Patient resource system-wide whose NHS number identifier
+        value (see nhs_number()) falls within any of `ranges` (default
+        NHS_NUMBER_TEST_RANGES) — used by the admin screen to find test/
+        synthetic patients to purge. FHIR identifier search is exact-match
+        only (no numeric range support), so this fetches every Patient
+        system-wide (paginated via _search_all, same 1,000-record cap as
+        other system-wide queries in this file) and filters client-side.
+        Non-digit characters (spaces, etc.) are stripped before parsing the
+        NHS number to an int, so formatting doesn't affect matching.
+        """
+        ranges = ranges or self.NHS_NUMBER_TEST_RANGES
+        patients = self._search_all("Patient", {"_count": 100})
+        matches = []
+        for patient in patients:
+            nhs = self.nhs_number(patient)
+            if not nhs:
+                continue
+            digits = "".join(ch for ch in nhs if ch.isdigit())
+            if not digits:
+                continue
+            value = int(digits)
+            if any(low <= value <= high for low, high in ranges):
+                matches.append(patient)
+        return matches
+
+    def orphaned_service_requests(self):
+        """
+        Every ServiceRequest resource system-wide with no `subject`
+        reference at all — i.e. not associated with any patient — used by
+        the admin screen's orphaned-order clear-down. Tries the standard
+        `subject:missing=true` search modifier first; not every FHIR
+        server supports `:missing` (unverified against this one — see
+        README), so this falls back to fetching every ServiceRequest
+        system-wide (paginated) and filtering client-side on an absent
+        `subject` if the modifier search comes back empty.
+        """
+        try:
+            orders = self._search_all("ServiceRequest", {"subject:missing": "true", "_count": 100})
+            if orders:
+                return [o for o in orders if not o.get("subject")]
+        except requests.HTTPError:
+            pass
+        orders = self._search_all("ServiceRequest", {"_count": 100})
+        return [o for o in orders if not o.get("subject")]
+
+    def clear_down_orphaned_service_requests(self):
+        """DELETE every ServiceRequest with no `subject` reference (see
+        orphaned_service_requests()). Returns {"deleted": [...], "failed":
+        [...]} like clear_down_patient()."""
+        orders = self.orphaned_service_requests()
+        deleted, failed = [], []
+        for o in orders:
+            if not o.get("id"):
+                continue
+            ref = f"ServiceRequest/{o['id']}"
+            (deleted if self._delete(ref) else failed).append(ref)
+        return {"deleted": deleted, "failed": failed}
 
     # ---- Requester resolution -----------------------------------------
 

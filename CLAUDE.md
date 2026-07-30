@@ -198,6 +198,112 @@ date, date reported, and conclusion code, one row per order.
   which resource this server actually populates it on, so both are checked
   rather than assuming one.
 
+### Work orders (`/work-orders`) & Test orders (`/test-orders`)
+
+Two cross-patient worklists sharing everything except the `intent` filter:
+Work orders shows active `ServiceRequest`s with `intent=filler-order`
+(orders as seen from the filler/lab system's side); Test orders shows
+`intent` of "order" or "original-order" (the placer/requesting system's
+side). Both call `FhirClient._active_orders_with_intent(intent)` — a single
+shared implementation — via the thin wrappers `active_filler_orders()` and
+`active_placer_orders()`. The two intent values for Test orders are
+comma-joined into one search param (`intent=order,original-order`) for
+FHIR's OR-within-a-param semantics; a repeated `intent=` *parameter name*
+means AND instead (as used elsewhere in this file for date ranges), which
+no single order's one `intent` value could ever satisfy.
+
+`app._order_worklist(fetch_orders)` is the shared route logic behind both
+`/work-orders` and `/test-orders`: it calls `fetch_orders()` (one of the
+two methods above), then builds the per-order requester/patient lookups
+and the `build_order_chains()` tree — the two routes just plug in a
+different fetch function and template.
+
+Both screens deliberately reuse the patient page's "Genomic test orders"
+table shape — same columns (Test/Status/Intent/Ordered/Requested
+by/Placer ID/Filler ID/Reason Code Ref#/ID) and the same
+`render_order_chain` macro for `basedOn` nesting — plus a Patient column
+(`order_patient` dict, built the same way `order_requester` already is)
+since these span multiple patients rather than being scoped to one.
+
+`_active_orders_with_intent()` mirrors `ctdna_orders()`'s query shape:
+`_include`s `specimen`/`patient`/`requester` (plus `_include:iterate` for
+the Practitioner/Organization behind a PractitionerRole requester), and —
+same lesson as the real bug fixed in `ctdna_orders()` — filters by
+`resourceType` across `matches + included` combined rather than trusting
+`Bundle.entry.search.mode`.
+
+First version: no date-range picker, and no splitting by organisation the
+way `/ctdna` does — flagged in README as the obvious next steps if either
+needs to scale.
+
+### Patient data clear-down (`/patient/<id>/clear-down`) — destructive
+
+Deletes every Specimen, DiagnosticReport, and ServiceRequest for a patient
+from the FHIR server. `FhirClient.clear_down_patient()` fetches the
+patient's orders/reports/specimens (reusing `lab_orders_for_patient()`/
+`lab_reports_for_patient()`/`resolve_specimens()`), then deletes reports
+and orders before specimens via `FhirClient._delete()` (a thin
+`requests.delete()` wrapper that treats a 404 as already-cleared and never
+raises — it returns `False` on any failure so the caller can keep going
+rather than aborting on the first rejected delete). Patient and Observation
+resources are deliberately left alone.
+
+**GET vs POST is the safety mechanism, not an afterthought**:
+`app.patient_clear_down()` handles both methods on the same route — `GET`
+only fetches and displays what *would* be deleted
+(`patient_clear_down_confirm.html`), `POST` (the confirm button's form)
+is the only path that calls `clear_down_patient()`
+(`patient_clear_down_result.html`). This is the correct way to build any
+delete control (a link/crawler/back-button can trigger a GET but never a
+form POST), not something layered on afterward — don't "simplify" this
+into a single bare link.
+
+This route has **no auth, no CSRF token, and no rate limiting** — same as
+every other route in this app, but worth calling out specifically here
+since this one is destructive and irreversible rather than read-only. Only
+run this app somewhere trusted if the clear-down feature is reachable.
+
+### Admin screen (`/admin`) — bulk/system-wide, destructive
+
+Two independent clear-down actions, both system-wide rather than scoped to
+one patient:
+
+- **Test patients by NHS number range** — `FhirClient.
+  patients_in_nhs_number_ranges(ranges=None)` (default
+  `NHS_NUMBER_TEST_RANGES`: 400,000,000–499,999,999 and
+  600,000,000–799,999,999, the conventional synthetic/test NHS number
+  ranges) fetches every `Patient` system-wide via `_search_all()` and
+  filters client-side by parsing `nhs_number()`'s digits to an int — FHIR
+  identifier search is exact-match only, no numeric range support.
+  `app.admin()` (GET) lists matches with checkboxes; `POST
+  /admin/patients/confirm` re-resolves each *selected* patient's
+  order/report/specimen counts (not just an ID echo) so the final page
+  shows real numbers before anything is deleted; `POST
+  /admin/patients/clear-down` is the only route that calls
+  `clear_down_patient_and_record()` — `clear_down_patient()` plus a
+  `Patient/<id>` delete, since (unlike the per-patient button above)
+  removing the Patient record itself is the whole point of this action.
+- **Orphaned ServiceRequests** — `orphaned_service_requests()` tries
+  `subject:missing=true` first, falling back to fetching every
+  `ServiceRequest` system-wide and filtering on an absent `subject`
+  client-side if that search modifier isn't supported (unverified against
+  this server). Unlike the patient action, there's no per-row selection or
+  separate confirm route — `admin()`'s GET already lists every orphan in
+  full, and `POST /admin/orphaned/clear-down` deletes all of them
+  (`clear_down_orphaned_service_requests()`) directly. The asymmetry is
+  deliberate: this action doesn't touch anything patient-identifying, so
+  the list-then-one-button flow already used for it is proportionate,
+  whereas the patient action gets the extra confirm round-trip because it
+  deletes identifiable individuals' records.
+
+Both actions share `admin_clear_down_result.html` (parametrized by
+`title`) for their result page, and both follow the same GET-lists/
+POST-mutates split as the per-patient clear-down — `admin()`'s GET and
+`admin_patients_confirm()`'s POST never call any `_delete()`-backed
+method; only `admin_patients_clear_down()` and `admin_orphaned_clear_down()`
+do. Same no-auth/no-CSRF caveat as above, more so given the larger blast
+radius (multiple patients, or every orphaned order, per click).
+
 ### Report PDFs & variant/clinical-term extraction
 
 `DiagnosticReport.presentedForm.url` points at a **FHIR Binary resource**
