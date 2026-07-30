@@ -6,15 +6,44 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
+  <h2>Patient demographics</h2>
+  {% if patient %}
+    <table>
+      <tr><th>Name</th><td>{{ patient|human_name }}</td></tr>
+      <tr><th>NHS Number</th><td>{{ nhs_number or "—" }}</td></tr>
+      <tr><th>iGene Patient ID</th><td>{{ igene_patient_id or "—" }}</td></tr>
+      <tr><th>GP</th><td>{{ general_practitioner or "—" }}</td></tr>
+      <tr><th>ICS</th><td>{{ patient_ics or "—" }}</td></tr>
+    </table>
+    <h3>Medical record numbers</h3>
+    {% if medical_record_numbers %}
+      <table>
+        <tr><th>MRN</th><th>Assigning organisation</th><th>ODS code</th></tr>
+        {% for mrn in medical_record_numbers %}
+          <tr>
+            <td>{{ mrn.value or "—" }}</td>
+            <td>{{ mrn.assigner_name or "—" }}</td>
+            <td>{{ mrn.assigner_ods or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">No medical record numbers found.</p>
+    {% endif %}
+  {% else %}
+    <p class="muted">Patient demographics unavailable.</p>
+  {% endif %}
+
   <h2>Specimens ({{ specimens|length }})</h2>
   {% if specimens %}
     <table>
-      <tr><th>Type</th><th>Date collected</th><th>Date received</th><th>ID</th></tr>
+      <tr><th>Type</th><th>Date collected</th><th>Date received</th><th>Specimen identifier</th><th>ID</th></tr>
       {% for s in specimens %}
         <tr>
           <td>{{ s.type|code_text }}</td>
           <td>{{ s|specimen_collected }}</td>
           <td>{{ s|specimen_received }}</td>
+          <td>{{ (s|specimen_identifier) or "—" }}</td>
           <td class="muted">{{ s.id }}</td>
         </tr>
       {% endfor %}
@@ -32,6 +61,8 @@
         <td>{{ node.order.status or "—" }}</td>
         <td>{{ node.order.authoredOn or "—" }}</td>
         <td>{{ order_requester.get(node.order.id, "—") }}</td>
+        <td>{{ (node.order|placer_identifier) or "—" }}</td>
+        <td>{{ (node.order|filler_identifier) or "—" }}</td>
         <td class="muted">{{ node.order.id }}</td>
       </tr>
       {{ render_order_chain(node.children, depth + 1) }}
@@ -41,7 +72,7 @@
   <h2>Genomic test orders ({{ orders|length }})</h2>
   {% if orders %}
     <table>
-      <tr><th>Test</th><th>Status</th><th>Ordered</th><th>Requested by</th><th>ID</th></tr>
+      <tr><th>Test</th><th>Status</th><th>Ordered</th><th>Requested by</th><th>Placer ID</th><th>Filler ID</th><th>ID</th></tr>
       {{ render_order_chain(order_chains) }}
     </table>
     <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
@@ -55,6 +86,7 @@
       <div class="card">
         <strong>{{ r.code|code_text }}</strong>
         <span class="muted">— {{ r.status or "—" }}, {{ r.effectiveDateTime or r.issued or "no date" }}</span>
+        <span class="muted">— Report ID: {{ (r|report_identifier) or "—" }}</span>
         {% if r.presentedForm %}
           <p>
             {% for pf in r.presentedForm %}

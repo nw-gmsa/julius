@@ -149,6 +149,81 @@ class FhirClient:
         bundle = self._get("Patient", {"name": name, "_count": 20})
         return self._entries(bundle)
 
+    def get_patient(self, patient_id):
+        """Fetch a single Patient resource by ID (used by the patient page's
+        demographics section, which needs the resource itself rather than
+        just the ID string it's routed on)."""
+        return self._get(f"Patient/{patient_id}")
+
+    #: NHS number identifier system (standard, not IG-specific).
+    NHS_NUMBER_SYSTEM = "https://fhir.nhs.uk/Id/nhs-number"
+
+    #: iGene patient identifier system (NW Genomics IG-specific).
+    IGENE_PATIENT_IDENTIFIER_SYSTEM = "https://fhir.nwgenomics.nhs.uk/Identifier/IGENE-PatientIdentifier"
+
+    #: HL7 v2-0203 identifier-type codes used on Patient.identifier: "MR"
+    #: (medical record number, one per assigning organisation) and "PI"
+    #: (patient internal identifier — used here for the iGene patient ID,
+    #: which also carries its own IG-specific system, matched alongside the
+    #: type since "PI" alone is a generic HL7 type shared by other systems).
+    MEDICAL_RECORD_NUMBER_TYPE = "MR"
+    PATIENT_IDENTIFIER_TYPE = "PI"
+
+    @classmethod
+    def nhs_number(cls, patient):
+        """The patient's NHS number (see NHS_NUMBER_SYSTEM)."""
+        return cls._identifier_value(patient, cls.NHS_NUMBER_SYSTEM)
+
+    @classmethod
+    def igene_patient_identifier(cls, patient):
+        """The iGene patient identifier — type PI, matched by its IG-specific
+        system (IGENE_PATIENT_IDENTIFIER_SYSTEM) so a differently-sourced PI
+        identifier (if any) isn't picked up by mistake."""
+        if not patient:
+            return None
+        for ident in patient.get("identifier", []):
+            if ident.get("system") != cls.IGENE_PATIENT_IDENTIFIER_SYSTEM:
+                continue
+            codings = (ident.get("type") or {}).get("coding", [])
+            if any(c.get("code") == cls.PATIENT_IDENTIFIER_TYPE for c in codings):
+                return ident.get("value")
+        return None
+
+    def medical_record_numbers(self, patient):
+        """
+        Every medical record number (HL7 v2-0203 type "MR") on a Patient, as
+        [{"value", "assigner_name", "assigner_ods"}, ...] — a patient can
+        carry more than one MRN, one per assigning organisation (e.g. a
+        separate MRN at each trust that's treated them), so this returns a
+        list rather than a single value like nhs_number()/
+        igene_patient_identifier() above.
+
+        `identifier.assigner` is a Reference, which per FHIR can point at an
+        Organization either by literal `.reference` (fetched and passed to
+        organisation_ods_code() for its ODS code) or by an inline
+        `.identifier` — a logical reference with no resource to fetch, where
+        this server puts the ODS code directly as `assigner.identifier.value`.
+        resolve_organisation_ods() checks both, since either shape is valid
+        and this server appears to use the latter.
+        """
+        results = []
+        if not patient:
+            return results
+        for ident in patient.get("identifier", []):
+            codings = (ident.get("type") or {}).get("coding", [])
+            if not any(c.get("code") == self.MEDICAL_RECORD_NUMBER_TYPE for c in codings):
+                continue
+            assigner_ref = ident.get("assigner") or {}
+            assigner = self.resolve_reference(assigner_ref) if assigner_ref else None
+            assigner_name = (assigner.get("name") if assigner else None) or assigner_ref.get("display")
+            assigner_ods = self.resolve_organisation_ods(assigner_ref)
+            results.append({
+                "value": ident.get("value"),
+                "assigner_name": assigner_name,
+                "assigner_ods": assigner_ods,
+            })
+        return results
+
     # ---- Genomic test orders (ServiceRequest) -------------------------
 
     def lab_orders_for_patient(self, patient_id):
@@ -649,6 +724,32 @@ class FhirClient:
                 return self.resolve_reference(org_ref)
         return None
 
+    def order_organisation_ods(self, order):
+        """
+        ODS code for a ServiceRequest's requesting organisation — same
+        requester chain as order_organisation_resource(), but via
+        resolve_organisation_ods() instead of organisation_ods_code() so a
+        PractitionerRole's `.organization` (unambiguously Organization-typed)
+        still yields an ODS code if it's an inline `.identifier` reference
+        rather than a literal `.reference` (see medical_record_numbers()).
+        order_organisation_resource() alone would return None in that case,
+        losing the ODS code even though it's present on the reference.
+        """
+        requester_ref = order.get("requester")
+        if not requester_ref:
+            return None
+        resource = self.resolve_reference(requester_ref)
+        if resource is None:
+            return None
+        rtype = resource.get("resourceType")
+        if rtype == "Organization":
+            return self.organisation_ods_code(resource)
+        if rtype == "PractitionerRole":
+            org_ref = resource.get("organization")
+            if org_ref:
+                return self.resolve_organisation_ods(org_ref)
+        return None
+
     #: NHS ODS (Organisation Data Service) identifier system — the standard
     #: FHIR identifier system for an NHS organisation's short ODS code (e.g.
     #: "RW3" for a trust). Not confirmed against this specific server; if an
@@ -673,11 +774,56 @@ class FhirClient:
                 return ident.get("value")
         return None
 
+    def resolve_organisation_ods(self, org_ref):
+        """
+        ODS code for an Organization reached via a Reference `org_ref`
+        (Patient.managingOrganization, PractitionerRole.organization,
+        identifier.assigner — anywhere the FHIR profile guarantees the
+        target is an Organization). Tries resolving it to a full resource
+        and reading organisation_ods_code() first; if that fails (no
+        literal `.reference`, or the server doesn't have/expose that
+        resource), falls back to the Reference's own inline `.identifier` —
+        a logical reference some servers use instead of a literal
+        `.reference`, carrying the ODS code directly as
+        `identifier.value` (first seen on identifier.assigner in
+        medical_record_numbers(); same shape can appear on any
+        Organization-typed Reference).
+
+        Only call this where the Reference is unambiguously Organization-
+        typed per the FHIR profile — for a Reference that could point at
+        several resource types (e.g. ServiceRequest.requester,
+        Patient.generalPractitioner directly), an unresolvable inline
+        `.identifier` can't be safely assumed to be an ODS code.
+        """
+        if not org_ref:
+            return None
+        ods = None
+        org = self.resolve_reference(org_ref)
+        if org:
+            ods = self.organisation_ods_code(org)
+        if not ods:
+            inline_identifier = org_ref.get("identifier") or {}
+            if not inline_identifier.get("system") or inline_identifier.get("system") == self.ODS_ORGANIZATION_CODE_SYSTEM:
+                ods = inline_identifier.get("value")
+        return ods
+
     #: iGene report identifier system (NW Genomics IG-specific) — a local
     #: cross-reference id, e.g. into the iGene LIMS, that may be carried on
     #: either the ServiceRequest or the DiagnosticReport depending on the
     #: server, hence checking both in igene_report_identifier() below.
     IGENE_REPORT_IDENTIFIER_SYSTEM = "https://fhir.nwgenomics.nhs.uk/iGene/ReportIdentifier"
+
+    #: iGene specimen identifier system (NW Genomics IG-specific), carried on
+    #: the Specimen resource's own `identifier` list.
+    SPECIMEN_IDENTIFIER_SYSTEM = "https://fhir.nwgenomics.nhs.uk/iGene/SpecimenIdentifier"
+
+    #: HL7 v2-0203 identifier-type system, used to tell a placer order number
+    #: ("PLAC", assigned by the ordering/requesting system) apart from a
+    #: filler order number ("FILL", assigned by the fulfilling/lab system) on
+    #: ServiceRequest.identifier.
+    IDENTIFIER_TYPE_SYSTEM = "http://terminology.hl7.org/CodeSystem/v2-0203"
+    PLACER_IDENTIFIER_TYPE = "PLAC"
+    FILLER_IDENTIFIER_TYPE = "FILL"
 
     @staticmethod
     def _identifier_value(resource, system):
@@ -698,6 +844,46 @@ class FhirClient:
         this IG-specific identifier."""
         return (cls._identifier_value(order, cls.IGENE_REPORT_IDENTIFIER_SYSTEM)
                 or cls._identifier_value(report, cls.IGENE_REPORT_IDENTIFIER_SYSTEM))
+
+    @classmethod
+    def report_identifier(cls, report):
+        """The iGene report identifier carried directly on a DiagnosticReport
+        (see IGENE_REPORT_IDENTIFIER_SYSTEM). Unlike igene_report_identifier()
+        above, this doesn't fall back to a linked order — used where only the
+        report itself is in scope (the patient page's report list)."""
+        return cls._identifier_value(report, cls.IGENE_REPORT_IDENTIFIER_SYSTEM)
+
+    @classmethod
+    def specimen_identifier(cls, specimen):
+        """The iGene specimen identifier (see SPECIMEN_IDENTIFIER_SYSTEM)."""
+        return cls._identifier_value(specimen, cls.SPECIMEN_IDENTIFIER_SYSTEM)
+
+    @staticmethod
+    def _identifier_by_type(resource, type_code):
+        """Identifier value from `resource.identifier` whose `.type.coding`
+        includes the given v2-0203 code (see IDENTIFIER_TYPE_SYSTEM/
+        PLACER_IDENTIFIER_TYPE/FILLER_IDENTIFIER_TYPE) — the standard FHIR
+        way of distinguishing a placer order number from a filler order
+        number on the same ServiceRequest."""
+        if not resource:
+            return None
+        for ident in resource.get("identifier", []):
+            codings = (ident.get("type") or {}).get("coding", [])
+            if any(c.get("code") == type_code for c in codings):
+                return ident.get("value")
+        return None
+
+    @classmethod
+    def placer_identifier(cls, order):
+        """Placer order number (HL7 v2-0203 code "PLAC") — the identifier
+        assigned by the ordering/requesting system."""
+        return cls._identifier_by_type(order, cls.PLACER_IDENTIFIER_TYPE)
+
+    @classmethod
+    def filler_identifier(cls, order):
+        """Filler order number (HL7 v2-0203 code "FILL") — the identifier
+        assigned by the fulfilling/lab system."""
+        return cls._identifier_by_type(order, cls.FILLER_IDENTIFIER_TYPE)
 
     def order_indication(self, order):
         """Genomic disease / clinical indication for a ServiceRequest, from
@@ -758,6 +944,37 @@ class FhirClient:
             return org_ref.get("display")
         return org.get("name") or org_ref.get("display")
 
+    @staticmethod
+    def _name_with_ods(name, ods):
+        """Combine a resolved name and ODS code as "Name (ODS)", falling
+        back to whichever one is available if only one resolved — so an ODS
+        code still displays even when the organisation's name couldn't be
+        resolved (or vice versa)."""
+        if name and ods:
+            return f"{name} ({ods})"
+        return name or ods
+
+    def patient_ics_display(self, patient):
+        """
+        ICS name with its ODS code appended (see organisation_ods_code()),
+        e.g. "NHS Greater Manchester ICB (14L)", for on-screen display.
+        managingOrganization is unambiguously an Organization reference, so
+        resolve_organisation_ods() can fall back to an inline
+        `.identifier` (see medical_record_numbers()) if it's not a literal
+        `.reference`. patient_ics() above stays name-only, since it also
+        doubles as a /stats grouping key where appending the ODS code would
+        fragment the aggregation.
+        """
+        if not patient:
+            return None
+        org_ref = patient.get("managingOrganization")
+        if not org_ref:
+            return None
+        org = self.resolve_reference(org_ref)
+        name = (org.get("name") if org else None) or org_ref.get("display")
+        ods = self.resolve_organisation_ods(org_ref)
+        return self._name_with_ods(name, ods)
+
     _COUNTRY_CODES = {"X24": "England", "W00": "Wales"}
 
     @classmethod
@@ -798,6 +1015,62 @@ class FhirClient:
             if code:
                 return self._COUNTRY_CODES[code]
         return None
+
+    def general_practitioner_display(self, patient):
+        """
+        Display string for Patient.generalPractitioner — a list of
+        references to Practitioner | Organization | PractitionerRole per
+        FHIR R4 (the same reference shape as ServiceRequest.requester,
+        resolved the same way as requester_display()), each with the GP
+        practice's ODS code appended where one resolves — either the
+        reference itself if it's an Organization, or a PractitionerRole's
+        `.organization` (both unambiguously Organization-typed, so
+        resolve_organisation_ods() can fall back to an inline `.identifier`
+        — see medical_record_numbers() — if it's not a literal
+        `.reference`). A bare Practitioner reference has no organisation to
+        pull an ODS code from, so shows name only. _name_with_ods() means an
+        ODS code still shows even if the practice name itself didn't
+        resolve. Joined with "; " since a patient can have more than one GP
+        on record.
+        """
+        if not patient:
+            return None
+        names = []
+        for ref in patient.get("generalPractitioner", []):
+            resource = self.resolve_reference(ref)
+            org_ref_for_ods = None
+            if resource is None:
+                name = ref.get("display") or ref.get("reference")
+            else:
+                rtype = resource.get("resourceType")
+                if rtype == "Practitioner":
+                    name = self._practitioner_name(resource) or ref.get("display")
+                elif rtype == "Organization":
+                    name = resource.get("name") or ref.get("display")
+                    org_ref_for_ods = ref
+                elif rtype == "PractitionerRole":
+                    practitioner_name = None
+                    practitioner_ref = resource.get("practitioner")
+                    if practitioner_ref:
+                        practitioner = self.resolve_reference(practitioner_ref)
+                        if practitioner:
+                            practitioner_name = self._practitioner_name(practitioner)
+                    org_name = None
+                    org_ref = resource.get("organization")
+                    if org_ref:
+                        org = self.resolve_reference(org_ref)
+                        if org:
+                            org_name = org.get("name")
+                        org_ref_for_ods = org_ref
+                    name = (f"{practitioner_name} ({org_name})" if practitioner_name and org_name
+                            else practitioner_name or org_name or ref.get("display"))
+                else:
+                    name = ref.get("display") or resource.get("id")
+            ods = self.resolve_organisation_ods(org_ref_for_ods) if org_ref_for_ods else None
+            entry = self._name_with_ods(name, ods)
+            if entry:
+                names.append(entry)
+        return "; ".join(names) if names else None
 
     # ---- Specimens -------------------------------------------------
 

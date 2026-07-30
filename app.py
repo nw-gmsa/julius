@@ -76,6 +76,10 @@ app.jinja_env.filters["code_text"] = code_text
 app.jinja_env.filters["obs_value"] = obs_value
 app.jinja_env.filters["specimen_collected"] = specimen_collected
 app.jinja_env.filters["specimen_received"] = specimen_received
+app.jinja_env.filters["specimen_identifier"] = FhirClient.specimen_identifier
+app.jinja_env.filters["placer_identifier"] = FhirClient.placer_identifier
+app.jinja_env.filters["filler_identifier"] = FhirClient.filler_identifier
+app.jinja_env.filters["report_identifier"] = FhirClient.report_identifier
 
 
 @app.route("/", methods=["GET"])
@@ -108,9 +112,13 @@ def search():
 @app.route("/patient/<patient_id>")
 def patient_detail(patient_id):
     error = None
+    patient = None
     orders, reports, report_obs, order_requester = [], [], {}, {}
     specimens_by_id = {}
+    medical_record_numbers = []
     try:
+        patient = client.get_patient(patient_id)
+        medical_record_numbers = client.medical_record_numbers(patient)
         orders = client.lab_orders_for_patient(patient_id)
         for o in orders:
             order_requester[o["id"]] = client.requester_display(o)
@@ -126,7 +134,12 @@ def patient_detail(patient_id):
     specimens = list(specimens_by_id.values())
     order_chains = client.build_order_chains(orders)
     return render_template(
-        "patient.html", patient_id=patient_id,
+        "patient.html", patient_id=patient_id, patient=patient,
+        nhs_number=FhirClient.nhs_number(patient),
+        igene_patient_id=FhirClient.igene_patient_identifier(patient),
+        medical_record_numbers=medical_record_numbers,
+        general_practitioner=client.general_practitioner_display(patient),
+        patient_ics=client.patient_ics_display(patient),
         orders=orders, order_chains=order_chains,
         reports=reports, report_obs=report_obs,
         order_requester=order_requester, specimens=specimens, error=error,
@@ -293,7 +306,7 @@ def ctdna_summary():
 
             org_resource = client.order_organisation_resource(order)
             org_name = (org_resource.get("name") if org_resource else None) or client.order_organisation(order) or "Unknown"
-            ods_code = client.organisation_ods_code(org_resource) if org_resource else None
+            ods_code = client.order_organisation_ods(order)
             organisation = f"{org_name} ({ods_code})" if ods_code else org_name
 
             rows.append({
