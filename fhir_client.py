@@ -1483,6 +1483,126 @@ class FhirClient:
         return self._delete_resources(
             "DiagnosticReport", self.bcrabl_reports_without_components(reports))
 
+    def bcrabl_reports_without_identifiers(self, reports):
+        """Filters `reports` (e.g. from bcrabl_reports()) down to the ones
+        with no `identifier` at all. Used by the Cepheid Test Results
+        screen's "delete reports with no identifiers" action."""
+        return [r for r in reports if not r.get("identifier")]
+
+    def clear_down_bcrabl_reports_without_identifiers(self, reports):
+        """
+        DELETE every report in `reports` with no identifier at all (see
+        bcrabl_reports_without_identifiers()), plus its associated
+        Specimen — resolved the same way the Cepheid screen displays it
+        (the report's own `specimen`, falling back to the originating
+        order's if the report has none). A specimen is only deleted if
+        none of the *other* reports in `reports` (the ones being kept)
+        also reference it, so cleaning up a no-identifier report can't
+        break a specimen a real report still relies on.
+
+        Returns {"deleted": [...], "failed": [...]} like
+        clear_down_patient().
+        """
+        targets = self.bcrabl_reports_without_identifiers(reports)
+        target_ids = {r["id"] for r in targets if r.get("id")}
+
+        def specimens_for(report):
+            order = self.order_for_report(report)
+            specimens = self.resolve_specimens(report)
+            if not specimens and order:
+                specimens = self.resolve_specimens(order)
+            return specimens
+
+        kept_specimen_ids = set()
+        for r in reports:
+            if r.get("id") in target_ids:
+                continue
+            kept_specimen_ids.update(s["id"] for s in specimens_for(r) if s.get("id"))
+
+        specimens_to_delete = {}
+        for r in targets:
+            for s in specimens_for(r):
+                if s.get("id") and s["id"] not in kept_specimen_ids:
+                    specimens_to_delete[s["id"]] = s
+
+        result = self._delete_resources("DiagnosticReport", targets)
+        specimen_result = self._delete_resources("Specimen", list(specimens_to_delete.values()))
+        result["deleted"].extend(specimen_result["deleted"])
+        result["failed"].extend(specimen_result["failed"])
+        return result
+
+    @staticmethod
+    def _identifier_keys(resource):
+        """(system, value) tuples for every identifier on a resource —
+        used as a grouping key for duplicate detection (see
+        duplicate_bcrabl_reports()). Entries with no value are skipped
+        (nothing to match on)."""
+        return {
+            (ident.get("system"), ident.get("value"))
+            for ident in resource.get("identifier", []) if ident.get("value")
+        }
+
+    def duplicate_bcrabl_reports(self, reports):
+        """
+        Groups `reports` (e.g. from bcrabl_reports()) into clusters that
+        share at least one identical identifier (system+value pair) — via
+        union-find, so reports connected transitively through different
+        shared identifiers still end up in one cluster. Reports with no
+        identifiers at all never cluster with anything here (see
+        bcrabl_reports_without_identifiers() for those — deliberately a
+        separate action, since "no identifiers" isn't the same claim as
+        "duplicate of a specific other report").
+
+        Within each cluster of 2+ reports, the most-recently-updated one
+        (by `meta.lastUpdated`, falling back to `issued`/
+        `effectiveDateTime`) is kept; every other report in that cluster
+        is returned as a duplicate to delete. Used by the Cepheid Test
+        Results screen's "delete duplicate reports" action.
+        """
+        reports_by_id = {r["id"]: r for r in reports if r.get("id")}
+        parent = {rid: rid for rid in reports_by_id}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        key_to_first_id = {}
+        for rid, r in reports_by_id.items():
+            for key in self._identifier_keys(r):
+                if key in key_to_first_id:
+                    union(rid, key_to_first_id[key])
+                else:
+                    key_to_first_id[key] = rid
+
+        clusters = {}
+        for rid in reports_by_id:
+            clusters.setdefault(find(rid), []).append(reports_by_id[rid])
+
+        def sort_key(r):
+            return (r.get("meta") or {}).get("lastUpdated") or r.get("issued") or r.get("effectiveDateTime") or ""
+
+        duplicates = []
+        for cluster in clusters.values():
+            if len(cluster) < 2:
+                continue
+            cluster.sort(key=sort_key, reverse=True)  # latest first
+            duplicates.extend(cluster[1:])  # everything except the latest
+        return duplicates
+
+    def clear_down_duplicate_bcrabl_reports(self, reports):
+        """DELETE every duplicate report found by
+        duplicate_bcrabl_reports() (the latest in each identifier-sharing
+        cluster is kept). Returns {"deleted": [...], "failed": [...]}
+        like clear_down_patient()."""
+        return self._delete_resources("DiagnosticReport", self.duplicate_bcrabl_reports(reports))
+
     # ---- Requester resolution -----------------------------------------
 
     def resolve_reference(self, ref):

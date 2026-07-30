@@ -684,8 +684,12 @@ def cepheid_results():
     """
     error = None
     rows = []
+    no_identifier_count = 0
+    duplicate_count = 0
     try:
         reports = client.bcrabl_reports()
+        no_identifier_count = len(client.bcrabl_reports_without_identifiers(reports))
+        duplicate_count = len(client.duplicate_bcrabl_reports(reports))
         for report in reports:
             order = client.order_for_report(report)
             patient = client.patient_for(report) or (client.patient_for(order) if order else None)
@@ -723,7 +727,10 @@ def cepheid_results():
     no_component_results_count = sum(1 for r in rows if not r["components"])
     return render_template(
         "cepheid_results.html", rows=rows,
-        no_component_results_count=no_component_results_count, error=error,
+        no_component_results_count=no_component_results_count,
+        no_identifier_count=no_identifier_count,
+        duplicate_count=duplicate_count,
+        error=error,
     )
 
 
@@ -751,6 +758,56 @@ def cepheid_results_clear_down_no_components():
     return render_template(
         "admin_clear_down_result.html",
         title="BCRABL reports without component results — clear-down result",
+        back_url="/cepheid-results", back_label="Back to Cepheid Test Results",
+        deleted=result["deleted"], failed=result["failed"], error=error,
+    )
+
+
+@app.route("/cepheid-results/clear-down-no-identifiers", methods=["POST"])
+def cepheid_results_clear_down_no_identifiers():
+    """
+    Deletes every currently-listed BCRABL DiagnosticReport with no
+    identifier at all, plus its associated Specimen
+    (client.clear_down_bcrabl_reports_without_identifiers()) — a specimen
+    is only deleted if no *other* BCRABL report still references it.
+    Single POST, no separate confirm route — same reasoning as the other
+    mechanical clear-downs on this screen.
+    """
+    error = None
+    result = {"deleted": [], "failed": []}
+    try:
+        reports = client.bcrabl_reports()
+        result = client.clear_down_bcrabl_reports_without_identifiers(reports)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html",
+        title="BCRABL reports without identifiers — clear-down result",
+        back_url="/cepheid-results", back_label="Back to Cepheid Test Results",
+        deleted=result["deleted"], failed=result["failed"], error=error,
+    )
+
+
+@app.route("/cepheid-results/clear-down-duplicates", methods=["POST"])
+def cepheid_results_clear_down_duplicates():
+    """
+    Deletes duplicate BCRABL DiagnosticReports — ones sharing an identical
+    identifier with another report in the list — keeping the
+    most-recently-updated report in each duplicate group
+    (client.clear_down_duplicate_bcrabl_reports()). Single POST, no
+    separate confirm route — same reasoning as the other mechanical
+    clear-downs on this screen.
+    """
+    error = None
+    result = {"deleted": [], "failed": []}
+    try:
+        reports = client.bcrabl_reports()
+        result = client.clear_down_duplicate_bcrabl_reports(reports)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html",
+        title="Duplicate BCRABL reports — clear-down result",
         back_url="/cepheid-results", back_label="Back to Cepheid Test Results",
         deleted=result["deleted"], failed=result["failed"], error=error,
     )
