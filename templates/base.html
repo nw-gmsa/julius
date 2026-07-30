@@ -23,10 +23,14 @@
     a.danger-link { color: #b3261e; font-weight: 600; }
     button.danger { background: #b3261e; color: #fff; border: none; border-radius: 4px; }
     button.danger:hover { background: #8f1e18; }
+    .badge { display: inline-block; font-size: .72rem; padding: 1px 6px; border-radius: 3px;
+             background: #fff3cd; color: #7a5b00; border: 1px solid #ffe08a; margin-left: 6px; }
   </style>
 </head>
 <body>
-  <p><a href="/">&larr; FHIR Lab Explorer</a> &nbsp;|&nbsp; <a href="/stats">Daily stats</a> &nbsp;|&nbsp; <a href="/ctdna">ctDNA summary</a> &nbsp;|&nbsp; <a href="/work-orders">Work orders</a> &nbsp;|&nbsp; <a href="/test-orders">Test orders</a> &nbsp;|&nbsp; <a href="/admin" class="danger-link">Admin</a></p>
+  <!-- /admin is intentionally not linked from this nav (not hidden behind auth,
+       just not surfaced) — reachable directly at /admin for whoever knows to look. -->
+  <p><a href="/">&larr; FHIR Lab Explorer</a> &nbsp;|&nbsp; <a href="/stats">Daily stats</a> &nbsp;|&nbsp; <a href="/ctdna">ctDNA summary</a> &nbsp;|&nbsp; <a href="/work-orders">Work orders</a> &nbsp;|&nbsp; <a href="/test-orders">Test orders</a> &nbsp;|&nbsp; <a href="/cepheid-results">Cepheid Test Results</a></p>
   {% block content %}{% endblock %}
 </body>
 </html>

@@ -414,6 +414,73 @@ class FhirClient:
         when serving a PDF, since we don't keep search results in server state)."""
         return self._get(f"DiagnosticReport/{report_id}")
 
+    #: Cepheid GeneXpert BCR-ABL1 quantitative monitoring test code. Unlike
+    #: ctDNA (no confirmed code at all, so text-matched) or the Genomic Test
+    #: Directory code (a confirmed system, so system-matched), this is a
+    #: known exact code value but not a confirmed system, so
+    #: _is_bcrabl_report() matches by `coding[].code` regardless of system.
+    BCRABL_CODE = "BCRABL"
+
+    @classmethod
+    def _is_bcrabl_report(cls, report):
+        codings = (report.get("code") or {}).get("coding", [])
+        return any(c.get("code") == cls.BCRABL_CODE for c in codings)
+
+    def bcrabl_reports(self):
+        """
+        All DiagnosticReport resources system-wide with a BCRABL code (see
+        _is_bcrabl_report) — the Cepheid Test Results screen. No date
+        bound, paginated like other system-wide queries in this file (see
+        README for the pagination cap).
+
+        Each report's specimen/patient/result(Observation) come back in
+        the same query via `_include`, along with the originating
+        ServiceRequest via `_include=DiagnosticReport:based-on` (forward
+        include — the report references the order, so no revinclude is
+        needed here, unlike ctdna_orders() which searches from the
+        ServiceRequest side) and that order's own specimen via
+        `_include:iterate`, in case a server attaches specimen there
+        instead of on the report.
+
+        Like ctdna_orders()/active_filler_orders(), reports are identified
+        by `resourceType` across `matches + included` combined rather than
+        by trusting `Bundle.entry.search.mode`.
+        """
+        base_params = {
+            "_count": 100,
+            "_include": [
+                "DiagnosticReport:specimen", "DiagnosticReport:patient",
+                "DiagnosticReport:result", "DiagnosticReport:based-on",
+            ],
+            "_include:iterate": ["ServiceRequest:specimen"],
+        }
+        try:
+            matches, included = self._search_all_split(
+                "DiagnosticReport", {**base_params, "category": DIAGNOSTIC_REPORT_CATEGORY})
+        except requests.HTTPError:
+            matches, included = [], []
+        if not matches:
+            matches, included = self._search_all_split("DiagnosticReport", base_params)
+        self._cache_included(matches + included)
+
+        reports_by_id = {
+            r["id"]: r for r in (matches + included)
+            if r.get("resourceType") == "DiagnosticReport" and r.get("id") and self._is_bcrabl_report(r)
+        }
+        return list(reports_by_id.values())
+
+    def order_for_report(self, report):
+        """Resolve the ServiceRequest a DiagnosticReport's `basedOn` points
+        at, if any (basedOn can reference other resource types per spec,
+        but this IG only ever uses it for the originating ServiceRequest).
+        Returns None if there's no basedOn, or it doesn't resolve to a
+        ServiceRequest."""
+        for ref in report.get("basedOn", []):
+            resource = self.resolve_reference(ref)
+            if resource and resource.get("resourceType") == "ServiceRequest":
+                return resource
+        return None
+
     @staticmethod
     def get_presented_form(report, index=0):
         forms = report.get("presentedForm", [])
@@ -1299,32 +1366,38 @@ class FhirClient:
         (600_000_000, 799_999_999),
     ]
 
+    @classmethod
+    def nhs_number_in_ranges(cls, patient, ranges=None):
+        """
+        True if `patient`'s NHS number (see nhs_number()) falls within any
+        of `ranges` (default NHS_NUMBER_TEST_RANGES: 400,000,000-499,999,999
+        and 600,000,000-799,999,999). Non-digit characters (spaces, etc.)
+        are stripped before parsing the NHS number to an int, so formatting
+        doesn't affect the check. Returns False if there's no NHS number to
+        check at all.
+        """
+        ranges = ranges or cls.NHS_NUMBER_TEST_RANGES
+        nhs = cls.nhs_number(patient)
+        if not nhs:
+            return False
+        digits = "".join(ch for ch in nhs if ch.isdigit())
+        if not digits:
+            return False
+        value = int(digits)
+        return any(low <= value <= high for low, high in ranges)
+
     def patients_in_nhs_number_ranges(self, ranges=None):
         """
-        Every Patient resource system-wide whose NHS number identifier
-        value (see nhs_number()) falls within any of `ranges` (default
-        NHS_NUMBER_TEST_RANGES) — used by the admin screen to find test/
-        synthetic patients to purge. FHIR identifier search is exact-match
-        only (no numeric range support), so this fetches every Patient
-        system-wide (paginated via _search_all, same 1,000-record cap as
-        other system-wide queries in this file) and filters client-side.
-        Non-digit characters (spaces, etc.) are stripped before parsing the
-        NHS number to an int, so formatting doesn't affect matching.
+        Every Patient resource system-wide whose NHS number falls within
+        any of `ranges` (see nhs_number_in_ranges()) — used by the admin
+        screen to find test/synthetic patients to purge. FHIR identifier
+        search is exact-match only (no numeric range support), so this
+        fetches every Patient system-wide (paginated via _search_all, same
+        1,000-record cap as other system-wide queries in this file) and
+        filters client-side.
         """
-        ranges = ranges or self.NHS_NUMBER_TEST_RANGES
         patients = self._search_all("Patient", {"_count": 100})
-        matches = []
-        for patient in patients:
-            nhs = self.nhs_number(patient)
-            if not nhs:
-                continue
-            digits = "".join(ch for ch in nhs if ch.isdigit())
-            if not digits:
-                continue
-            value = int(digits)
-            if any(low <= value <= high for low, high in ranges):
-                matches.append(patient)
-        return matches
+        return [p for p in patients if self.nhs_number_in_ranges(p, ranges)]
 
     def orphaned_service_requests(self):
         """
@@ -1346,11 +1419,11 @@ class FhirClient:
         orders = self._search_all("ServiceRequest", {"_count": 100})
         return [o for o in orders if not o.get("subject")]
 
-    def clear_down_orphaned_service_requests(self):
-        """DELETE every ServiceRequest with no `subject` reference (see
-        orphaned_service_requests()). Returns {"deleted": [...], "failed":
-        [...]} like clear_down_patient()."""
-        orders = self.orphaned_service_requests()
+    def _delete_service_requests(self, orders):
+        """Shared bulk-delete for a list of ServiceRequest resources.
+        Returns {"deleted": [...], "failed": [...]} like
+        clear_down_patient(). Used by clear_down_orphaned_service_requests()
+        and clear_down_orders_with_unknown_patient()."""
         deleted, failed = [], []
         for o in orders:
             if not o.get("id"):
@@ -1358,6 +1431,32 @@ class FhirClient:
             ref = f"ServiceRequest/{o['id']}"
             (deleted if self._delete(ref) else failed).append(ref)
         return {"deleted": deleted, "failed": failed}
+
+    def clear_down_orphaned_service_requests(self):
+        """DELETE every ServiceRequest with no `subject` reference (see
+        orphaned_service_requests()). Returns {"deleted": [...], "failed":
+        [...]} like clear_down_patient()."""
+        return self._delete_service_requests(self.orphaned_service_requests())
+
+    def orders_with_unknown_patient(self, orders):
+        """
+        Filters `orders` (e.g. from active_placer_orders()/
+        active_filler_orders()) down to the ones whose patient can't be
+        resolved via patient_for() — either `subject` is missing entirely,
+        or it's a reference present but not resolvable to an actual
+        Patient (deleted, dangling, cross-server, etc.). Broader than
+        orphaned_service_requests() (which only catches a wholly absent
+        `subject`), since a present-but-broken reference counts as
+        "unknown" here too. Used by the test orders screen's "delete
+        orders with unknown patient" action.
+        """
+        return [o for o in orders if self.patient_for(o) is None]
+
+    def clear_down_orders_with_unknown_patient(self, orders):
+        """DELETE every order in `orders` whose patient can't be resolved
+        (see orders_with_unknown_patient()). Returns {"deleted": [...],
+        "failed": [...]} like clear_down_patient()."""
+        return self._delete_service_requests(self.orders_with_unknown_patient(orders))
 
     # ---- Requester resolution -----------------------------------------
 

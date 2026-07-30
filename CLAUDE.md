@@ -232,6 +232,36 @@ same lesson as the real bug fixed in `ctdna_orders()` — filters by
 `resourceType` across `matches + included` combined rather than trusting
 `Bundle.entry.search.mode`.
 
+**Test orders only** (not Work orders) has two extra pieces, both added to
+`_order_worklist`'s `order_patient` dict since `patient_for()` is already
+resolved there once per order (so adding these costs no extra HTTP calls —
+`resolve_reference()` is cached — even though only `test_orders.html`
+currently renders them; Work orders' `order_patient` just carries the
+unused key harmlessly):
+
+- **`nhs_range_flag`** — `FhirClient.nhs_number_in_ranges(patient)`, a
+  per-patient check extracted from `patients_in_nhs_number_ranges()` (which
+  now just filters on it) so the same 400,000,000–499,999,999/
+  600,000,000–799,999,999 range check is defined once. Rendered as a
+  "Real NHS number" badge next to the patient name.
+- **Delete orders with unknown patient** (`/test-orders/
+  clear-down-unknown-patient`, destructive) — `test_orders()` computes
+  `unknown_patient_count` straight from `order_patient` (no extra
+  fhir_client call needed for the count); the delete route calls
+  `FhirClient.orders_with_unknown_patient(orders)` /
+  `clear_down_orders_with_unknown_patient(orders)`, which filter on
+  `patient_for(order) is None` — broader than `orphaned_service_requests()`
+  (wholly-absent `subject` only), since a present-but-dangling reference
+  counts too. Both delete methods for ServiceRequests
+  (`clear_down_orphaned_service_requests()` and this one) now share a
+  `_delete_service_requests(orders)` helper. Single POST, no separate
+  confirm route, same reasoning as the admin screen's orphaned-SR delete:
+  no patient identity involved, and the "Unknown" cells are already
+  visible on the page before the button is reachable.
+  `admin_clear_down_result.html` (the shared result template) now takes
+  optional `back_url`/`back_label` params so this route's result page
+  links back to `/test-orders` instead of `/admin`.
+
 First version: no date-range picker, and no splitting by organisation the
 way `/ctdna` does — flagged in README as the obvious next steps if either
 needs to scale.
@@ -245,14 +275,22 @@ patient's orders/reports/specimens (reusing `lab_orders_for_patient()`/
 and orders before specimens via `FhirClient._delete()` (a thin
 `requests.delete()` wrapper that treats a 404 as already-cleared and never
 raises — it returns `False` on any failure so the caller can keep going
-rather than aborting on the first rejected delete). Patient and Observation
-resources are deliberately left alone.
+rather than aborting on the first rejected delete). Observation resources
+are deliberately left alone.
+
+The Patient resource itself is **opt-in**: the confirm form has an
+unchecked-by-default "also delete the Patient resource itself" checkbox
+(`delete_patient_record`). `app.patient_clear_down()`'s POST branch calls
+`clear_down_patient_and_record()` (same as the admin screen's per-patient
+delete) if it's ticked, or plain `clear_down_patient()` if not — same
+distinction as the admin screen, just surfaced as a checkbox here instead
+of being always-on.
 
 **GET vs POST is the safety mechanism, not an afterthought**:
 `app.patient_clear_down()` handles both methods on the same route — `GET`
 only fetches and displays what *would* be deleted
 (`patient_clear_down_confirm.html`), `POST` (the confirm button's form)
-is the only path that calls `clear_down_patient()`
+is the only path that calls a `_delete()`-backed method
 (`patient_clear_down_result.html`). This is the correct way to build any
 delete control (a link/crawler/back-button can trigger a GET but never a
 form POST), not something layered on afterward — don't "simplify" this
@@ -265,8 +303,10 @@ run this app somewhere trusted if the clear-down feature is reachable.
 
 ### Admin screen (`/admin`) — bulk/system-wide, destructive
 
-Two independent clear-down actions, both system-wide rather than scoped to
-one patient:
+Not linked from `base.html`'s nav (deliberately — see the comment there)
+but still reachable directly at `/admin`; there's no auth gate, so this is
+obscurity, not access control. Two independent clear-down actions, both
+system-wide rather than scoped to one patient:
 
 - **Test patients by NHS number range** — `FhirClient.
   patients_in_nhs_number_ranges(ranges=None)` (default

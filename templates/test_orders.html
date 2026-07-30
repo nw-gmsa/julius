@@ -7,7 +7,9 @@
     requesting system's side, as opposed to the filler/lab-side orders on
     the Work orders screen — across all patients. Same layout as the
     "Genomic test orders" table on a patient's page, plus a Patient column
-    since this spans multiple patients.
+    since this spans multiple patients. A <span class="badge">Real NHS number</span>
+    badge marks a patient whose NHS number falls in 400,000,000&ndash;499,999,999
+    or 600,000,000&ndash;799,999,999.
   </p>
 
   {% if error %}
@@ -23,6 +25,9 @@
             <a href="/patient/{{ p.id }}">{{ p.name }}</a>
           {% else %}
             {{ p.name if p else "Unknown" }}
+          {% endif %}
+          {% if p and p.nhs_range_flag %}
+            <span class="badge" title="NHS number falls in 400,000,000–499,999,999 or 600,000,000–799,999,999">Real NHS number</span>
           {% endif %}
         </td>
         <td style="padding-left: {{ depth * 24 }}px">
@@ -51,6 +56,18 @@
       {{ render_order_chain(order_chains) }}
     </table>
     <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
+
+    {% if unknown_patient_count %}
+      <form method="post" action="/test-orders/clear-down-unknown-patient">
+        <p class="muted">
+          {{ unknown_patient_count }} of the orders above have no resolvable
+          patient (shown as "Unknown" in the Patient column) — either no
+          <code>subject</code> reference at all, or one that doesn't resolve.
+          Deleting is irreversible.
+        </p>
+        <button type="submit" class="danger">Delete all {{ unknown_patient_count }} order(s) with unknown patient</button>
+      </form>
+    {% endif %}
   {% else %}
     <p class="muted">No active order/original-order test orders found.</p>
   {% endif %}

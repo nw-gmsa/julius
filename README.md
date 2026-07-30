@@ -149,7 +149,23 @@ active filler-order test orders.
   "filler-order". The two intent values are joined into one comma-separated
   search param (`intent=order,original-order`) for FHIR's OR-within-a-param
   semantics — a repeated `intent=` parameter name would mean AND instead,
-  which no single order's one `intent` value could ever satisfy.
+  which no single order's one `intent` value could ever satisfy. Two extra
+  things on this screen only (not Work orders):
+  - A **"Real NHS number" badge** next to any patient whose NHS number
+    falls in the same 400,000,000–499,999,999 / 600,000,000–799,999,999
+    ranges the admin screen uses (`FhirClient.nhs_number_in_ranges()`,
+    extracted from `patients_in_nhs_number_ranges()` for reuse per-patient).
+  - A **"Delete orders with unknown patient"** button (`/test-orders/
+    clear-down-unknown-patient`, **destructive, irreversible**) — deletes
+    every currently-active placer-order `ServiceRequest` whose patient
+    can't be resolved (`orders_with_unknown_patient()`/
+    `clear_down_orders_with_unknown_patient()`), broader than the admin
+    screen's orphaned-`ServiceRequest` check since it also catches a
+    `subject` reference that's present but dangling, not just a wholly
+    absent one. Single `POST`, no separate confirm route — same reasoning
+    as the admin screen's orphaned clear-down: no patient identity is
+    involved, and the "Unknown" patient cells are already visible on the
+    same page before the button is reachable.
 - **Clear down patient data** (`/patient/<id>/clear-down`) — a **destructive,
   irreversible** button on the patient page that deletes every Specimen,
   DiagnosticReport, and ServiceRequest for that patient from the FHIR server
@@ -158,16 +174,22 @@ active filler-order test orders.
   listing exactly what will be deleted (counts + a table of each
   order/report/specimen); only `POST` (the confirm button's form) actually
   deletes anything, so a plain link/crawler/back-button can't trigger it by
-  accident. Reports and orders are deleted before specimens (in case a
-  server enforces referential integrity — unverified either way). Continues
-  past individual failures and reports a `{"deleted": [...], "failed":
-  [...]}` breakdown rather than stopping at the first one, since a partial
-  clear-down is still useful to see. **This route has no authentication or
-  CSRF protection** (matching the rest of this app, which has none either),
-  so don't expose this app beyond a trusted network/test environment if
-  this button is enabled.
+  accident. The confirm form also has an **unticked-by-default checkbox** to
+  additionally delete the **Patient resource itself** — ticking it switches
+  to `clear_down_patient_and_record()` instead, the same method the admin
+  screen's bulk delete uses. Reports and orders are deleted before specimens
+  (in case a server enforces referential integrity — unverified either
+  way). Continues past individual failures and reports a `{"deleted": [...],
+  "failed": [...]}` breakdown rather than stopping at the first one, since a
+  partial clear-down is still useful to see. **This route has no
+  authentication or CSRF protection** (matching the rest of this app, which
+  has none either), so don't expose this app beyond a trusted network/test
+  environment if this button is enabled.
 - **Admin screen** (`/admin`) — another **destructive, irreversible** area,
-  this time bulk/system-wide rather than per-patient:
+  this time bulk/system-wide rather than per-patient. Not linked from the
+  nav bar (deliberately kept off the main navigation, but reachable directly
+  at `/admin` — there's no auth gate behind it, so this is obscurity, not
+  real access control):
   - **Test patients by NHS number range**: `patients_in_nhs_number_ranges()`
     fetches every Patient system-wide (FHIR identifier search can't do
     numeric ranges, so this filters client-side) and flags anyone whose NHS

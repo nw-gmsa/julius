@@ -63,6 +63,48 @@ def obs_value(obs):
     return "—"
 
 
+def observation_reference_range(component_or_obs):
+    """Reference range text for an Observation or Observation.component —
+    same "text, else low–high, else —" logic used inline elsewhere for
+    top-level Observations, factored out so component_rows() can reuse it
+    per component rather than per Observation."""
+    ranges = component_or_obs.get("referenceRange")
+    if not ranges:
+        return "—"
+    rr = ranges[0]
+    if rr.get("text"):
+        return rr["text"]
+    if rr.get("low") and rr.get("high"):
+        return f"{rr['low'].get('value', '')}–{rr['high'].get('value', '')}"
+    return "—"
+
+
+def component_rows(observations):
+    """
+    [{"label", "value", "reference_range", "flag"}, ...] flattened across
+    every Observation.component in `observations` — one row per component,
+    for a results table like the Cepheid BCR-ABL screen's (as opposed to
+    obs_value()'s single joined-string summary of the same data). Reuses
+    obs_value() on each component dict directly, since a component's
+    value[x] fields are shaped the same as its parent Observation's.
+
+    An Observation with no `component` array at all contributes no rows —
+    this is specifically a components table, not a general Observation
+    results table (see the existing per-Observation table on the patient
+    page for that).
+    """
+    rows = []
+    for obs in observations:
+        for c in obs.get("component", []):
+            rows.append({
+                "label": code_text(c.get("code")),
+                "value": obs_value(c),
+                "reference_range": observation_reference_range(c),
+                "flag": code_text(c["interpretation"][0]) if c.get("interpretation") else "—",
+            })
+    return rows
+
+
 def specimen_collected(spec):
     return (spec.get("collection") or {}).get("collectedDateTime") or "—"
 
@@ -185,17 +227,26 @@ def patient_detail(patient_id):
 def patient_clear_down(patient_id):
     """
     GET shows a confirmation page listing exactly what will be deleted;
-    only POST actually deletes anything (client.clear_down_patient()).
-    Deliberately not a single bare "delete" link — this is an irreversible
-    action against a live FHIR server, so it gets the same GET-confirms/
-    POST-mutates split as any other destructive control, rather than
-    firing on the first click.
+    only POST actually deletes anything. Deliberately not a single bare
+    "delete" link — this is an irreversible action against a live FHIR
+    server, so it gets the same GET-confirms/POST-mutates split as any
+    other destructive control, rather than firing on the first click.
+
+    The confirm form's "also delete the Patient resource itself" checkbox
+    is opt-in (unchecked by default) — ticking it switches the delete from
+    clear_down_patient() (orders/reports/specimens only) to
+    clear_down_patient_and_record() (same, plus the Patient resource),
+    the same distinction the admin screen's bulk clear-down makes.
     """
     if request.method == "POST":
         error = None
         result = {"deleted": [], "failed": []}
+        delete_patient_record = bool(request.form.get("delete_patient_record"))
         try:
-            result = client.clear_down_patient(patient_id)
+            if delete_patient_record:
+                result = client.clear_down_patient_and_record(patient_id)
+            else:
+                result = client.clear_down_patient(patient_id)
         except Exception as e:
             error = str(e)
         return render_template(
@@ -337,7 +388,12 @@ def _order_worklist(fetch_orders):
     active-order list via `fetch_orders`, then build the per-order
     requester/patient lookups and basedOn chain tree both screens render
     the same way (only the intent filter behind `fetch_orders` and the
-    template differ)."""
+    template differ). Each order_patient entry also carries
+    `nhs_range_flag` (whether that patient's NHS number falls in
+    FhirClient.NHS_NUMBER_TEST_RANGES) — computed here since patient_for()
+    is already resolved once per order for the name lookup, so this costs
+    no extra HTTP calls (resolve_reference() is cached); only test_orders.html
+    currently renders it."""
     error = None
     orders, order_chains, order_requester, order_patient = [], [], {}, {}
     try:
@@ -348,6 +404,7 @@ def _order_worklist(fetch_orders):
             order_patient[o["id"]] = {
                 "id": patient.get("id") if patient else None,
                 "name": human_name(patient) if patient else "Unknown",
+                "nhs_range_flag": bool(patient) and FhirClient.nhs_number_in_ranges(patient),
             }
         order_chains = client.build_order_chains(orders)
     except Exception as e:
@@ -367,9 +424,36 @@ def work_orders():
 @app.route("/test-orders")
 def test_orders():
     orders, order_chains, order_requester, order_patient, error = _order_worklist(client.active_placer_orders)
+    unknown_patient_count = sum(1 for o in orders if order_patient.get(o["id"], {}).get("id") is None)
     return render_template(
         "test_orders.html", orders=orders, order_chains=order_chains,
-        order_requester=order_requester, order_patient=order_patient, error=error,
+        order_requester=order_requester, order_patient=order_patient,
+        unknown_patient_count=unknown_patient_count, error=error,
+    )
+
+
+@app.route("/test-orders/clear-down-unknown-patient", methods=["POST"])
+def test_orders_clear_down_unknown_patient():
+    """
+    Deletes every currently-active placer-order (intent=order/
+    original-order) ServiceRequest whose patient can't be resolved
+    (client.orders_with_unknown_patient()). Single POST, no separate
+    confirm route — same reasoning as the admin screen's orphaned-
+    ServiceRequest delete: no patient identity is involved (the whole
+    point is the patient is unknown), and /test-orders's GET already shows
+    "Unknown" against every one of these before this button is reachable.
+    """
+    error = None
+    result = {"deleted": [], "failed": []}
+    try:
+        orders = client.active_placer_orders()
+        result = client.clear_down_orders_with_unknown_patient(orders)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html", title="Unknown-patient test orders clear-down result",
+        back_url="/test-orders", back_label="Back to test orders",
+        deleted=result["deleted"], failed=result["failed"], error=error,
     )
 
 
@@ -563,6 +647,54 @@ def ctdna_summary():
         rows_by_org = []
 
     return render_template("ctdna.html", rows_by_org=rows_by_org, error=error)
+
+
+@app.route("/cepheid-results")
+def cepheid_results():
+    """
+    Cepheid Test Results: DiagnosticReports with a BCRABL code
+    (client.bcrabl_reports()), each shown with its originating order,
+    specimen, and a results table built from every linked Observation's
+    `.component` entries (component_rows()) — not the Observations'
+    top-level values, per the brief for this screen.
+    """
+    error = None
+    rows = []
+    try:
+        reports = client.bcrabl_reports()
+        for report in reports:
+            order = client.order_for_report(report)
+            patient = client.patient_for(report) or (client.patient_for(order) if order else None)
+
+            specimens = client.resolve_specimens(report)
+            if not specimens and order:
+                specimens = client.resolve_specimens(order)
+            specimen = specimens[0] if specimens else None
+
+            observations = client.observations_for_report(report)
+
+            rows.append({
+                "report_id": report.get("id"),
+                "test": code_text(report.get("code")),
+                "status": report.get("status") or "—",
+                "date_reported_raw": report.get("issued") or report.get("effectiveDateTime") or "",
+                "date_reported": report.get("issued") or report.get("effectiveDateTime") or "—",
+                "patient_id": patient.get("id") if patient else None,
+                "patient_name": human_name(patient) if patient else "Unknown",
+                "order_id": order.get("id") if order else "—",
+                "order_date": (order.get("authoredOn") if order else None) or "—",
+                "order_status": (order.get("status") if order else None) or "—",
+                "specimen_type": code_text(specimen.get("type")) if specimen else "—",
+                "collected_date": specimen_collected(specimen) if specimen else "—",
+                "received_date": specimen_received(specimen) if specimen else "—",
+                "specimen_id": (FhirClient.specimen_identifier(specimen) if specimen else None) or "—",
+                "components": component_rows(observations),
+            })
+        rows.sort(key=lambda r: r["date_reported_raw"], reverse=True)
+    except Exception as e:
+        error = str(e)
+
+    return render_template("cepheid_results.html", rows=rows, error=error)
 
 
 @app.route("/report/<report_id>/variants")
