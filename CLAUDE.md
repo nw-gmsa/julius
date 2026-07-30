@@ -410,6 +410,41 @@ resource's full identifier list rather than one targeted value — reuse
 `all_identifiers()` rather than a bespoke loop if another screen needs the
 same "just show me everything" treatment.
 
+**Two more destructive, single-POST clear-downs** on this screen (same
+mechanical/not-patient-identifying reasoning as the no-components one
+above):
+
+- **No identifiers** (`/cepheid-results/clear-down-no-identifiers`) —
+  `bcrabl_reports_without_identifiers(reports)` filters on an empty
+  `identifier` list; `clear_down_bcrabl_reports_without_identifiers()`
+  deletes those reports **and** their associated Specimen (resolved the
+  same way the screen displays it: report's own `specimen`, falling back
+  to `order_for_report()`'s specimen). The specimen-safety check matters
+  here: before deleting, it builds `kept_specimen_ids` from every *other*
+  report in the full `reports` list (i.e. everything not being deleted),
+  and only deletes a specimen if its id isn't in that set — so a
+  no-identifier junk report can't take down a specimen a real, kept
+  report still references. Verified with a test where two reports share
+  one Specimen; the specimen survives because the other report keeps it.
+- **Duplicates** (`/cepheid-results/clear-down-duplicates`) —
+  `duplicate_bcrabl_reports(reports)` runs union-find over
+  `_identifier_keys(report)` (the `{(system, value), ...}` set for a
+  resource's identifiers) to cluster reports sharing at least one
+  identical identifier — deliberately transitive, so if report A and B
+  share identifier X, and B and C share a *different* identifier Y, all
+  three land in one cluster (verified: a report bridging two clusters via
+  a second shared identifier correctly merges them). Within each cluster
+  of 2+, sorts by `meta.lastUpdated` (falling back to `issued`/
+  `effectiveDateTime`) and keeps only the latest; everything else in the
+  cluster is a "duplicate" to delete. Reports with zero identifiers are
+  excluded from clustering entirely (they belong to the separate
+  no-identifiers action, not this one — "no identifiers" isn't the same
+  claim as "duplicate of a specific other report").
+
+Both reuse `_delete_resources()` (ServiceRequest/DiagnosticReport-agnostic
+by now) and `admin_clear_down_result.html` with
+`back_url="/cepheid-results"`, same as the no-components delete.
+
 ### Report PDFs & variant/clinical-term extraction
 
 `DiagnosticReport.presentedForm.url` points at a **FHIR Binary resource**

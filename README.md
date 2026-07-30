@@ -159,7 +159,25 @@ active filler-order test orders.
   `component` array at all (`bcrabl_reports_without_components()`/
   `clear_down_bcrabl_reports_without_components()`) — i.e. exactly the
   reports whose card already shows "No component-level results found" on
-  this same page.
+  this same page. Two more destructive, single-`POST` actions on the same
+  screen, same reasoning:
+  - **"Delete reports with no identifiers (and their specimens)"** —
+    `bcrabl_reports_without_identifiers()`/
+    `clear_down_bcrabl_reports_without_identifiers()` deletes every report
+    with an empty `identifier` list, plus its associated specimen (the
+    report's own `specimen`, falling back to the linked order's) — but
+    **only** if that specimen isn't also referenced by another report
+    that's being kept, so cleaning up junk reports can't silently break a
+    real one's specimen link.
+  - **"Delete duplicate reports"** — `duplicate_bcrabl_reports()`/
+    `clear_down_duplicate_bcrabl_reports()` clusters reports that share at
+    least one identical `identifier` (via union-find, so reports linked
+    transitively through *different* shared identifiers still end up in
+    one cluster), keeps the most-recently-updated report in each cluster
+    (by `meta.lastUpdated`, falling back to `issued`/
+    `effectiveDateTime`), and deletes the rest. Reports with no
+    identifiers at all never count as duplicates of each other here —
+    that's the separate action above.
 - **Work orders** (`/work-orders`) is a cross-patient worklist of active
   test orders — `ServiceRequest` with `intent=filler-order` and
   `status=active`, system-wide (`active_filler_orders()`), i.e. orders as
