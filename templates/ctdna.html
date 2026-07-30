@@ -30,12 +30,13 @@
           <th>Patient</th>
           <th>Status</th>
           <th>Test code</th>
+          <th>Conclusion code</th>
           <th>Order date</th>
           <th>Sample collected</th>
           <th>Sample received</th>
           <th>Date reported</th>
           <th>iGene report ID</th>
-          <th>Conclusion code</th>
+          <th>Placer number</th>
         </tr>
         {% for row in rows %}
           <tr>
@@ -48,12 +49,13 @@
             </td>
             <td>{{ row.status }}</td>
             <td>{{ row.test }}</td>
+            <td>{{ row.conclusion }}</td>
             <td>{{ row.order_date }}</td>
             <td>{{ row.collected_date }}</td>
             <td>{{ row.received_date }}</td>
             <td>{{ row.reported_date }}</td>
             <td>{{ row.igene_id }}</td>
-            <td>{{ row.conclusion }}</td>
+            <td>{{ row.placer_id }}</td>
           </tr>
         {% endfor %}
       </table>

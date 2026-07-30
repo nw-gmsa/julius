@@ -71,8 +71,18 @@ def specimen_received(spec):
     return spec.get("receivedTime") or "—"
 
 
+def reason_code_reference(order):
+    """Raw code(s) behind ServiceRequest.reasonCode — e.g. a Genomic
+    Clinical Indication reference number — ignoring display text (see
+    code_value()); joined with "; " for multiple reasonCode entries."""
+    codes = [code_value(rc) for rc in order.get("reasonCode", [])]
+    codes = [c for c in codes if c and c != "—"]
+    return "; ".join(codes) if codes else "—"
+
+
 app.jinja_env.filters["human_name"] = human_name
 app.jinja_env.filters["code_text"] = code_text
+app.jinja_env.filters["code_value"] = code_value
 app.jinja_env.filters["obs_value"] = obs_value
 app.jinja_env.filters["specimen_collected"] = specimen_collected
 app.jinja_env.filters["specimen_received"] = specimen_received
@@ -80,6 +90,7 @@ app.jinja_env.filters["specimen_identifier"] = FhirClient.specimen_identifier
 app.jinja_env.filters["placer_identifier"] = FhirClient.placer_identifier
 app.jinja_env.filters["filler_identifier"] = FhirClient.filler_identifier
 app.jinja_env.filters["report_identifier"] = FhirClient.report_identifier
+app.jinja_env.filters["reason_code_reference"] = reason_code_reference
 
 
 @app.route("/", methods=["GET"])
@@ -321,6 +332,7 @@ def ctdna_summary():
                 "collected_date": specimen_collected(specimen) if specimen else "—",
                 "received_date": specimen_received(specimen) if specimen else "—",
                 "reported_date": reported_date or "—",
+                "placer_id": FhirClient.placer_identifier(order) or "—",
                 "igene_id": client.igene_report_identifier(order, report) or "—",
                 "conclusion": conclusion or "—",
             })
