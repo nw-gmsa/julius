@@ -129,6 +129,27 @@ def component_rows(observations):
     return rows
 
 
+def observation_rows(observations):
+    """
+    [{"label", "value", "data_absent_reason"}, ...] — one row per top-level
+    Observation, for the Cepheid screen's Observation-level results table
+    (as opposed to component_rows()'s per-component breakdown of the same
+    Observations). `value` is obs_value()'s usual value[x] summary;
+    `data_absent_reason` is Observation.dataAbsentReason — populated
+    instead of value[x] when a result couldn't be obtained (e.g.
+    "not-asked"/"unknown"/"error" — see the FHIR data-absent-reason value
+    set), so this is normally "—" whenever `value` isn't.
+    """
+    rows = []
+    for obs in observations:
+        rows.append({
+            "label": code_text(obs.get("code")),
+            "value": obs_value(obs),
+            "data_absent_reason": code_text(obs["dataAbsentReason"]) if obs.get("dataAbsentReason") else "—",
+        })
+    return rows
+
+
 def specimen_collected(spec):
     return (spec.get("collection") or {}).get("collectedDateTime") or "—"
 
@@ -213,6 +234,7 @@ def patient_detail(patient_id):
     error = None
     patient = None
     orders, reports, report_obs, order_requester = [], [], {}, {}
+    order_performer = {}
     report_interpreters = {}
     specimens_by_id = {}
     medical_record_numbers = []
@@ -222,6 +244,7 @@ def patient_detail(patient_id):
         orders = client.lab_orders_for_patient(patient_id)
         for o in orders:
             order_requester[o["id"]] = client.requester_display(o)
+            order_performer[o["id"]] = client.performer_display(o)
             for spec in client.resolve_specimens(o):
                 specimens_by_id[spec["id"]] = spec
         reports = client.lab_reports_for_patient(patient_id)
@@ -243,7 +266,8 @@ def patient_detail(patient_id):
         patient_ics=client.patient_ics_display(patient),
         orders=orders, order_chains=order_chains,
         reports=reports, report_obs=report_obs, report_interpreters=report_interpreters,
-        order_requester=order_requester, specimens=specimens, error=error,
+        order_requester=order_requester, order_performer=order_performer,
+        specimens=specimens, error=error,
     )
 
 
@@ -410,20 +434,22 @@ def admin_orphaned_clear_down():
 def _order_worklist(fetch_orders):
     """Shared logic behind /work-orders and /test-orders: fetch a flat
     active-order list via `fetch_orders`, then build the per-order
-    requester/patient lookups and basedOn chain tree both screens render
-    the same way (only the intent filter behind `fetch_orders` and the
-    template differ). Each order_patient entry also carries
+    requester/performer/patient lookups and basedOn chain tree both screens
+    render the same way (only the intent filter behind `fetch_orders` and
+    the template differ). Each order_patient entry also carries
     `nhs_range_flag` (whether that patient's NHS number falls in
     FhirClient.NHS_NUMBER_TEST_RANGES) — computed here since patient_for()
     is already resolved once per order for the name lookup, so this costs
     no extra HTTP calls (resolve_reference() is cached); only test_orders.html
-    currently renders it."""
+    currently renders it. order_performer is likewise built for both, though
+    currently only work_orders.html renders it."""
     error = None
-    orders, order_chains, order_requester, order_patient = [], [], {}, {}
+    orders, order_chains, order_requester, order_performer, order_patient = [], [], {}, {}, {}
     try:
         orders = fetch_orders()
         for o in orders:
             order_requester[o["id"]] = client.requester_display(o)
+            order_performer[o["id"]] = client.performer_display(o)
             patient = client.patient_for(o)
             order_patient[o["id"]] = {
                 "id": patient.get("id") if patient else None,
@@ -433,25 +459,27 @@ def _order_worklist(fetch_orders):
         order_chains = client.build_order_chains(orders)
     except Exception as e:
         error = str(e)
-    return orders, order_chains, order_requester, order_patient, error
+    return orders, order_chains, order_requester, order_performer, order_patient, error
 
 
 @app.route("/work-orders")
 def work_orders():
-    orders, order_chains, order_requester, order_patient, error = _order_worklist(client.active_filler_orders)
+    orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(client.active_filler_orders)
     return render_template(
         "work_orders.html", orders=orders, order_chains=order_chains,
-        order_requester=order_requester, order_patient=order_patient, error=error,
+        order_requester=order_requester, order_performer=order_performer,
+        order_patient=order_patient, error=error,
     )
 
 
 @app.route("/test-orders")
 def test_orders():
-    orders, order_chains, order_requester, order_patient, error = _order_worklist(client.active_placer_orders)
+    orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(client.active_placer_orders)
     unknown_patient_count = sum(1 for o in orders if order_patient.get(o["id"], {}).get("id") is None)
     return render_template(
         "test_orders.html", orders=orders, order_chains=order_chains,
-        order_requester=order_requester, order_patient=order_patient,
+        order_requester=order_requester, order_performer=order_performer,
+        order_patient=order_patient,
         unknown_patient_count=unknown_patient_count, error=error,
     )
 
@@ -678,9 +706,10 @@ def cepheid_results():
     """
     Cepheid Test Results: DiagnosticReports with a BCRABL code
     (client.bcrabl_reports()), each shown with its originating order,
-    specimen, and a results table built from every linked Observation's
-    `.component` entries (component_rows()) — not the Observations'
-    top-level values, per the brief for this screen.
+    specimen, an Observation-level results table (observation_rows() — each
+    linked Observation's top-level `value[x]` and `dataAbsentReason`), and a
+    component-level results table built from every linked Observation's
+    `.component` entries (component_rows()).
     """
     error = None
     rows = []
@@ -718,6 +747,7 @@ def cepheid_results():
                 "collected_date": specimen_collected(specimen) if specimen else "—",
                 "received_date": specimen_received(specimen) if specimen else "—",
                 "specimen_id": (FhirClient.specimen_identifier(specimen) if specimen else None) or "—",
+                "observations": observation_rows(observations),
                 "components": component_rows(observations),
             })
         rows.sort(key=lambda r: r["date_reported_raw"], reverse=True)

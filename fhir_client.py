@@ -1674,3 +1674,39 @@ class FhirClient:
 
         # Unexpected resource type — show what we can.
         return requester_ref.get("display") or resource.get("id", "—")
+
+    def performer_display(self, order):
+        """
+        Display string for ServiceRequest.performer — the desired
+        performer(s) for carrying out the requested test (e.g. a specific
+        lab or reporting scientist), 0..* references to Practitioner |
+        PractitionerRole | Organization | CareTeam | HealthcareService |
+        Patient | Device | RelatedPerson per FHIR R4. Same resolution/
+        format as results_interpreter_display() — "Name (Type)", with a
+        PractitionerRole drilling down to the underlying Practitioner's own
+        name where it resolves (same pattern as requester_display()) —
+        joined with "; " for multiple performers. Returns "—" if performer
+        is absent or empty.
+        """
+        entries = []
+        for ref in order.get("performer", []):
+            resource = self.resolve_reference(ref)
+            if resource is None:
+                name = ref.get("display") or ref.get("reference") or "Unknown"
+                entries.append(f"{name} (Unknown)")
+                continue
+
+            rtype = resource.get("resourceType")
+            if rtype == "Practitioner":
+                name = self._practitioner_name(resource) or ref.get("display") or "Unknown"
+            elif rtype == "PractitionerRole":
+                practitioner_ref = resource.get("practitioner")
+                practitioner = self.resolve_reference(practitioner_ref) if practitioner_ref else None
+                name = (practitioner and self._practitioner_name(practitioner)) or ref.get("display") or "Unknown"
+            elif rtype == "Organization":
+                name = resource.get("name") or ref.get("display") or "Unknown"
+            else:
+                name = ref.get("display") or resource.get("id") or "Unknown"
+
+            entries.append(f"{name} ({rtype or 'Unknown'})")
+        return "; ".join(entries) if entries else "—"

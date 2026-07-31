@@ -7,9 +7,10 @@
     regardless of system — see <code>_is_bcrabl_report()</code>), across all
     patients, with no date bound. Each report is shown with its originating
     order, specimen, <code>meta.lastUpdated</code>, every
-    <code>identifier</code> on the report, and a results table built from
-    every linked Observation's <code>component</code> entries (not the
-    Observations' top-level values).
+    <code>identifier</code> on the report, an Observation-level results
+    table (each linked Observation's own <code>value[x]</code> and
+    <code>dataAbsentReason</code>), and a component-level results table
+    built from every linked Observation's <code>component</code> entries.
   </p>
 
   {% if error %}
@@ -51,6 +52,21 @@
             <td class="muted">{{ row.specimen_id }}</td>
           </tr>
         </table>
+
+        {% if row.observations %}
+          <table>
+            <tr><th>Observation</th><th>Value</th><th>Data absent reason</th></tr>
+            {% for o in row.observations %}
+              <tr>
+                <td>{{ o.label }}</td>
+                <td>{{ o.value }}</td>
+                <td>{{ o.data_absent_reason }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        {% else %}
+          <p class="muted">No linked Observations found on this report.</p>
+        {% endif %}
 
         {% if row.components %}
           <table>
