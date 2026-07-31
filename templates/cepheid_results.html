@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Cepheid Test Results</h1>
+  <p class="muted">
+    <code>DiagnosticReport</code>s with a BCRABL code
+    (<code>FhirClient.BCRABL_CODE</code>, matched by <code>coding[].code</code>
+    regardless of system — see <code>_is_bcrabl_report()</code>), across all
+    patients, with no date bound. Each report is shown with its originating
+    order, specimen, <code>meta.lastUpdated</code>, every
+    <code>identifier</code> on the report, and a results table built from
+    every linked Observation's <code>component</code> entries (not the
+    Observations' top-level values).
+  </p>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <h2>Reports ({{ rows|length }})</h2>
+  {% if rows %}
+    {% for row in rows %}
+      <div class="card">
+        <strong>{{ row.test }}</strong>
+        <span class="muted">— {{ row.status }}, reported {{ row.date_reported }}</span>
+        <span class="muted">— Report ID: {{ row.report_id }}</span>
+        <span class="muted">— Last updated: {{ row.last_updated }}</span>
+        <span class="muted">— Patient:
+          {% if row.patient_id %}
+            <a href="/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
+          {% else %}
+            {{ row.patient_name }}
+          {% endif %}
+        </span>
+        <br>
+        <span class="muted">
+          Identifiers: {{ row.identifiers|join(", ") if row.identifiers else "—" }}
+        </span>
+
+        <table>
+          <tr>
+            <th>Order ID</th><th>Order date</th><th>Order status</th>
+            <th>Specimen type</th><th>Sample collected</th><th>Sample received</th><th>Specimen ID</th>
+          </tr>
+          <tr>
+            <td class="muted">{{ row.order_id }}</td>
+            <td>{{ row.order_date }}</td>
+            <td>{{ row.order_status }}</td>
+            <td>{{ row.specimen_type }}</td>
+            <td>{{ row.collected_date }}</td>
+            <td>{{ row.received_date }}</td>
+            <td class="muted">{{ row.specimen_id }}</td>
+          </tr>
+        </table>
+
+        {% if row.components %}
+          <table>
+            <tr><th>Component</th><th>Value</th><th>Reference range</th><th>Flag</th></tr>
+            {% for c in row.components %}
+              <tr>
+                <td>{{ c.label }}</td>
+                <td>{{ c.value }}</td>
+                <td>{{ c.reference_range }}</td>
+                <td>{{ c.flag }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        {% else %}
+          <p class="muted">No component-level results found on this report's Observations.</p>
+        {% endif %}
+      </div>
+    {% endfor %}
+
+    {% if no_component_results_count %}
+      <form method="post" action="/cepheid-results/clear-down-no-components">
+        <p class="muted">
+          {{ no_component_results_count }} of the reports above have no
+          component-level results at all (shown as "No component-level
+          results found..." above) — none of their linked Observations
+          carry a <code>component</code> array. Deleting is irreversible.
+        </p>
+        <button type="submit" class="danger">Delete all {{ no_component_results_count }} report(s) with no component-level results</button>
+      </form>
+    {% endif %}
+
+    {% if no_identifier_count %}
+      <form method="post" action="/cepheid-results/clear-down-no-identifiers">
+        <p class="muted">
+          {{ no_identifier_count }} of the reports above have no
+          identifiers at all (shown as "Identifiers: —" above). Deleting
+          also deletes that report's associated specimen, unless another
+          report still references it. Irreversible.
+        </p>
+        <button type="submit" class="danger">Delete all {{ no_identifier_count }} report(s) with no identifiers (and their specimens)</button>
+      </form>
+    {% endif %}
+
+    {% if duplicate_count %}
+      <form method="post" action="/cepheid-results/clear-down-duplicates">
+        <p class="muted">
+          {{ duplicate_count }} of the reports above are duplicates —
+          they share an identifier with another report in this list. The
+          most-recently-updated report in each duplicate group is kept;
+          the rest would be deleted. Irreversible.
+        </p>
+        <button type="submit" class="danger">Delete {{ duplicate_count }} duplicate report(s)</button>
+      </form>
+    {% endif %}
+  {% else %}
+    <p class="muted">No BCRABL reports found.</p>
+  {% endif %}
+{% endblock %}

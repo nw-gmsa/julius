@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Admin</h1>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <h2>Test patients — NHS number ranges ({{ test_patients|length }})</h2>
+  <p class="muted">
+    NHS numbers conventionally reserved for synthetic/test patients:
+    400,000,000&ndash;499,999,999 and 600,000,000&ndash;799,999,999
+    (<code>FhirClient.NHS_NUMBER_TEST_RANGES</code> — adjust there if your
+    environment uses different test-number conventions). Select patients
+    below and preview deletion — this removes the <strong>Patient record
+    itself</strong>, plus every Specimen, DiagnosticReport, and
+    ServiceRequest for that patient. Irreversible.
+  </p>
+  {% if test_patients %}
+    <form method="post" action="/admin/patients/confirm">
+      <table>
+        <tr><th></th><th>Name</th><th>NHS number</th><th>ID</th></tr>
+        {% for p in test_patients %}
+          <tr>
+            <td><input type="checkbox" name="patient_id" value="{{ p.id }}"></td>
+            <td><a href="/patient/{{ p.id }}">{{ p.name }}</a></td>
+            <td>{{ p.nhs_number }}</td>
+            <td class="muted">{{ p.id }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+      <button type="submit" class="danger">Preview deletion of selected patients</button>
+    </form>
+  {% else %}
+    <p class="muted">No patients found with an NHS number in the test ranges.</p>
+  {% endif %}
+
+  <h2>Orphaned ServiceRequests — no patient ({{ orphaned_orders|length }})</h2>
+  <p class="muted">
+    <code>ServiceRequest</code> resources with no <code>subject</code>
+    reference at all — not linked to any patient. Deleting removes
+    <strong>all</strong> of these in one go. Irreversible.
+  </p>
+  {% if orphaned_orders %}
+    <table>
+      <tr><th>Test</th><th>Status</th><th>Ordered</th><th>ID</th></tr>
+      {% for o in orphaned_orders %}
+        <tr>
+          <td>{{ o.test }}</td>
+          <td>{{ o.status }}</td>
+          <td>{{ o.authoredOn }}</td>
+          <td class="muted">{{ o.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+    <form method="post" action="/admin/orphaned/clear-down">
+      <button type="submit" class="danger">Delete all {{ orphaned_orders|length }} orphaned ServiceRequests</button>
+    </form>
+  {% else %}
+    <p class="muted">No orphaned ServiceRequests found.</p>
+  {% endif %}
+{% endblock %}

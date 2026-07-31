@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>{{ title }}</h1>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <p><strong>{{ deleted|length }}</strong> resource(s) deleted, <strong>{{ failed|length }}</strong> failed.</p>
+
+  {% if deleted %}
+    <h2>Deleted</h2>
+    <ul>
+      {% for ref in deleted %}<li class="muted">{{ ref }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  {% if failed %}
+    <div class="error">
+      <strong>Could not delete the following</strong> — the server rejected the
+      delete (e.g. still referenced elsewhere, or delete not supported for
+      that resource type):
+      <ul>
+        {% for ref in failed %}<li>{{ ref }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <p><a href="{{ back_url or '/admin' }}">&larr; {{ back_label or "Back to admin" }}</a></p>
+{% endblock %}

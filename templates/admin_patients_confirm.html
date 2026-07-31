@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Confirm: delete {{ rows|length }} patient(s) and all their data</h1>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <div class="danger-box">
+    <strong>This will permanently delete the following patients — including
+    the Patient record itself — and all of their genomic test data
+    (specimens, reports, orders).</strong> This cannot be undone.
+  </div>
+
+  {% if rows %}
+    <table>
+      <tr><th>Name</th><th>NHS number</th><th>Orders</th><th>Reports</th><th>Specimens</th><th>ID</th></tr>
+      {% for r in rows %}
+        <tr>
+          <td>{{ r.name }}</td>
+          <td>{{ r.nhs_number }}</td>
+          <td>{{ r.order_count }}</td>
+          <td>{{ r.report_count }}</td>
+          <td>{{ r.specimen_count }}</td>
+          <td class="muted">{{ r.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+
+    <form method="post" action="/admin/patients/clear-down">
+      {% for pid in patient_ids %}
+        <input type="hidden" name="patient_id" value="{{ pid }}">
+      {% endfor %}
+      <button type="submit" class="danger">Yes, permanently delete these {{ rows|length }} patients and all their data</button>
+      &nbsp;
+      <a href="/admin">Cancel</a>
+    </form>
+  {% else %}
+    <p class="muted">No patients selected.</p>
+    <p><a href="/admin">&larr; Back to admin</a></p>
+  {% endif %}
+{% endblock %}
