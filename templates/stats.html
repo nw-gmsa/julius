@@ -147,14 +147,14 @@
       {% if order_ics_map_unmatched_count %}
         {{ order_ics_map_unmatched_count }} order(s) whose ICS name didn't
         match a known ICB aren't shown on the map (still counted in the
-        table below).
+        table below): {{ order_ics_map_unmatched_names|join(", ") }}.
       {% endif %}
     </p>
   {% elif order_by_ics %}
     <p class="muted">
       {% if order_ics_map_unmatched_count %}
         No ICS names in this range matched a known NHS Integrated Care
-        Board, so no map is shown.
+        Board, so no map is shown: {{ order_ics_map_unmatched_names|join(", ") }}.
       {% else %}
         ICB boundary data couldn't be fetched, so no map is shown.
       {% endif %}
@@ -284,14 +284,14 @@
       {% if report_ics_map_unmatched_count %}
         {{ report_ics_map_unmatched_count }} report(s) whose ICS name
         didn't match a known ICB aren't shown on the map (still counted in
-        the table below).
+        the table below): {{ report_ics_map_unmatched_names|join(", ") }}.
       {% endif %}
     </p>
   {% elif report_by_ics %}
     <p class="muted">
       {% if report_ics_map_unmatched_count %}
         No ICS names in this range matched a known NHS Integrated Care
-        Board, so no map is shown.
+        Board, so no map is shown: {{ report_ics_map_unmatched_names|join(", ") }}.
       {% else %}
         ICB boundary data couldn't be fetched, so no map is shown.
       {% endif %}

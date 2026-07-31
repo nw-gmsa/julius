@@ -1,5 +1,6 @@
 import os
 import re
+import difflib
 from datetime import date, timedelta
 from flask import Flask, render_template, request, Response, abort
 import pandas as pd
@@ -570,18 +571,58 @@ def _normalize_icb_name(name):
     there — which isn't guaranteed to match the ONS Open Geography
     Portal's official wording verbatim (e.g. this server might say "NHS
     Greater Manchester ICB" where ONS says "NHS Greater Manchester
-    Integrated Care Board"). Stripping a leading "NHS", a trailing
-    "Integrated Care Board"/"ICB", and all non-alphanumeric characters
-    down to a lowercase core (e.g. "greatermanchester") gives both sides a
-    fair shot at an exact match; ics_choropleth_html() falls back further
-    to substring containment on this normalised form if that still misses.
+    Integrated Care Board", or use "&" where ONS spells out "and" — many
+    of the 42 official names are "X and Y" or "X, Y and Z" compounds, so
+    that one substitution alone accounts for a lot of otherwise-missed
+    matches). Stripping a leading "NHS", a trailing "Integrated Care
+    Board"/"ICB", normalising "&" to "and", and dropping all remaining
+    non-alphanumeric characters down to a lowercase core (e.g.
+    "greatermanchester") gives both sides a fair shot at an exact match;
+    ics_choropleth_html() falls back further to a similarity-ratio best
+    match on this normalised form (see _best_icb_match()) if that still
+    misses — needed because a plain substring check fails whenever a
+    filler word like "the" is inserted/dropped in the middle of a name
+    (e.g. "Cornwall and Isles of Scilly" vs the official "...and the
+    Isles of Scilly" — neither is a contiguous substring of the other).
     """
     if not name:
         return ""
     n = re.sub(r"(?i)^nhs\s+", "", name.strip())
     n = re.sub(r"(?i)\s+integrated care board$", "", n)
     n = re.sub(r"(?i)\s+icb$", "", n)
+    n = n.replace("&", " and ")
     return re.sub(r"[^a-z0-9]+", "", n.lower())
+
+
+#: Minimum difflib.SequenceMatcher ratio for _best_icb_match() to accept a
+#: fuzzy match rather than leave an ICS name unmatched. Calibrated so
+#: genuinely-the-same name with minor wording differences ("&" vs "and", a
+#: dropped "the", missing "NHS"/"ICB") scores at or near 1.0, while an
+#: unrelated org name (a hospital trust, "Unknown", etc.) scores well under
+#: 0.5 — even the closest look-alike pairs in the dataset (the five
+#: "North/South/East/West/Central London" ICBs, which differ by one
+#: directional word) still separate cleanly at this threshold.
+ICB_FUZZY_MATCH_THRESHOLD = 0.82
+
+
+def _best_icb_match(norm, icb_norms):
+    """
+    Best-scoring ICB match for a normalised ICS name against every
+    normalised ICB name, via difflib's SequenceMatcher ratio — more
+    forgiving than plain substring containment, which requires one string
+    to appear as an unbroken run inside the other and so misses anything
+    with a word inserted/dropped/reordered in the middle. Returns the
+    best-matching normalised ICB name, or None if nothing clears
+    ICB_FUZZY_MATCH_THRESHOLD.
+    """
+    if not norm:
+        return None
+    best_norm, best_ratio = None, 0.0
+    for icb_norm in icb_norms:
+        ratio = difflib.SequenceMatcher(None, norm, icb_norm).ratio()
+        if ratio > best_ratio:
+            best_norm, best_ratio = icb_norm, ratio
+    return best_norm if best_ratio >= ICB_FUZZY_MATCH_THRESHOLD else None
 
 
 def ics_choropleth_html(ics_counts):
@@ -599,17 +640,19 @@ def ics_choropleth_html(ics_counts):
     `update_geos()` also turns on a UK/Europe basemap (coastline, country
     borders) underneath, further placing the ICBs within the UK outline.
 
-    Returns (html, unmatched_count): `html` is None if boundary data
-    couldn't be fetched or nothing in `ics_counts` matched a boundary at
-    all; `unmatched_count` is the order count across every ICS name that
-    didn't match any boundary (so the caller can surface it rather than the
-    gap being silent — same convention as order_map_unmapped_count for the
-    organisation map).
+    Returns (html, unmatched_count, unmatched_names): `html` is None if
+    boundary data couldn't be fetched or nothing in `ics_counts` matched a
+    boundary at all; `unmatched_count` is the order count across every ICS
+    name that didn't match any boundary, and `unmatched_names` lists which
+    ICS names those were (so the caller can surface both — same convention
+    as order_map_unmapped_count for the organisation map, but naming the
+    actual strings too makes a real mismatch immediately diagnosable
+    instead of just "something didn't match").
     """
     boundaries = FhirClient.fetch_icb_boundaries()
     total = sum(count for _, count in ics_counts)
     if not boundaries:
-        return None, total
+        return None, total, [name for name, _ in ics_counts]
 
     icb_by_norm = {}
     icb_name_by_code = {}
@@ -620,21 +663,21 @@ def ics_choropleth_html(ics_counts):
 
     counts_by_code = {}
     unmatched = 0
+    unmatched_names = []
     for ics_name, count in ics_counts:
         norm = _normalize_icb_name(ics_name)
         code = icb_by_norm.get(norm)
-        if not code and norm:
-            for icb_norm, icb_code in icb_by_norm.items():
-                if norm in icb_norm or icb_norm in norm:
-                    code = icb_code
-                    break
+        if not code:
+            best_norm = _best_icb_match(norm, icb_by_norm.keys())
+            code = icb_by_norm.get(best_norm)
         if code:
             counts_by_code[code] = counts_by_code.get(code, 0) + count
         else:
             unmatched += count
+            unmatched_names.append(ics_name)
 
     if not counts_by_code:
-        return None, unmatched
+        return None, unmatched, unmatched_names
 
     rows = [
         {"icb_code": code, "ics_name": name, "count": counts_by_code.get(code, 0)}
@@ -657,7 +700,7 @@ def ics_choropleth_html(ics_counts):
         resolution=50,
     )
     fig.update_layout(margin={"r": 0, "t": 0, "l": 0, "b": 0}, height=520)
-    return fig.to_html(full_html=False, include_plotlyjs="cdn"), unmatched
+    return fig.to_html(full_html=False, include_plotlyjs="cdn"), unmatched, unmatched_names
 
 
 def pivot_by_day(rows, key, top_n=10):
@@ -728,9 +771,9 @@ def stats():
     error = None
     order_rows, report_rows = [], []
     order_map_points, order_map_unmapped_count = [], 0
-    order_ics_map_html, order_ics_map_unmatched_count = None, 0
+    order_ics_map_html, order_ics_map_unmatched_count, order_ics_map_unmatched_names = None, 0, []
     report_map_points, report_map_unmapped_count = [], 0
-    report_ics_map_html, report_ics_map_unmatched_count = None, 0
+    report_ics_map_html, report_ics_map_unmatched_count, report_ics_map_unmatched_names = None, 0, []
     try:
         orders = client.orders_in_range(start, end)
         order_rows = []
@@ -748,7 +791,7 @@ def stats():
         order_map_points = [g for g in org_geo if g["lat"] is not None and g["lon"] is not None]
         order_map_unmapped_count = sum(g["count"] for g in org_geo if g["lat"] is None)
 
-        order_ics_map_html, order_ics_map_unmatched_count = ics_choropleth_html(group_count(order_rows, "ics"))
+        order_ics_map_html, order_ics_map_unmatched_count, order_ics_map_unmatched_names = ics_choropleth_html(group_count(order_rows, "ics"))
 
         reports = client.reports_in_range(start, end)
         report_rows = []
@@ -776,7 +819,7 @@ def stats():
         report_map_points = [g for g in report_org_geo if g["lat"] is not None and g["lon"] is not None]
         report_map_unmapped_count = sum(g["count"] for g in report_org_geo if g["lat"] is None)
 
-        report_ics_map_html, report_ics_map_unmatched_count = ics_choropleth_html(group_count(report_rows, "ics"))
+        report_ics_map_html, report_ics_map_unmatched_count, report_ics_map_unmatched_names = ics_choropleth_html(group_count(report_rows, "ics"))
     except Exception as e:
         error = str(e)
 
@@ -792,6 +835,7 @@ def stats():
         order_map_unmapped_count=order_map_unmapped_count,
         order_ics_map_html=order_ics_map_html,
         order_ics_map_unmatched_count=order_ics_map_unmatched_count,
+        order_ics_map_unmatched_names=order_ics_map_unmatched_names,
         report_by_day=group_count(report_rows, "date"),
         report_by_org=group_count(report_rows, "organisation"),
         report_by_ordering_provider=group_count(report_rows, "ordering_provider"),
@@ -802,6 +846,7 @@ def stats():
         report_map_unmapped_count=report_map_unmapped_count,
         report_ics_map_html=report_ics_map_html,
         report_ics_map_unmatched_count=report_ics_map_unmatched_count,
+        report_ics_map_unmatched_names=report_ics_map_unmatched_names,
         order_pivot_org=pivot_by_day(order_rows, "organisation"),
         order_pivot_indication=pivot_by_day(order_rows, "indication"),
         report_pivot_org=pivot_by_day(report_rows, "organisation"),

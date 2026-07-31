@@ -163,13 +163,27 @@ by day, organisation, indication, ICS, and country.
   `patient_ics()` — i.e. whatever this server's
   `Patient.managingOrganization.name` says) against the ONS boundaries'
   official `ICB23NM` field by stripping a leading "NHS", a trailing
-  "Integrated Care Board"/"ICB", and non-alphanumeric characters down to a
-  lowercase core, then trying an exact match on that and falling back to
-  substring containment — **this server's exact ICS naming wording against
-  the ONS names is unconfirmed**, so if the map comes up empty (or
-  `order_ics_map_unmatched_count` covers everything), print a real
-  `patient_ics()` value and compare it against a boundary's `ICB23NM`
-  directly. Every ICB in the boundary dataset is included as a row (0-count
+  "Integrated Care Board"/"ICB", normalising "&" to "and" (many of the 42
+  official names are "X and Y"/"X, Y and Z" compounds — this one
+  substitution alone accounts for a lot of otherwise-missed matches), and
+  dropping remaining non-alphanumeric characters down to a lowercase core;
+  if that doesn't produce an exact match, `app._best_icb_match()` falls
+  back to a difflib `SequenceMatcher` similarity ratio against every ICB
+  name (threshold `ICB_FUZZY_MATCH_THRESHOLD` = 0.82), which — unlike a
+  plain substring check — still matches when a filler word like "the" is
+  inserted/dropped in the middle of a name (e.g. "Cornwall and Isles of
+  Scilly" vs. the official "...and **the** Isles of Scilly", where neither
+  is a contiguous substring of the other). Calibrated so genuine near-
+  matches score at/near 1.0 while unrelated org names score well under
+  0.5, and even the five "North/South/East/West/Central London" ICBs
+  (which differ by one directional word) separate cleanly. **This server's
+  exact ICS naming wording against the ONS names is still unconfirmed**,
+  so if the map comes up empty (or `order_ics_map_unmatched_count` covers
+  everything), the muted paragraph under each map lists the actual
+  unmatched ICS name strings (`order_ics_map_unmatched_names`/
+  `report_ics_map_unmatched_names`) — compare one of those directly
+  against a boundary's `ICB23NM` rather than needing to add a print
+  statement. Every ICB in the boundary dataset is included as a row (0-count
   for unmatched ones, not just the matched subset), so all ~42 outlines
   draw and tile into the England outline rather than only the handful with
   data floating with no context; `update_geos(visible=True, ...)` also
@@ -627,14 +641,42 @@ haven't been exercised against a live NHS North West Genomics IG server:
     all. If the map never shows any markers (`order_map_unmapped_count`
     equals the total order count), sample a real Organization resource and
     check where its address actually lives.
-12. **ICS name wording vs. ONS ICB23NM** (`app._normalize_icb_name()`, used
-    by the `/stats` ICS choropleth) — this server's
-    `Patient.managingOrganization.name` values haven't been compared
-    against the ONS Open Geography Portal's official ICB names. If the
-    choropleth never shows any shaded regions (`order_ics_map_unmatched_count`
-    equals the total order count), print a real `patient_ics()` value next
-    to a boundary feature's `ICB23NM` and adjust the normalisation/fallback
-    matching.
+12. **ICS name wording vs. ONS ICB23NM** (`app._normalize_icb_name()`/
+    `_best_icb_match()`, used by the `/stats` ICS choropleths) — this
+    server's `Patient.managingOrganization.name` values haven't been
+    compared against the ONS Open Geography Portal's official ICB names.
+    If several ICS regions never shade despite having orders/reports, check
+    the `order_ics_map_unmatched_names`/`report_ics_map_unmatched_names`
+    lists shown under each map (no need to add a print statement) and
+    compare one of those strings against a boundary feature's `ICB23NM`
+    directly — if it's a wording variant the current normalisation/fuzzy
+    match doesn't already handle (like the "&" vs "and" and dropped-"the"
+    cases it was fixed for), extend `_normalize_icb_name()` or tune
+    `ICB_FUZZY_MATCH_THRESHOLD`.
+
+## Maintenance scripts (`scripts/`)
+
+Standalone, run-manually scripts — not wired into the Flask app or its
+nav, unlike the admin/clear-down screens.
+
+- **`fix_organization_names.py`** — finds every Organization resource on
+  the configured server with no `.name` (`FhirClient.
+  organizations_without_name()`, a system-wide `_search_all()` query) and
+  backfills one from the NHS ODS lookup API
+  (`https://directory.spineservices.nhs.uk/ORD/2-0-0` — a plain JSON REST
+  API, not FHIR-shaped; open access, no key/onboarding required per NHS
+  Digital's API catalogue — the older FHIR-shaped
+  `directory.spineservices.nhs.uk/STU3/Organization` endpoint some docs
+  still reference has been retired) using the Organization's own ODS code
+  identifier (`organisation_ods_code()`). An Organization with no ODS code
+  at all, or one whose code the lookup API doesn't recognise, is reported
+  separately rather than silently skipped.
+  **Dry-run by default** — prints what it would change; `--apply` is
+  required to actually `PUT` the corrected name back
+  (`FhirClient.update_organization_name()`, via the new generic `_put()`
+  helper — the app had no write path before this, only `_get`/`_delete`).
+  The name is written exactly as ODS returns it (upper case, per ODS
+  convention), not re-cased.
 
 ## Natural next steps (not yet implemented)
 

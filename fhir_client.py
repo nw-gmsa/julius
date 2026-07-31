@@ -90,6 +90,32 @@ class FhirClient:
         except requests.RequestException:
             return False
 
+    def _put(self, path, resource):
+        """PUT a full resource body to a relative path (e.g.
+        "Organization/123") — used for corrections that update an existing
+        resource in place (see update_organization_name()). Raises
+        requests.HTTPError on failure, unlike _delete()'s swallow-and-report
+        style: a write that fails here should stop the caller rather than
+        being silently counted as done. Some servers respond to a
+        successful PUT with an empty body (200 with nothing, or 204 No
+        Content) rather than the updated resource — real behaviour seen
+        against this app's own configured server — so a 2xx with no
+        parseable JSON body is still treated as success and returns None
+        rather than raising on the body parse."""
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        resp = requests.put(
+            url, json=resource,
+            headers={**self._headers(), "Content-Type": "application/fhir+json"},
+            auth=self._auth(), verify=self.verify_ssl, timeout=15,
+        )
+        resp.raise_for_status()
+        if not resp.content:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
     @staticmethod
     def _entries(bundle):
         """Pull resources out of a FHIR Bundle, ignoring missing/empty ones."""
@@ -921,6 +947,57 @@ class FhirClient:
             if not ident.get("system"):
                 return ident.get("value")
         return None
+
+    def organizations_without_name(self):
+        """
+        Every Organization resource on this FHIR server (system-wide, no
+        date bound) with no `.name` — the population
+        scripts/fix_organization_names.py corrects. Paginates via
+        _search_all(), same 1,000-record default cap as other system-wide
+        queries (raise max_pages there if a server has more).
+        """
+        orgs = self._search_all("Organization", {"_count": 100})
+        return [o for o in orgs if not o.get("name")]
+
+    #: NHS ODS lookup API (Organisation Reference Data v2.0.0) — a plain
+    #: JSON REST API (not FHIR-shaped), open access per NHS Digital's API
+    #: catalogue: no API key or onboarding required. The older FHIR-shaped
+    #: "directory.spineservices.nhs.uk/STU3/Organization" endpoint some
+    #: older docs reference has been retired — this is the current one.
+    ODS_LOOKUP_API_URL = "https://directory.spineservices.nhs.uk/ORD/2-0-0/organisations"
+
+    @classmethod
+    def ods_lookup_name(cls, ods_code):
+        """
+        The official organisation name for an ODS code, from the NHS ODS
+        lookup API (see ODS_LOOKUP_API_URL), or None if the code is
+        invalid/unknown, or the API can't be reached (network error,
+        timeout, non-2xx response) — a failed lookup should be reported by
+        the caller as "couldn't resolve", not raise. The name is returned
+        exactly as ODS has it (upper case, per ODS convention) rather than
+        re-cased, since it's the authoritative source for this field.
+        """
+        if not ods_code:
+            return None
+        try:
+            resp = requests.get(f"{cls.ODS_LOOKUP_API_URL}/{quote(ods_code)}", timeout=10)
+            if resp.ok:
+                return (resp.json().get("Organisation") or {}).get("Name")
+        except requests.RequestException:
+            pass
+        return None
+
+    def update_organization_name(self, organization, name):
+        """
+        PUT-updates an Organization resource's `name` on this FHIR server,
+        preserving every other field — used by
+        scripts/fix_organization_names.py to backfill a name derived from
+        an NHS ODS lookup (ods_lookup_name()) for an Organization that has
+        none. Raises requests.HTTPError on failure (via _put()).
+        """
+        updated = dict(organization)
+        updated["name"] = name
+        return self._put(f"Organization/{organization['id']}", updated)
 
     def resolve_organisation_ods(self, org_ref):
         """
