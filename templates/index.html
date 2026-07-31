@@ -14,8 +14,42 @@
     </p>
   </form>
 
+  <form action="/search" method="get">
+    <p>
+      <input type="text" name="order_number" placeholder="Order or test number" value="{{ searched_order_number or '' }}">
+      <button type="submit">Search</button>
+      <span class="muted">Matches a placer/filler order number or a report identifier (e.g. iGene). A single match takes you straight to that patient.</span>
+    </p>
+  </form>
+
   {% if error %}
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  {% if identifier_matches is defined and identifier_matches is not none %}
+    <h2>Order/report matches ({{ identifier_matches|length }})</h2>
+    {% if identifier_matches %}
+      <p class="muted">More than one patient matched "{{ searched_order_number }}" — pick one below.</p>
+      <table>
+        <tr><th>Type</th><th>Test</th><th>Patient</th><th></th></tr>
+        {% for m in identifier_matches %}
+          <tr>
+            <td>{{ m.kind }}</td>
+            <td>{{ m.test }}</td>
+            <td>{{ m.patient_name }}</td>
+            <td>
+              {% if m.patient_id %}
+                <a href="/patient/{{ m.patient_id }}">View patient →</a>
+              {% else %}
+                <span class="muted">Patient unresolved</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">No order or report matched "{{ searched_order_number }}".</p>
+    {% endif %}
   {% endif %}
 
   {% if patients is defined %}

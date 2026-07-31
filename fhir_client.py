@@ -197,6 +197,26 @@ class FhirClient:
         bundle = self._get("Patient", {"name": name, "_count": 20})
         return self._entries(bundle)
 
+    def find_orders_by_identifier(self, value):
+        """
+        ServiceRequest resources whose `identifier` matches `value` — used
+        by the search screen's order/test-number lookup. FHIR's
+        `identifier` search param matches by value alone when no
+        `system|value` pipe is given (same convention search_patients()
+        already uses for nhs_number), so this catches a placer number, a
+        filler number, or any other identifier on the order without the
+        caller needing to know which kind it is.
+        """
+        bundle = self._get("ServiceRequest", {"identifier": value, "_count": 20})
+        return self._entries(bundle)
+
+    def find_reports_by_identifier(self, value):
+        """DiagnosticReport resources whose `identifier` matches `value` —
+        the report-side counterpart to find_orders_by_identifier(), e.g.
+        for an iGene report identifier."""
+        bundle = self._get("DiagnosticReport", {"identifier": value, "_count": 20})
+        return self._entries(bundle)
+
     def get_patient(self, patient_id):
         """Fetch a single Patient resource by ID (used by the patient page's
         demographics section, which needs the resource itself rather than

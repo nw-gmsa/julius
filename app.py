@@ -2,7 +2,7 @@ import os
 import re
 import difflib
 from datetime import date, timedelta
-from flask import Flask, render_template, request, Response, abort
+from flask import Flask, render_template, request, Response, abort, redirect
 import pandas as pd
 import plotly.express as px
 from fhir_client import FhirClient
@@ -216,10 +216,16 @@ def search():
     name = request.args.get("name", "").strip()
     patient_id = request.args.get("patient_id", "").strip()
     nhs_number = request.args.get("nhs_number", "").strip()
+    order_number = request.args.get("order_number", "").strip()
     error = None
     patients = []
+    identifier_matches = None
     try:
-        if patient_id:
+        if order_number:
+            identifier_matches, single_patient_id = _find_by_order_or_report_number(order_number)
+            if single_patient_id:
+                return redirect(f"/patient/{single_patient_id}")
+        elif patient_id:
             patients = client.search_patients(patient_id=patient_id)
         elif nhs_number:
             patients = client.search_patients(nhs_number=nhs_number)
@@ -230,7 +236,48 @@ def search():
     return render_template("index.html", base_url=client.base_url,
                             patients=patients, error=error,
                             searched_name=name, searched_id=patient_id,
-                            searched_nhs=nhs_number)
+                            searched_nhs=nhs_number, searched_order_number=order_number,
+                            identifier_matches=identifier_matches)
+
+
+def _find_by_order_or_report_number(value):
+    """
+    Look up `value` as an order/test number against both ServiceRequest and
+    DiagnosticReport identifiers (find_orders_by_identifier()/
+    find_reports_by_identifier()) — the caller doesn't know in advance
+    whether it's an order (placer/filler) number or a report (e.g. iGene)
+    number, so both are searched and whatever matches is shown.
+
+    Returns (matches, single_patient_id):
+    - `matches` is a display-ready list of {"kind", "resource_id", "test",
+      "patient_id", "patient_name"} dicts, one per matching order/report,
+      for the search screen's disambiguation table.
+    - `single_patient_id` is that one patient's id if every match resolves
+      to the *same* patient (the common case — an order/report number
+      belongs to one patient), so the caller can redirect straight to the
+      patient page; None if there were zero matches, unresolvable
+      patients, or matches spanning more than one patient (left for the
+      user to disambiguate from the table instead of guessing).
+    """
+    matches = []
+    patient_ids = set()
+    for resource, kind in (
+        [(o, "Order") for o in client.find_orders_by_identifier(value)]
+        + [(r, "Report") for r in client.find_reports_by_identifier(value)]
+    ):
+        patient = client.patient_for(resource)
+        matches.append({
+            "kind": kind,
+            "resource_id": resource.get("id"),
+            "test": code_text(resource.get("code")),
+            "patient_id": patient.get("id") if patient else None,
+            "patient_name": human_name(patient) if patient else "Unknown",
+        })
+        if patient and patient.get("id"):
+            patient_ids.add(patient["id"])
+
+    single_patient_id = next(iter(patient_ids)) if len(patient_ids) == 1 else None
+    return matches, single_patient_id
 
 
 @app.route("/patient/<patient_id>")

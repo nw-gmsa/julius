@@ -64,6 +64,24 @@ Patients are matched via **NHS number** (`identifier` search param) first,
 since the IG's `Patient` resources carry an `NHSIdentifier` — more reliable
 than name matching, which is available as a fallback.
 
+### Search by order/report number
+
+The index page's second search box (`order_number`) looks a value up
+against **both** `ServiceRequest.identifier` and `DiagnosticReport.identifier`
+(`FhirClient.find_orders_by_identifier()`/`find_reports_by_identifier()`,
+plain FHIR `identifier` search — matches any identifier value regardless of
+system, same convention `search_patients(nhs_number=...)` already uses) —
+the caller doesn't know upfront whether it's a placer/filler order number
+or a report identifier (e.g. iGene), so both are searched and whatever
+matches is shown. `app._find_by_order_or_report_number()` resolves each
+match's patient (`patient_for()`) and, when every match resolves to the
+same one patient (the common case), the route redirects straight to
+`/patient/<id>` rather than showing an intermediate results page. If
+matches span more than one patient, or a patient can't be resolved, the
+index page instead renders a disambiguation table (order/report type, test
+name, patient, a link per row) rather than guessing which one to redirect
+to.
+
 ### Order chains (basedOn)
 
 `FhirClient.build_order_chains()` turns a patient's flat `ServiceRequest` list
