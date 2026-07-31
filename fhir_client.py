@@ -22,6 +22,7 @@ not guesses:
 import os
 import base64
 import requests
+from urllib.parse import quote
 from requests.auth import HTTPBasicAuth
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -52,6 +53,7 @@ class FhirClient:
             verify_ssl = os.environ.get("FHIR_VERIFY_SSL", "false").lower() == "true"
         self.verify_ssl = verify_ssl
         self._ref_cache = {}  # reference string -> resolved resource (or None); process-lifetime only
+        self._geocode_cache = {}  # normalized postcode -> (lat, lon) or None; process-lifetime only
 
     def _auth(self):
         return HTTPBasicAuth(self.user, self.password) if self.user else None
@@ -952,6 +954,111 @@ class FhirClient:
             if not inline_identifier.get("system") or inline_identifier.get("system") == self.ODS_ORGANIZATION_CODE_SYSTEM:
                 ods = inline_identifier.get("value")
         return ods
+
+    @staticmethod
+    def organisation_postcode(organisation):
+        """First postcode found on an Organization resource's `address`
+        list (Address.postalCode) — used to place a requesting organisation
+        on the /stats map via geocode_postcode(). Not confirmed whether
+        this server populates Organization.address at all; returns None if
+        it doesn't, or has no postalCode on any entry."""
+        if not organisation:
+            return None
+        for address in organisation.get("address", []):
+            postcode = address.get("postalCode")
+            if postcode:
+                return postcode
+        return None
+
+    def geocode_postcode(self, postcode):
+        """
+        (latitude, longitude) for a UK postcode via the free postcodes.io
+        API (https://postcodes.io — no API key required), or None if the
+        postcode is invalid, unrecognised, or the API can't be reached
+        (network error, timeout, non-2xx response) — geocoding failure
+        should degrade the /stats map (that organisation just doesn't get a
+        marker), not break the whole page. Cached per normalised postcode
+        for the life of the process, since the same handful of requesting
+        organisations recur across a date range and postcodes.io has no
+        reason to be re-queried for one we've already resolved.
+        """
+        if not postcode:
+            return None
+        key = postcode.strip().upper()
+        if not key:
+            return None
+        if key in self._geocode_cache:
+            return self._geocode_cache[key]
+        result = None
+        try:
+            resp = requests.get(
+                f"https://api.postcodes.io/postcodes/{quote(key)}", timeout=5,
+            )
+            if resp.ok:
+                body = resp.json().get("result") or {}
+                lat, lon = body.get("latitude"), body.get("longitude")
+                if lat is not None and lon is not None:
+                    result = (lat, lon)
+        except requests.RequestException:
+            result = None
+        self._geocode_cache[key] = result
+        return result
+
+    def organisation_geocode(self, organisation):
+        """(latitude, longitude) for an Organization resource, via its
+        postcode (organisation_postcode()) and geocode_postcode() — or None
+        if it has no address/postcode, or the postcode couldn't be
+        geocoded."""
+        postcode = self.organisation_postcode(organisation)
+        return self.geocode_postcode(postcode) if postcode else None
+
+    #: ONS Open Geography Portal's public ArcGIS FeatureServer for
+    #: "Integrated Care Boards (April 2023) EN BGC" (Generalised, Clipped
+    #: boundaries) — no API key required. outSR=4326 reprojects from the
+    #: source British National Grid (EPSG:27700) to WGS84 lat/lon so the
+    #: GeoJSON overlays directly on a Plotly/Mapbox map. Only the two
+    #: fields the /stats choropleth needs are requested: ICB23NM (official
+    #: name, e.g. "NHS Greater Manchester Integrated Care Board") and
+    #: ICB23CD (ONS area code, used as the choropleth's join key).
+    ICB_BOUNDARY_GEOJSON_URL = (
+        "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/"
+        "Integrated_Care_Boards_April_2023_EN_BGC/FeatureServer/0/query"
+        "?where=1%3D1&outFields=ICB23NM,ICB23CD&outSR=4326&f=geojson"
+    )
+
+    #: Class-level (not per-instance) cache: this is static reference data —
+    #: NHS ICB boundaries don't depend on which FHIR server/credentials a
+    #: given FhirClient instance was built with — so it's fetched once per
+    #: process rather than once per instance.
+    _icb_boundary_cache = None
+
+    @classmethod
+    def fetch_icb_boundaries(cls):
+        """
+        GeoJSON FeatureCollection of NHS England Integrated Care Board (ICB)
+        boundaries (see ICB_BOUNDARY_GEOJSON_URL), for the /stats "Orders by
+        patient ICS" choropleth. Cached at class level for the process
+        lifetime — ~42 polygons, not worth re-fetching per request.
+
+        Returns None if the ONS ArcGIS service can't be reached or returns
+        no features — a failed fetch is *not* cached, so the next call
+        retries rather than permanently giving up for the process's
+        lifetime (unlike geocode_postcode()'s per-postcode caching, this
+        isn't about an individual invalid input, just transient network
+        conditions); callers should degrade to "no map" rather than
+        failing the whole /stats page.
+        """
+        if cls._icb_boundary_cache is not None:
+            return cls._icb_boundary_cache
+        try:
+            resp = requests.get(cls.ICB_BOUNDARY_GEOJSON_URL, timeout=15)
+            if resp.ok:
+                geojson = resp.json()
+                if geojson.get("features"):
+                    cls._icb_boundary_cache = geojson
+        except requests.RequestException:
+            pass
+        return cls._icb_boundary_cache
 
     #: iGene report identifier system (NW Genomics IG-specific) — a local
     #: cross-reference id, e.g. into the iGene LIMS, that may be carried on

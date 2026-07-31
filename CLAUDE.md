@@ -127,6 +127,77 @@ by day, organisation, indication, ICS, and country.
   high-cardinality field (free-text indications especially) can't blow the
   table out sideways. `stats.html`'s `render_pivot()` macro renders any of
   the four from that same shape.
+- **"Orders by requesting organisation" also renders as a Leaflet map**
+  (OpenStreetMap tiles, loaded client-side from unpkg/OSM — needs outbound
+  internet from the browser) above the existing table, one circle marker
+  per distinct requesting Organization (area proportional to order count).
+  `app.orders_by_organisation_geocoded()` groups orders by the Organization
+  resource resolved via `order_organisation_resource()`/
+  `order_organisation_ods()` (same resolution chain as the ctDNA summary's
+  organisation column), then geocodes each org's postcode
+  (`FhirClient.organisation_postcode()` — `Organization.address[].postalCode`,
+  **unconfirmed whether this server populates it at all**) via
+  `FhirClient.geocode_postcode()`, which calls the free
+  [postcodes.io](https://postcodes.io) API (no key required) — this needs
+  outbound internet from wherever the Flask app itself runs, separate from
+  the browser's tile-fetching. Geocoding results are cached per-postcode on
+  the `FhirClient` instance for the process lifetime. An organisation whose
+  postcode is missing or fails to geocode is still counted (`order_by_org`'s
+  table is unaffected) but has no marker; `order_map_unmapped_count` surfaces
+  how many orders that affected rather than silently dropping them from the
+  map.
+- **"Orders by patient ICS" also renders as a Plotly Express choropleth**
+  (server-rendered: `app.ics_choropleth_html()` builds the figure with
+  `plotly.express.choropleth()` and returns
+  `fig.to_html(full_html=False, include_plotlyjs="cdn")`, embedded directly
+  in `stats.html` via `|safe`) shading each matched NHS Integrated Care
+  Board by order count, above the existing table.
+  `FhirClient.fetch_icb_boundaries()` fetches NHS ICB polygons from the ONS
+  Open Geography Portal's public ArcGIS FeatureServer (no key required;
+  needs outbound internet from wherever the Flask app runs — same
+  requirement as the organisation map's postcodes.io geocoding, but a
+  different host), cached at class level for the process lifetime (~42
+  polygons — not worth re-fetching per request; a failed fetch is **not**
+  cached, so the next `/stats` request retries).
+  `app._normalize_icb_name()` fuzzy-matches each resolved ICS name (from
+  `patient_ics()` — i.e. whatever this server's
+  `Patient.managingOrganization.name` says) against the ONS boundaries'
+  official `ICB23NM` field by stripping a leading "NHS", a trailing
+  "Integrated Care Board"/"ICB", and non-alphanumeric characters down to a
+  lowercase core, then trying an exact match on that and falling back to
+  substring containment — **this server's exact ICS naming wording against
+  the ONS names is unconfirmed**, so if the map comes up empty (or
+  `order_ics_map_unmatched_count` covers everything), print a real
+  `patient_ics()` value and compare it against a boundary's `ICB23NM`
+  directly. Every ICB in the boundary dataset is included as a row (0-count
+  for unmatched ones, not just the matched subset), so all ~42 outlines
+  draw and tile into the England outline rather than only the handful with
+  data floating with no context; `update_geos(visible=True, ...)` also
+  turns on a UK/Europe basemap (coastlines, country borders, land/ocean
+  fill) underneath, and `update_traces(marker_line_color=...)` draws a
+  visible border on every ICB polygon (matched or not).
+- **The reports side gets the same two treatments**, on a "Reports by
+  ordering provider" section (new — distinct from the pre-existing
+  "Reports by performing organisation", which is who *produced* the
+  report, from `DiagnosticReport.performer` via `report_organisation()`)
+  and "Reports by patient ICS":
+  - "Ordering provider" is who *ordered* the test — resolved via
+    `order_for_report(report)` (the report's originating `ServiceRequest`,
+    same lookup the Cepheid screen uses) and then the same
+    `order_organisation()`/`order_organisation_resource()` chain the
+    orders side uses. `orders_by_organisation_geocoded()` is reused
+    unchanged for the map (it just takes a plain list of ServiceRequest
+    resources — the caller passes each report's originating order instead
+    of the order itself, so counts land per-report). `report_rows` grew an
+    `ordering_provider` field (alongside the pre-existing `organisation`
+    field, which stays the *performing* org) so `report_by_ordering_provider`
+    can use the same `group_count()` table pattern as everywhere else.
+  - The ICS choropleth is `ics_choropleth_html()` called on
+    `group_count(report_rows, "ics")` exactly as the orders side calls it
+    on `order_rows` — no report-specific logic needed, since ICS comes from
+    the patient either way.
+  - Map div IDs are namespaced (`org-map` for orders, `report-org-map` for
+    reports) since both Leaflet maps render on the same page.
 
 ### ctDNA summary (`/ctdna`)
 
@@ -550,6 +621,20 @@ haven't been exercised against a live NHS North West Genomics IG server:
     not confirmed which resource this server actually carries it on (or
     whether it's populated at all). If the "iGene report ID" column is
     always "—", check a real order/report pair directly.
+11. **Organization.address on this server** (`organisation_postcode`, used by
+    the `/stats` requesting-organisation map) — untested whether
+    Organization resources here carry an `address` with `postalCode` at
+    all. If the map never shows any markers (`order_map_unmapped_count`
+    equals the total order count), sample a real Organization resource and
+    check where its address actually lives.
+12. **ICS name wording vs. ONS ICB23NM** (`app._normalize_icb_name()`, used
+    by the `/stats` ICS choropleth) — this server's
+    `Patient.managingOrganization.name` values haven't been compared
+    against the ONS Open Geography Portal's official ICB names. If the
+    choropleth never shows any shaded regions (`order_ics_map_unmatched_count`
+    equals the total order count), print a real `patient_ics()` value next
+    to a boundary feature's `ICB23NM` and adjust the normalisation/fallback
+    matching.
 
 ## Natural next steps (not yet implemented)
 

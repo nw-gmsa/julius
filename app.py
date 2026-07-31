@@ -1,6 +1,9 @@
 import os
+import re
 from datetime import date, timedelta
 from flask import Flask, render_template, request, Response, abort
+import pandas as pd
+import plotly.express as px
 from fhir_client import FhirClient
 
 app = Flask(__name__)
@@ -517,6 +520,146 @@ def group_count(rows, key):
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
+def orders_by_organisation_geocoded(orders):
+    """
+    Order counts per requesting organisation, geocoded for the /stats map —
+    [{"name", "ods", "lat", "lon", "count"}, ...], one entry per distinct
+    Organization resource resolved from ServiceRequest.requester
+    (order_organisation_resource()/order_organisation_ods(), same
+    resolution chain as the ctDNA summary's organisation column). Grouped
+    by the Organization's own `id` where it resolved (falling back to its
+    display name for an order whose requester didn't resolve to a full
+    resource, so it's still counted even though it can't be placed on the
+    map) rather than by display string, since that's a stable identity to
+    geocode once per organisation regardless of how many orders it has.
+
+    Only entries with both `lat` and `lon` (i.e. an address with a postcode
+    that geocode_postcode() could resolve) are meant to be plotted; entries
+    without are still returned so the caller can report how many
+    organisations/orders couldn't be placed, rather than that count being
+    silently dropped.
+
+    Takes a plain list of ServiceRequest resources, so the "Reports by
+    ordering provider" map reuses this unchanged — the caller passes each
+    report's originating order (client.order_for_report(r)) instead of the
+    order itself, and counts come out per-report rather than per-order.
+    """
+    orgs = {}
+    for order in orders:
+        org_resource = client.order_organisation_resource(order)
+        name = (org_resource.get("name") if org_resource else None) or client.order_organisation(order) or "Unknown"
+        key = (org_resource.get("id") if org_resource else None) or name
+        if key not in orgs:
+            geocode = client.organisation_geocode(org_resource) if org_resource else None
+            orgs[key] = {
+                "name": name,
+                "ods": client.organisation_ods_code(org_resource) if org_resource else None,
+                "lat": geocode[0] if geocode else None,
+                "lon": geocode[1] if geocode else None,
+                "count": 0,
+            }
+        orgs[key]["count"] += 1
+    return list(orgs.values())
+
+
+def _normalize_icb_name(name):
+    """
+    Normalise an ICS display name for fuzzy-matching against the ONS
+    ICB23NM field. patient_ics() resolves an ICS name straight from a
+    Patient's managingOrganization.name — whatever this FHIR server put
+    there — which isn't guaranteed to match the ONS Open Geography
+    Portal's official wording verbatim (e.g. this server might say "NHS
+    Greater Manchester ICB" where ONS says "NHS Greater Manchester
+    Integrated Care Board"). Stripping a leading "NHS", a trailing
+    "Integrated Care Board"/"ICB", and all non-alphanumeric characters
+    down to a lowercase core (e.g. "greatermanchester") gives both sides a
+    fair shot at an exact match; ics_choropleth_html() falls back further
+    to substring containment on this normalised form if that still misses.
+    """
+    if not name:
+        return ""
+    n = re.sub(r"(?i)^nhs\s+", "", name.strip())
+    n = re.sub(r"(?i)\s+integrated care board$", "", n)
+    n = re.sub(r"(?i)\s+icb$", "", n)
+    return re.sub(r"[^a-z0-9]+", "", n.lower())
+
+
+def ics_choropleth_html(ics_counts):
+    """
+    [(ics_name, count), ...] (from group_count(order_rows, "ics")) -> a
+    self-contained Plotly Express choropleth HTML fragment shading each
+    matched NHS Integrated Care Board by order count, using
+    FhirClient.fetch_icb_boundaries() for the boundary polygons and
+    _normalize_icb_name() to match them against our resolved ICS names.
+
+    Every ICB in the boundary dataset is included as a row (unmatched ones
+    at count=0), not just the ones with orders/reports — so every ICB's
+    outline is drawn (they tile to the England outline), giving the map
+    geographic context beyond just the handful of regions with data.
+    `update_geos()` also turns on a UK/Europe basemap (coastline, country
+    borders) underneath, further placing the ICBs within the UK outline.
+
+    Returns (html, unmatched_count): `html` is None if boundary data
+    couldn't be fetched or nothing in `ics_counts` matched a boundary at
+    all; `unmatched_count` is the order count across every ICS name that
+    didn't match any boundary (so the caller can surface it rather than the
+    gap being silent — same convention as order_map_unmapped_count for the
+    organisation map).
+    """
+    boundaries = FhirClient.fetch_icb_boundaries()
+    total = sum(count for _, count in ics_counts)
+    if not boundaries:
+        return None, total
+
+    icb_by_norm = {}
+    icb_name_by_code = {}
+    for feature in boundaries["features"]:
+        code = feature["properties"]["ICB23CD"]
+        icb_by_norm[_normalize_icb_name(feature["properties"]["ICB23NM"])] = code
+        icb_name_by_code[code] = feature["properties"]["ICB23NM"]
+
+    counts_by_code = {}
+    unmatched = 0
+    for ics_name, count in ics_counts:
+        norm = _normalize_icb_name(ics_name)
+        code = icb_by_norm.get(norm)
+        if not code and norm:
+            for icb_norm, icb_code in icb_by_norm.items():
+                if norm in icb_norm or icb_norm in norm:
+                    code = icb_code
+                    break
+        if code:
+            counts_by_code[code] = counts_by_code.get(code, 0) + count
+        else:
+            unmatched += count
+
+    if not counts_by_code:
+        return None, unmatched
+
+    rows = [
+        {"icb_code": code, "ics_name": name, "count": counts_by_code.get(code, 0)}
+        for code, name in icb_name_by_code.items()
+    ]
+    fig = px.choropleth(
+        pd.DataFrame(rows), geojson=boundaries, locations="icb_code",
+        featureidkey="properties.ICB23CD", color="count",
+        hover_name="ics_name", hover_data={"icb_code": False, "count": True},
+        color_continuous_scale="Blues", labels={"count": "Orders"},
+    )
+    fig.update_traces(marker_line_color="#666666", marker_line_width=0.6)
+    fig.update_geos(
+        fitbounds="locations", visible=True,
+        showcountries=True, countrycolor="#666666",
+        showcoastlines=True, coastlinecolor="#666666",
+        showsubunits=True, subunitcolor="#999999",
+        showland=True, landcolor="#f2f2f2",
+        showocean=True, oceancolor="#eaf3fa",
+        resolution=50,
+    )
+    fig.update_layout(margin={"r": 0, "t": 0, "l": 0, "b": 0}, height=520)
+    return fig.to_html(full_html=False, include_plotlyjs="cdn"), unmatched
+
+
 def pivot_by_day(rows, key, top_n=10):
     """
     [{"date": ..., key: value, ...}, ...] -> {"days": [...], "columns": [...], "table": {day: {column: count}}}.
@@ -584,6 +727,10 @@ def stats():
 
     error = None
     order_rows, report_rows = [], []
+    order_map_points, order_map_unmapped_count = [], 0
+    order_ics_map_html, order_ics_map_unmatched_count = None, 0
+    report_map_points, report_map_unmapped_count = [], 0
+    report_ics_map_html, report_ics_map_unmatched_count = None, 0
     try:
         orders = client.orders_in_range(start, end)
         order_rows = []
@@ -597,17 +744,39 @@ def stats():
                 "country": client.patient_country(patient) or "Unknown",
             })
 
+        org_geo = orders_by_organisation_geocoded(orders)
+        order_map_points = [g for g in org_geo if g["lat"] is not None and g["lon"] is not None]
+        order_map_unmapped_count = sum(g["count"] for g in org_geo if g["lat"] is None)
+
+        order_ics_map_html, order_ics_map_unmatched_count = ics_choropleth_html(group_count(order_rows, "ics"))
+
         reports = client.reports_in_range(start, end)
         report_rows = []
+        report_orders = []
         for r in reports:
             patient = client.patient_for(r)
+            # order_for_report()'s originating ServiceRequest — separate from
+            # report_organisation() (the *performing* lab, from
+            # DiagnosticReport.performer): this is who *ordered* the test,
+            # i.e. the same "requesting organisation" concept the orders
+            # side already maps, just resolved via the report's `basedOn`.
+            ordering_order = client.order_for_report(r)
+            if ordering_order:
+                report_orders.append(ordering_order)
             report_rows.append({
                 "date": (r.get("issued") or r.get("effectiveDateTime") or "")[:10] or "Unknown",
                 "organisation": client.report_organisation(r) or "Unknown",
+                "ordering_provider": (client.order_organisation(ordering_order) if ordering_order else None) or "Unknown",
                 "indication": client.report_indication(r),
                 "ics": client.patient_ics(patient) or "Unknown",
                 "country": client.patient_country(patient) or "Unknown",
             })
+
+        report_org_geo = orders_by_organisation_geocoded(report_orders)
+        report_map_points = [g for g in report_org_geo if g["lat"] is not None and g["lon"] is not None]
+        report_map_unmapped_count = sum(g["count"] for g in report_org_geo if g["lat"] is None)
+
+        report_ics_map_html, report_ics_map_unmatched_count = ics_choropleth_html(group_count(report_rows, "ics"))
     except Exception as e:
         error = str(e)
 
@@ -619,11 +788,20 @@ def stats():
         order_by_indication=group_count(order_rows, "indication"),
         order_by_ics=group_count(order_rows, "ics"),
         order_by_country=group_count(order_rows, "country"),
+        order_map_points=order_map_points,
+        order_map_unmapped_count=order_map_unmapped_count,
+        order_ics_map_html=order_ics_map_html,
+        order_ics_map_unmatched_count=order_ics_map_unmatched_count,
         report_by_day=group_count(report_rows, "date"),
         report_by_org=group_count(report_rows, "organisation"),
+        report_by_ordering_provider=group_count(report_rows, "ordering_provider"),
         report_by_indication=group_count(report_rows, "indication"),
         report_by_ics=group_count(report_rows, "ics"),
         report_by_country=group_count(report_rows, "country"),
+        report_map_points=report_map_points,
+        report_map_unmapped_count=report_map_unmapped_count,
+        report_ics_map_html=report_ics_map_html,
+        report_ics_map_unmatched_count=report_ics_map_unmatched_count,
         order_pivot_org=pivot_by_day(order_rows, "organisation"),
         order_pivot_indication=pivot_by_day(order_rows, "indication"),
         report_pivot_org=pivot_by_day(report_rows, "organisation"),

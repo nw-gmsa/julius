@@ -1,6 +1,8 @@
 flask==3.0.3
 requests==2.32.3
 pdfplumber==0.11.4
+plotly==6.9.0
+pandas==2.3.3
 spacy==3.7.5
 scispacy==0.5.4
 # The scispaCy model isn't on PyPI proper — pip can still install it directly
