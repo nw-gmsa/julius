@@ -105,17 +105,24 @@ NSSM Windows Service + IIS reverse proxy), see
   page, same `?start=&end=` query params as `/stats`, defaulting to the
   last 30 days. Only the completed bucket is bounded by the range; outstanding
   orders are always shown regardless of age, since a long-outstanding order is
-  exactly what this screen is meant to surface. `ctdna_orders()` queries
-  `ServiceRequest` system-wide
-  with no date bound (paginating like `/stats` does, same 1,000-record cap)
-  and pulls in each order's specimen/patient/requester plus any linked
-  `DiagnosticReport` via `_include`/`_revinclude` in the same query. Since
-  some servers don't reliably tag `Bundle.entry.search.mode` on
+  exactly what this screen is meant to surface. The picker feeds straight into
+  `ctdna_orders(start, end)`'s FHIR queries themselves (not just post-fetch
+  filtering) — it used to be one unbounded `ServiceRequest` query pulling back
+  *every* ctDNA order this server had ever seen, which is exactly the kind of
+  thing that can trip a `413` from the FHIR server on a large history. It's
+  now three: (1) outstanding orders, still unbounded; (2) completed orders
+  with a linked report, queried from the *DiagnosticReport* side and bound by
+  its own `issued`/`date` (matching what `completion_date` actually filters
+  by); (3) completed orders with no report at all, bound by the
+  ServiceRequest's own `authored` as a fallback. Each paginates like `/stats`
+  does (same 1,000-record cap) and pulls in specimen/patient/requester plus
+  any linked `DiagnosticReport` via `_include`/`_revinclude` in the same
+  query. Since some servers don't reliably tag `Bundle.entry.search.mode` on
   `_include`/`_revinclude`'d entries (which would otherwise misfile a
   linked report as if it were an order — the fix for a real bug reported
   against this screen), orders and linked reports are identified by
-  `resourceType` across the whole result set rather than by trusting that
-  tag. Rows are
+  `resourceType` across the whole pooled result set rather than by trusting
+  that tag. Rows are
   **split by managing organisation**, resolved from
   `ServiceRequest.requester` via the same reference chain as the stats
   screen's org breakdown (`order_organisation_resource()`): either the

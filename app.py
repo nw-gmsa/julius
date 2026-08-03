@@ -1042,7 +1042,7 @@ def ctdna_summary():
     error = None
     rows = []
     try:
-        orders, reports_by_order = client.ctdna_orders()
+        orders, reports_by_order = client.ctdna_orders(start=start, end=end)
 
         for order in orders:
             order_id = order.get("id")

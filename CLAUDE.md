@@ -278,36 +278,64 @@ date, date reported, and conclusion code, one row per order.
   etc.), since this IG has no single confirmed Genomic Test Directory/
   SNOMED code specifically for ctDNA. Swap for an exact `code.coding[].code`
   check if a server's ctDNA tests use a consistent one — see README.
-- **`FhirClient.ctdna_orders()`** queries `ServiceRequest` system-wide with
-  **no date bound** (via `_search_all_split()`, the split-aware sibling of
-  `_search_all()` — both share pagination logic, capped at the same
-  1,000-record default), bundling each order's `specimen`/`patient`/
-  `requester` via `_include`, and any linked `DiagnosticReport` via
-  `_revinclude=DiagnosticReport:based-on` (+ `_include:iterate` for that
-  report's own specimen and the Organization/Practitioner behind a
-  PractitionerRole requester — reuses `SERVICE_REQUEST_ITERATE_INCLUDES`,
-  the same constant the patient-page queries use). Returns
-  `(orders, reports_by_order_id)` — the latter maps an order's id to its
-  most-recently-issued linked report, since a reflex/repeat test could
-  produce more than one. **Both are built by filtering `resourceType`
-  across `matches + included` combined, not by trusting
-  `Bundle.entry.search.mode`** — some servers don't reliably tag
-  `search.mode` on `_include`/`_revinclude`'d entries, which would
-  otherwise misfile a linked `DiagnosticReport` into `matches` (getting
-  read as if it were an order, with none of the ServiceRequest's fields —
-  empty order date/specimen data) and leave `reports_by_order_id` unable
-  to find it at all. This was a real bug, not just a theoretical one — fix
-  it the same way if a similar split-then-filter pattern shows up
-  elsewhere.
+- **`FhirClient.ctdna_orders(start, end)`** used to be a single unbounded
+  system-wide `ServiceRequest` query — fine until a server with a large
+  ctDNA history started 413ing, since it pulled back *every* ctDNA order
+  ever (plus each one's `_include`/`_revinclude` fan-out) on every page
+  load regardless of what range was picked. It's now three separate
+  `_search_all_split()` queries (the split-aware sibling of `_search_all()`
+  — both share pagination logic, each capped at the same 1,000-record
+  default), pooled together before filtering:
+  1. **Outstanding** — `status` anything but `completed`
+     (`NON_COMPLETED_STATUSES`), no date bound, same as before.
+  2. **Completed with a report** — queried from the *DiagnosticReport*
+     side, bound by its own `date`/`issued` to `[start, end]`, then
+     `_include=DiagnosticReport:based-on` pulls back the originating
+     ServiceRequest. Deliberately not a `ServiceRequest.authored` bound
+     here — `app.ctdna_summary()`'s `completion_date` prefers the report's
+     `issued` date, so an order placed well before the window but
+     completed inside it would be wrongly dropped if the query bound the
+     order's own `authored` instead.
+  3. **Completed with no report at all** — the one case query 2 can't
+     reach, so bound by the ServiceRequest's own `authored` instead,
+     matching `completion_date`'s fallback.
+
+  All three bundle each order's `specimen`/`patient`/`requester` via
+  `_include` (query 2 reaches them one hop further via `_include:iterate`,
+  since the primary match there is the DiagnosticReport, not the
+  ServiceRequest), and any linked `DiagnosticReport` via
+  `_revinclude=DiagnosticReport:based-on` on queries 1 and 3 (+
+  `_include:iterate` for that report's own specimen and the
+  Organization/Practitioner behind a PractitionerRole requester — reuses
+  `SERVICE_REQUEST_ITERATE_INCLUDES`, the same constant the patient-page
+  queries use). `start`/`end` are optional (`None` leaves the completed
+  bucket unbounded, the old behaviour) but `app.ctdna_summary()` always
+  passes both. Returns `(orders, reports_by_order_id)` — the latter maps
+  an order's id to its most-recently-issued linked report, since a
+  reflex/repeat test could produce more than one. **Both are built by
+  filtering `resourceType` across every query's `matches + included`
+  pooled together, not by trusting `Bundle.entry.search.mode`** — some
+  servers don't reliably tag `search.mode` on `_include`/`_revinclude`'d
+  entries, which would otherwise misfile a linked `DiagnosticReport` into
+  `matches` (getting read as if it were an order, with none of the
+  ServiceRequest's fields — empty order date/specimen data) and leave
+  `reports_by_order_id` unable to find it at all. This was a real bug, not
+  just a theoretical one — fix it the same way if a similar
+  split-then-filter pattern shows up elsewhere. Duplicate resources across
+  the three queries (e.g. a report reachable via both query 2 and its
+  order's `_revinclude` in query 3) are harmless — both dicts key by
+  resource id, so a repeat just overwrites itself with the same data.
 - **The outstanding/completed split happens in `app.ctdna_summary()`**, not
   in `fhir_client.py`: "outstanding" is any `ServiceRequest.status` other
   than `completed`, shown regardless of age; "completed" orders are only
   included if their linked report's `issued` date (or the order's
   `authoredOn` if no report resolved) falls within `[start, end]` — a
   `start`/`end` date-range picker (same `?start=&end=` query-param shape
-  as `/stats`), defaulting to the last 30 days when unset. Unlike `/stats`,
-  the range only bounds the *completed* bucket — outstanding orders are
-  still shown regardless of age/range, since an old still-active order is
+  as `/stats`), defaulting to the last 30 days when unset, and passed
+  straight through to `ctdna_orders()` above so the FHIR query itself
+  stays bounded, not just the post-fetch filtering. Unlike `/stats`, the
+  range only bounds the *completed* bucket — outstanding orders are still
+  shown regardless of age/range, since an old still-active order is
   exactly the kind of thing this screen exists to surface.
 - Rows sort Outstanding-before-Completed, most-recently-ordered first
   within each group (two stable sorts on `rows`, applied in that order so

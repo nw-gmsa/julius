@@ -40,6 +40,12 @@ SERVICE_REQUEST_INCLUDES = ["ServiceRequest:requester", "ServiceRequest:specimen
 SERVICE_REQUEST_ITERATE_INCLUDES = ["PractitionerRole:practitioner", "PractitionerRole:organization"]
 DIAGNOSTIC_REPORT_INCLUDES = ["DiagnosticReport:result", "DiagnosticReport:specimen"]
 
+# ServiceRequest.status values (FHIR R4's request-status value set) other
+# than "completed", comma-joined for FHIR search OR semantics — used by
+# ctdna_orders() to fetch the "outstanding" bucket without pulling in every
+# completed order too (that bucket is queried, and date-bound, separately).
+NON_COMPLETED_STATUSES = "draft,active,on-hold,revoked,entered-in-error,unknown"
+
 
 class FhirClient:
     def __init__(self, base_url=None, user=None, password=None, verify_ssl=None):
@@ -640,7 +646,7 @@ class FhirClient:
             "date": [f"ge{start_date}", f"le{end_date}"], "_count": 100,
         })
 
-    # ---- ctDNA summary: system-wide, no date bound ---------------------
+    # ---- ctDNA summary: system-wide, completed bucket date-bound -------
 
     #: Best-effort text match for ctDNA (circulating tumour DNA) genomic
     #: test orders. This IG doesn't have one confirmed Genomic Test
@@ -659,12 +665,59 @@ class FhirClient:
         text = (cls._code_text(order.get("code")) or "").lower()
         return any(term in text for term in cls.CTDNA_TEXT_MATCHES)
 
-    def ctdna_orders(self):
+    def _search_ctdna_service_requests(self, extra_params):
+        """Shared `_search_all_split("ServiceRequest", ...)` + category-
+        filter-then-fallback plumbing for ctdna_orders()'s three
+        ServiceRequest queries (outstanding / completed-with-no-report) —
+        same try-categorized-then-fall-back pattern used throughout this
+        file (see orders_in_range, _active_orders_with_intent)."""
+        params = {
+            "_count": 100,
+            "_include": ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"],
+            "_revinclude": "DiagnosticReport:based-on",
+            "_include:iterate": SERVICE_REQUEST_ITERATE_INCLUDES + ["DiagnosticReport:specimen"],
+            **extra_params,
+        }
+        try:
+            matches, included = self._search_all_split(
+                "ServiceRequest", {**params, "category": SERVICE_REQUEST_CATEGORY})
+        except requests.HTTPError:
+            matches, included = [], []
+        if not matches:
+            matches, included = self._search_all_split("ServiceRequest", params)
+        return matches, included
+
+    def ctdna_orders(self, start=None, end=None):
         """
         All genomic test orders (ServiceRequest) that look like ctDNA tests
-        (see _is_ctdna_order), system-wide, with no date bound — the ctDNA
-        summary screen needs every outstanding order regardless of age, not
-        just a recent window (unlike orders_in_range, used by /stats).
+        (see _is_ctdna_order), system-wide — for app.ctdna_summary(), which
+        shows every *outstanding* one (any status other than "completed")
+        regardless of age, plus *completed* ones within [start, end]
+        (inclusive ISO dates). Unlike orders_in_range() (used by /stats),
+        the date bound here only applies to the completed bucket; pass
+        start=end=None to leave completed unbounded too (the old, fully
+        system-wide behaviour — fine for a small history, but can trip a
+        413 from the FHIR server on a large one, which is why
+        app.ctdna_summary() always passes a range).
+
+        Three separate queries, since a single unbounded one used to pull
+        back *every* ctDNA ServiceRequest this server has ever seen (plus
+        each one's `_include`/`_revinclude` fan-out) on every page load:
+
+          1. Outstanding orders (`status` anything but "completed",
+             NON_COMPLETED_STATUSES) — no date bound, same as before.
+          2. Completed orders that have a linked report issued within
+             [start, end] — queried from the *DiagnosticReport* side
+             (bound by its own `date`/`issued`, then `_include`d back to
+             the originating ServiceRequest), since that's the date
+             app.ctdna_summary()'s completion_date actually filters by
+             when a report resolved — bounding the ServiceRequest side by
+             its own `authored` instead would wrongly exclude orders
+             placed well before the window but completed within it, which
+             defeats the point of a turnaround-time screen.
+          3. Completed orders with *no* linked report at all, bound by
+             `authored` — app.ctdna_summary()'s fallback when no report
+             resolved, so this is the one case query 2 can't cover.
 
         Each order's specimen, patient, and requester (for managing-
         organisation grouping via order_organisation()) come back in the
@@ -674,8 +727,8 @@ class FhirClient:
         specimen via `_include:iterate`, in case a server attaches the
         specimen to the report rather than the order, and the Practitioner/
         Organization behind a PractitionerRole requester, one hop further).
-        Paginates up to `_search_all_split`'s default cap (1,000 records) —
-        see README for what to do if this ever hits that.
+        Each query paginates up to `_search_all_split`'s default cap (1,000
+        records) — see README for what to do if this ever hits that.
 
         Returns (orders, reports_by_order_id): `orders` is the filtered
         ctDNA ServiceRequest list; `reports_by_order_id` maps a
@@ -684,38 +737,51 @@ class FhirClient:
         picks the latest if a reflex/repeat test produced more).
 
         Both are built by filtering on `resourceType` across every resource
-        the search returned (matches + included) rather than trusting
-        Bundle.entry.search.mode to have sorted "match" (ServiceRequest)
-        from "include" (everything else) correctly — some servers don't
-        reliably set search.mode on _include/_revinclude'd entries, which
-        would otherwise misfile a linked DiagnosticReport as if it were an
-        order (with none of the ServiceRequest's own fields) and leave
-        reports_by_order_id empty.
+        every query returned (matches + included, pooled together) rather
+        than trusting Bundle.entry.search.mode to have sorted "match"
+        from "include" correctly — some servers don't reliably set
+        search.mode on _include/_revinclude'd entries, which would
+        otherwise misfile a linked DiagnosticReport as if it were an order
+        (with none of the ServiceRequest's own fields) and leave
+        reports_by_order_id empty. Duplicate resources across queries
+        (e.g. a report picked up by both query 2 and its order's
+        `_revinclude` in query 3) are harmless — both dicts below key by
+        resource id, so a repeat just overwrites itself.
         """
-        base_params = {
-            "_count": 100,
-            "_include": ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"],
-            "_revinclude": "DiagnosticReport:based-on",
-            "_include:iterate": SERVICE_REQUEST_ITERATE_INCLUDES + ["DiagnosticReport:specimen"],
-        }
-        try:
-            matches, included = self._search_all_split(
-                "ServiceRequest", {**base_params, "category": SERVICE_REQUEST_CATEGORY})
-        except requests.HTTPError:
-            matches, included = [], []
-        if not matches:
-            matches, included = self._search_all_split("ServiceRequest", base_params)
-        self._cache_included(matches + included)
+        all_resources = []
 
-        # Some servers don't reliably set Bundle.entry.search.mode on
-        # _include/_revinclude'd entries (it's an easy detail to miss when
-        # hand-rolling _revinclude support) — when that happens, _split_bundle
-        # defaults those entries to "match", so a linked DiagnosticReport can
-        # end up in `matches` instead of `included` (and get misread as if it
-        # were a ServiceRequest "order", with none of its fields). Pool both
-        # lists and filter by resourceType instead of trusting search.mode to
-        # have sorted them correctly.
-        all_resources = matches + included
+        matches, included = self._search_ctdna_service_requests({"status": NON_COMPLETED_STATUSES})
+        all_resources += matches + included
+
+        if start and end:
+            report_params = {
+                "_count": 100,
+                "date": [f"ge{start}", f"le{end}"],
+                "_include": ["DiagnosticReport:based-on", "DiagnosticReport:specimen"],
+                "_include:iterate": (
+                    ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"]
+                    + SERVICE_REQUEST_ITERATE_INCLUDES
+                ),
+            }
+            try:
+                r_matches, r_included = self._search_all_split(
+                    "DiagnosticReport", {**report_params, "category": DIAGNOSTIC_REPORT_CATEGORY})
+            except requests.HTTPError:
+                r_matches, r_included = [], []
+            if not r_matches:
+                r_matches, r_included = self._search_all_split("DiagnosticReport", report_params)
+            all_resources += r_matches + r_included
+
+            matches, included = self._search_ctdna_service_requests({
+                "status": "completed", "authored": [f"ge{start}", f"le{end}"],
+            })
+            all_resources += matches + included
+        else:
+            matches, included = self._search_ctdna_service_requests({"status": "completed"})
+            all_resources += matches + included
+
+        self._cache_included(all_resources)
+
         orders_by_id = {
             o["id"]: o for o in all_resources
             if o.get("resourceType") == "ServiceRequest" and o.get("id") and self._is_ctdna_order(o)

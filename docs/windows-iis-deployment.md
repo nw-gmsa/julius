@@ -73,13 +73,13 @@ setting these for the service to pick them up.
 From an elevated PowerShell/cmd prompt:
 
 ```powershell
-nssm install JuliusApp "C:\apps\julius\venv\Scripts\python.exe" "C:\apps\julius\wsgi.py"
-nssm set JuliusApp AppDirectory "C:\apps\julius"
-nssm set JuliusApp AppStdout "C:\apps\julius\logs\service.log"
-nssm set JuliusApp AppStderr "C:\apps\julius\logs\service.log"
-nssm set JuliusApp Start SERVICE_AUTO_START
+.\nssm.exe install JuliusApp "E:\apps\julius\venv\Scripts\python.exe" "E:\apps\julius\wsgi.py"
+.\nssm.exe set JuliusApp AppDirectory "E:\apps\julius"
+.\nssm.exe set JuliusApp AppStdout "E:\apps\julius\logs\service.log"
+.\nssm.exe set JuliusApp AppStderr "E:\apps\julius\logs\service.log"
+.\nssm.exe set JuliusApp Start SERVICE_AUTO_START
 
-nssm start JuliusApp
+.\nssm.exe start JuliusApp
 ```
 
 (Create the `logs` folder first: `mkdir C:\apps\julius\logs`.)
