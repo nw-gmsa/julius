@@ -78,8 +78,19 @@ class FhirClient:
         are accepted by the FHIR server. Raises requests.HTTPError (e.g. a
         401/403) or requests.RequestException (connection/SSL failure) if
         not — callers (the login route) catch these to show an error rather
-        than letting a bad login silently through."""
-        self._get("Patient", params={"_count": 1})
+        than letting a bad login silently through.
+
+        Uses `_summary=count` rather than a plain `_count=1` search: the
+        latter still asks the server to find and build actual Patient
+        resources before truncating to 1, and on a server with a large
+        Patient table that's exactly the same failure mode that used to
+        413 the ctDNA screen (see ctdna_orders() history) — an
+        unauthenticated-feeling, unrelated-looking 413 on login that's
+        really the server choking on result-set size, not anything about
+        the credentials themselves. `_summary=count` asks the server to
+        return just the total and skip materializing any resources at
+        all, which is enough to prove the credentials were accepted."""
+        self._get("Patient", params={"_summary": "count"})
 
     def _headers(self):
         return {"Accept": "application/fhir+json"}

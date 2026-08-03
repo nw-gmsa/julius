@@ -49,8 +49,16 @@ Two Python modules, both required reading before touching either:
 There is no app-level user database — `/login` (`app.py`) takes a
 username/password and checks them by building a `FhirClient(user=...,
 password=...)` and calling `FhirClient.verify_credentials()` (a minimal
-authenticated `GET Patient?_count=1`) against `FHIR_BASE_URL`; whatever the
-FHIR server accepts, the app accepts. This **replaced** the old model of one
+authenticated `GET Patient?_summary=count`) against `FHIR_BASE_URL`;
+whatever the FHIR server accepts, the app accepts. `_summary=count` (not a
+plain `_count=1` search) is deliberate — a `_count=1` search still asks the
+server to find and build actual Patient resources before truncating to 1,
+which on a server with a large Patient table is the same failure mode that
+used to 413 the ctDNA screen (see `ctdna_orders()`'s history below): a
+login-time 413 that looks like it's about credentials but is really the
+server choking on result-set size. `_summary=count` asks the server to
+return just the total and skip materializing resources entirely, enough to
+prove the credentials were accepted. This **replaced** the old model of one
 shared `FhirClient()` built at import time from `FHIR_USER`/`FHIR_PASSWORD`
 env vars — those two env vars are no longer read by the running app (only
 `FHIR_BASE_URL`/`FHIR_VERIFY_SSL` still are); `fhir_client.py`'s
