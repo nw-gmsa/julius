@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Sign in</h1>
+  <p class="muted">Credentials are passed straight through as HTTP Basic auth to the FHIR server — this app has no user database of its own.</p>
+
+  {% if error %}
+    <div class="error"><strong>{{ error }}</strong></div>
+  {% endif %}
+
+  <form action="/login" method="post">
+    <input type="hidden" name="next" value="{{ next or '' }}">
+    <p>
+      <input type="text" name="username" placeholder="Username" autofocus required>
+    </p>
+    <p>
+      <input type="password" name="password" placeholder="Password" required>
+    </p>
+    <p>
+      <button type="submit">Sign in</button>
+    </p>
+  </form>
+{% endblock %}

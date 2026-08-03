@@ -25,13 +25,47 @@
     button.danger:hover { background: #8f1e18; }
     .badge { display: inline-block; font-size: .72rem; padding: 1px 6px; border-radius: 3px;
              background: #fff3cd; color: #7a5b00; border: 1px solid #ffe08a; margin-left: 6px; }
+    .nav { margin: 1em 0; }
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown summary { cursor: pointer; color: #2b5fad; list-style: none; display: inline; }
+    .nav-dropdown summary::-webkit-details-marker { display: none; }
+    .nav-dropdown summary:hover { text-decoration: underline; }
+    .nav-dropdown summary::after { content: " \25be"; }
+    .nav-dropdown[open] summary::after { content: " \25b4"; }
+    .nav-dropdown .dropdown-menu { position: absolute; top: 100%; left: 0; z-index: 10;
+                                    background: #fff; border: 1px solid #ddd; border-radius: 4px;
+                                    padding: 6px 0; margin-top: 4px; min-width: 170px;
+                                    box-shadow: 0 2px 6px rgba(0,0,0,.12); }
+    .nav-dropdown .dropdown-menu a { display: block; padding: 6px 12px; white-space: nowrap; }
+    .nav-dropdown .dropdown-menu a:hover { background: #f2f2f2; text-decoration: none; }
   </style>
   {% block head %}{% endblock %}
 </head>
 <body>
-  <!-- /admin is intentionally not linked from this nav (not hidden behind auth,
-       just not surfaced) — reachable directly at /admin for whoever knows to look. -->
-  <p><a href="/">&larr; FHIR Lab Explorer</a> &nbsp;|&nbsp; <a href="/stats">Daily stats</a> &nbsp;|&nbsp; <a href="/ctdna">ctDNA summary</a> &nbsp;|&nbsp; <a href="/work-orders">Work orders</a> &nbsp;|&nbsp; <a href="/test-orders">Test orders</a> &nbsp;|&nbsp; <a href="/cepheid-results">Cepheid Test Results</a></p>
+  {% if session.get('username') %}
+    <!-- /admin is intentionally not linked from this nav (not hidden behind auth,
+         just not surfaced) — reachable directly at /admin for whoever knows to look. -->
+    <div class="nav">
+      <a href="/">&larr; FHIR Lab Explorer</a> &nbsp;|&nbsp;
+      <details class="nav-dropdown">
+        <summary>Management Reports</summary>
+        <div class="dropdown-menu">
+          <a href="/stats">Daily stats</a>
+          <a href="/ctdna">ctDNA summary</a>
+        </div>
+      </details>
+      &nbsp;|&nbsp;
+      <details class="nav-dropdown">
+        <summary>Orders and Reports</summary>
+        <div class="dropdown-menu">
+          <a href="/work-orders">Work orders</a>
+          <a href="/test-orders">Test orders</a>
+          <a href="/cepheid-results">Cepheid Test Results</a>
+        </div>
+      </details>
+      &nbsp;|&nbsp; <span class="muted">{{ session['username'] }}</span> &nbsp;<a href="/logout">Log out</a>
+    </div>
+  {% endif %}
   {% block content %}{% endblock %}
 </body>
 </html>

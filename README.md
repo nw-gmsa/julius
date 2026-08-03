@@ -18,13 +18,21 @@ python3 -m venv venv && source venv/bin/activate   # optional but recommended
 pip install -r requirements.txt
 
 export FHIR_BASE_URL="https://192.168.1.62/healthconnect/cdr/fhir/r4"
-export FHIR_USER="sqluser"
-export FHIR_PASSWORD="demo123"
 # If the server has a real (non-self-signed) TLS cert, turn verification on:
 # export FHIR_VERIFY_SSL=true
 
 python3 app.py
 ```
+
+Then open **http://localhost:5050** and sign in with your own FHIR server
+credentials at the login screen — there's no separate app account, whatever
+you enter is passed straight through as HTTP Basic auth to `FHIR_BASE_URL`
+(via `FhirClient.verify_credentials()`), so a wrong username/password shows
+an error on the login page instead of getting you in. Set `SECRET_KEY` to a
+fixed value in production so logged-in sessions survive an app restart
+(see [`docs/windows-iis-deployment.md`](docs/windows-iis-deployment.md)) —
+without it a random key is generated per process and everyone's logged out
+on restart.
 
 **Note on first install**: `requirements.txt` includes `scispacy`
 and its `en_core_sci_sm` model (~150MB), needed for the clinical-term
@@ -41,13 +49,19 @@ is opened — expect that first request to take noticeably longer while it
 downloads and caches under `~/.scispacy`. Subsequent requests (even after
 restarting the app) reuse the cached files.
 
-Then open **http://localhost:5050**. Search by patient name, NHS
+After signing in, search by patient name, NHS
 number, or FHIR patient ID, then click through to see that patient's
 genomic test orders and reports. Use the **Daily stats** link for a
 day-by-day breakdown of orders/reports across all patients, the
 **ctDNA summary** link for a cross-patient list of ctDNA order/result
 turnaround, or the **Work orders** link for a cross-patient worklist of
 active filler-order test orders.
+
+## Deploying
+
+For running this in production behind IIS on Windows Server (Waitress +
+NSSM Windows Service + IIS reverse proxy), see
+[`docs/windows-iis-deployment.md`](docs/windows-iis-deployment.md).
 
 ## What's actually happening
 
@@ -305,11 +319,15 @@ active filler-order test orders.
 
 ## Things worth double-checking against your server
 
-1. **Auth** is Basic (`sqluser` / `demo123`) as you specified — if
-   the server later moves to OAuth2/SMART (the IG's own API Security
-   volume, https://nw-gmsa.github.io/en/api-security.html, describes
-   SMART-on-FHIR + IHE IUA as the target state), swap `_auth()` in
-   `fhir_client.py` for Bearer-token support.
+1. **Auth** is Basic, using whatever username/password each user enters at
+   the app's own login screen (`FhirClient.verify_credentials()` confirms
+   they're accepted by the FHIR server before the session is created) — not
+   a fixed `FHIR_USER`/`FHIR_PASSWORD` shared by everyone any more. If the
+   server later moves to OAuth2/SMART (the IG's own API Security volume,
+   https://nw-gmsa.github.io/en/api-security.html, describes SMART-on-FHIR
+   + IHE IUA as the target state), swap `_auth()` in `fhir_client.py` for
+   Bearer-token support, and the login screen for wherever that flow directs
+   a user (its own IdP login page, an OAuth redirect, etc.).
 2. **Genomic Test Directory codes** — `ServiceRequest.code` and
    `DiagnosticReport.code` are bound to England's National Genomic
    Test Directory value set, not LOINC/SNOMED lab codes you might be

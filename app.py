@@ -1,14 +1,90 @@
 import os
 import re
+import secrets
 import difflib
 from datetime import date, timedelta
-from flask import Flask, render_template, request, Response, abort, redirect
+from flask import Flask, render_template, request, Response, abort, redirect, session, g, url_for
+from werkzeug.local import LocalProxy
+import requests
 import pandas as pd
 import plotly.express as px
 from fhir_client import FhirClient
 
 app = Flask(__name__)
-client = FhirClient()
+# Falls back to a random key if SECRET_KEY isn't set, which works fine for
+# a single long-lived process (see docs/windows-iis-deployment.md) but
+# invalidates everyone's session on restart — set SECRET_KEY in production
+# if that's not acceptable.
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+
+# Login exchanges a username/password for a FhirClient built from those
+# credentials (instead of the old single FHIR_USER/FHIR_PASSWORD env-var
+# client shared by everyone). The client itself — and so the password —
+# stays server-side in this dict, keyed by a random token; the browser's
+# session cookie only ever holds that token, never the credentials. No
+# expiry beyond an explicit /logout: fine for a small internal app on one
+# long-lived process, but a lot of abandoned logins would leak memory.
+_session_clients = {}
+
+LOGIN_EXEMPT_ENDPOINTS = {"login", "static"}
+
+
+@app.before_request
+def _load_client():
+    if request.endpoint in LOGIN_EXEMPT_ENDPOINTS:
+        return
+    fhir_client = _session_clients.get(session.get("sid"))
+    if fhir_client is None:
+        return redirect(url_for("login", next=request.path))
+    g.client = fhir_client
+
+
+# Existing routes/helpers below were all written against a module-level
+# `client` — this proxy resolves to the logged-in user's FhirClient
+# (set on `g` by _load_client above) so none of them needed to change.
+client = LocalProxy(lambda: g.client)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    next_url = request.values.get("next") or url_for("index")
+    if not next_url.startswith("/") or next_url.startswith("//"):
+        next_url = url_for("index")
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        try:
+            candidate = FhirClient(user=username, password=password)
+            candidate.verify_credentials()
+        except ValueError as e:
+            error = str(e)
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status in (401, 403):
+                error = "Incorrect username or password."
+            else:
+                error = f"FHIR server error: {e}"
+        except requests.RequestException as e:
+            error = f"Could not reach FHIR server: {e}"
+        else:
+            sid = secrets.token_urlsafe(32)
+            _session_clients[sid] = candidate
+            session.clear()
+            session["sid"] = sid
+            session["username"] = username
+            return redirect(next_url)
+
+    return render_template("login.html", error=error, next=next_url)
+
+
+@app.route("/logout")
+def logout():
+    sid = session.pop("sid", None)
+    _session_clients.pop(sid, None)
+    session.clear()
+    return redirect(url_for("login"))
 
 
 def human_name(resource):
@@ -1191,4 +1267,5 @@ def report_pdf(report_id):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    debug = os.environ.get("FLASK_DEBUG", "1") == "1"
+    app.run(host="0.0.0.0", port=port, debug=debug)

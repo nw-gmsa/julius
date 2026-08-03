@@ -44,6 +44,14 @@ DIAGNOSTIC_REPORT_INCLUDES = ["DiagnosticReport:result", "DiagnosticReport:speci
 class FhirClient:
     def __init__(self, base_url=None, user=None, password=None, verify_ssl=None):
         self.base_url = (base_url or os.environ.get("FHIR_BASE_URL", "")).rstrip("/")
+        if not self.base_url:
+            raise ValueError(
+                "FHIR_BASE_URL is not set (and no base_url was passed in) — "
+                "requests would otherwise fail deep inside `requests` with a "
+                "confusing MissingSchema error instead of a clear one. Set "
+                "the FHIR_BASE_URL environment variable, e.g. "
+                "https://192.168.1.62/healthconnect/cdr/fhir/r4"
+            )
         # Basic auth, as configured for this server.
         self.user = user or os.environ.get("FHIR_USER", "sqluser")
         self.password = password or os.environ.get("FHIR_PASSWORD", "demo123")
@@ -57,6 +65,14 @@ class FhirClient:
 
     def _auth(self):
         return HTTPBasicAuth(self.user, self.password) if self.user else None
+
+    def verify_credentials(self):
+        """Minimal authenticated request to confirm self.user/self.password
+        are accepted by the FHIR server. Raises requests.HTTPError (e.g. a
+        401/403) or requests.RequestException (connection/SSL failure) if
+        not — callers (the login route) catch these to show an error rather
+        than letting a bad login silently through."""
+        self._get("Patient", params={"_count": 1})
 
     def _headers(self):
         return {"Accept": "application/fhir+json"}

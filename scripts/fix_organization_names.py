@@ -34,7 +34,11 @@ def main():
     )
     args = parser.parse_args()
 
-    client = FhirClient()
+    try:
+        client = FhirClient()
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     orgs = client.organizations_without_name()
 
     if not orgs:

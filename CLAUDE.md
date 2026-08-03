@@ -18,13 +18,15 @@ python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
 export FHIR_BASE_URL="https://192.168.1.62/healthconnect/cdr/fhir/r4"
-export FHIR_USER="sqluser"
-export FHIR_PASSWORD="demo123"
 # If the server has a real (non-self-signed) TLS cert, turn verification on:
 # export FHIR_VERIFY_SSL=true
 
 python3 app.py   # serves on http://localhost:5050 (override with PORT env var)
 ```
+
+Then sign in at `/login` with FHIR server credentials — see Authentication
+below. There's no seeded account; whatever you type is checked straight
+against `FHIR_BASE_URL`.
 
 There is no test suite, linter, or build step in this repo — it's a two-file
 Flask app plus Jinja templates.
@@ -46,6 +48,44 @@ Two Python modules, both required reading before touching either:
   results to templates; also defines the Jinja filters (`human_name`,
   `code_text`, `obs_value`, `specimen_collected`, `specimen_received`) used to
   render FHIR's nested JSON (CodeableConcept, valueQuantity, etc.) as text.
+
+### Authentication (login screen, per-user `FhirClient`)
+
+There is no app-level user database — `/login` (`app.py`) takes a
+username/password and checks them by building a `FhirClient(user=...,
+password=...)` and calling `FhirClient.verify_credentials()` (a minimal
+authenticated `GET Patient?_count=1`) against `FHIR_BASE_URL`; whatever the
+FHIR server accepts, the app accepts. This **replaced** the old model of one
+shared `FhirClient()` built at import time from `FHIR_USER`/`FHIR_PASSWORD`
+env vars — those two env vars are no longer read by the running app (only
+`FHIR_BASE_URL`/`FHIR_VERIFY_SSL` still are); `fhir_client.py`'s
+`os.environ.get("FHIR_USER", "sqluser")`-style defaults only matter now for
+directly-constructed clients like `scripts/fix_organization_names.py`.
+
+- The successful login's `FhirClient` (and so its password) is kept
+  **server-side only**, in a module-level dict `app._session_clients`
+  keyed by a random token (`secrets.token_urlsafe`); the browser's session
+  cookie holds only that token plus the username for display — never the
+  password itself.
+- `app.client` — the name almost every route/helper in `app.py` was already
+  written against — is now a `werkzeug.local.LocalProxy` resolving to
+  `g.client` per-request, rather than a plain module-level `FhirClient()`.
+  This was a deliberate choice to keep the ~100 existing `client.xxx` call
+  sites unchanged rather than threading a client through every function
+  signature — the same pattern Flask itself uses for `request`/`session`.
+- `app._load_client()` (a `before_request` hook) looks up the caller's
+  `FhirClient` from `session["sid"]` and sets `g.client`, redirecting to
+  `/login?next=<path>` if there isn't one — every route is protected by
+  default; only `login` and `static` are exempted
+  (`LOGIN_EXEMPT_ENDPOINTS`).
+- **No expiry beyond `/logout`** — `_session_clients` entries live for the
+  life of the process once created. Fine for a small internal app on one
+  long-lived Waitress process (see
+  `docs/windows-iis-deployment.md`), but a lot of logins left open would
+  leak memory; add a cleanup pass if that becomes a real problem.
+- `app.secret_key` falls back to a random key (`secrets.token_hex(32)`) if
+  `SECRET_KEY` isn't set — works fine single-process, but invalidates every
+  session on restart. Set `SECRET_KEY` for production deployments.
 
 ### Category codes come from the IG, not guesses
 
@@ -606,9 +646,11 @@ Each stats row resolves its patient (`subject`) and derives:
 These are noted inline in the code/README as best-effort implementations that
 haven't been exercised against a live NHS North West Genomics IG server:
 
-1. **Auth is Basic** (`sqluser`/`demo123`). If the server moves to
-   OAuth2/SMART (the IG's target state per its API Security volume), swap
-   `_auth()` in `fhir_client.py` for Bearer-token support.
+1. **Auth is Basic**, using per-user credentials entered at `/login` (see
+   Authentication above) rather than a fixed `FHIR_USER`/`FHIR_PASSWORD`. If
+   the server moves to OAuth2/SMART (the IG's target state per its API
+   Security volume), swap `_auth()` in `fhir_client.py` for Bearer-token
+   support and adapt the login route to whatever that flow requires.
 2. **Binary content negotiation** (`fetch_attachment_bytes`) — should work per
    spec but untested against this server. If "View PDF" 404s or comes back
    empty, check what `GET Binary/<id>` with `Accept: application/fhir+json`
