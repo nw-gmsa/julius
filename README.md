@@ -93,24 +93,34 @@ NSSM Windows Service + IIS reverse proxy), see
 - **ctDNA summary** (`/ctdna`) is a cross-patient turnaround-time view: order
   date, sample collection date, sample received date, date reported, and
   conclusion code, for genomic test orders that look like **ctDNA**
-  (circulating tumour DNA) tests. This IG has no single confirmed Genomic
-  Test Directory / SNOMED code specifically for ctDNA, so `_is_ctdna_order()`
-  in `fhir_client.py` matches on the order's code text ("ctDNA", "circulating
-  tumour/tumor DNA", "cfDNA", etc.) instead of an exact code — swap this for
-  an exact code check if your server's ctDNA tests use a consistent one. The
-  initial view shows **all outstanding orders** (any `ServiceRequest.status`
-  other than `completed`) regardless of age, plus **orders completed within
-  a date range** (bounded by the linked report's `issued` date, or the order
-  date if no report resolved) — a `start`/`end` picker at the top of the
-  page, same `?start=&end=` query params as `/stats`, defaulting to the
-  last 30 days. Only the completed bucket is bounded by the range; outstanding
-  orders are always shown regardless of age, since a long-outstanding order is
-  exactly what this screen is meant to surface. The picker feeds straight into
+  (circulating tumour DNA) tests, matched by a confirmed Genomic Test
+  Directory code (`M4.14` — `FhirClient.CTDNA_TEST_DIRECTORY_CODES`) where
+  present, falling back to a text match on the order's code ("ctDNA",
+  "circulating tumour/tumor DNA", "cfDNA", etc. — `CTDNA_TEXT_MATCHES`) for
+  orders that don't carry that code. `_is_ctdna_order()` in
+  `fhir_client.py` checks code first, then text — add more codes to
+  `CTDNA_TEST_DIRECTORY_CODES` as they're confirmed against your server.
+  The FHIR queries themselves also explicitly filter by this code
+  (`code=https://fhir.nhs.uk/CodeSystem/England-GenomicTestDirectory|M4.14`)
+  as a supplementary query alongside the existing `category`-based one, for
+  the outstanding and completed-without-report buckets — in case
+  `category` isn't populated reliably on your server. The initial view
+  shows **outstanding orders** (any `ServiceRequest.status`
+  other than `completed`) ordered within a date range, plus **orders
+  completed within that same range** (bounded by the linked report's
+  `issued` date, or the order date if no report resolved) — a `start`/`end`
+  picker at the top of the page, same `?start=&end=` query params as
+  `/stats`, defaulting to the last 30 days. The picker feeds straight into
   `ctdna_orders(start, end)`'s FHIR queries themselves (not just post-fetch
   filtering) — it used to be one unbounded `ServiceRequest` query pulling back
   *every* ctDNA order this server had ever seen, which is exactly the kind of
   thing that can trip a `413` from the FHIR server on a large history. It's
-  now three: (1) outstanding orders, still unbounded; (2) completed orders
+  now three: (1) outstanding orders, bound by `authored` to the same range —
+  originally left unbounded ("show every outstanding order regardless of
+  age"), but a live server with a large backlog of long-lived non-completed
+  orders hit the exact same 413 this way, so it's bounded too now, meaning a
+  very old still-active order only shows up if it falls in the selected
+  range; (2) completed orders
   with a linked report, queried from the *DiagnosticReport* side and bound by
   its own `issued`/`date` (matching what `completion_date` actually filters
   by); (3) completed orders with no report at all, bound by the

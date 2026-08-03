@@ -2,9 +2,9 @@
 {% block content %}
   <h1>ctDNA summary</h1>
   <p class="muted">
-    All outstanding ctDNA orders (any status other than "completed"),
-    regardless of age, plus orders completed within the date range below,
-    split by managing organisation (resolved from
+    Outstanding ctDNA orders (any status other than "completed") ordered
+    within the date range below, plus orders completed within that same
+    range, split by managing organisation (resolved from
     <code>ServiceRequest.requester</code> — either an Organization directly,
     or the Organization referenced by a PractitionerRole requester), shown
     with its NHS ODS code where the Organization resource has one. "Test

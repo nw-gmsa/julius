@@ -280,12 +280,22 @@ A cross-patient turnaround-time view for **ctDNA** (circulating tumour DNA)
 genomic test orders: order date, sample collection date, sample received
 date, date reported, and conclusion code, one row per order.
 
-- **ctDNA detection is text-based, not code-based**:
-  `FhirClient._is_ctdna_order()` checks `ServiceRequest.code`'s text against
-  `CTDNA_TEXT_MATCHES` ("ctdna", "circulating tumour/tumor dna", "cfdna",
-  etc.), since this IG has no single confirmed Genomic Test Directory/
-  SNOMED code specifically for ctDNA. Swap for an exact `code.coding[].code`
-  check if a server's ctDNA tests use a consistent one — see README.
+- **ctDNA detection is code-based where confirmed, text-based as a
+  fallback**: `FhirClient._is_ctdna_order()` first checks the order's
+  Genomic Test Directory code (`test_directory_code()`) against
+  `CTDNA_TEST_DIRECTORY_CODES` (confirmed: `M4.14`), then falls back to a
+  text match on `ServiceRequest.code`'s text against `CTDNA_TEXT_MATCHES`
+  ("ctdna", "circulating tumour/tumor dna", "cfdna", etc.) for orders that
+  don't carry that code — either an older/different code, or a server
+  that doesn't populate `GENOMIC_TEST_DIRECTORY_SYSTEM` consistently. Add
+  more codes to `CTDNA_TEST_DIRECTORY_CODES` as they're confirmed.
+  `ctdna_orders()`'s outstanding and completed-without-report buckets each
+  also run a **supplementary `code=` FHIR search** (see
+  `_ctdna_code_search_value()`) alongside their existing `category`-based
+  query, pooled together — not a replacement, since `category` should
+  already be a superset covering these, but a server that doesn't
+  populate `category` reliably would otherwise miss a genuinely
+  ctDNA-coded order entirely.
 - **`FhirClient.ctdna_orders(start, end)`** used to be a single unbounded
   system-wide `ServiceRequest` query — fine until a server with a large
   ctDNA history started 413ing, since it pulled back *every* ctDNA order
@@ -335,16 +345,19 @@ date, date reported, and conclusion code, one row per order.
   resource id, so a repeat just overwrites itself with the same data.
 - **The outstanding/completed split happens in `app.ctdna_summary()`**, not
   in `fhir_client.py`: "outstanding" is any `ServiceRequest.status` other
-  than `completed`, shown regardless of age; "completed" orders are only
-  included if their linked report's `issued` date (or the order's
-  `authoredOn` if no report resolved) falls within `[start, end]` — a
-  `start`/`end` date-range picker (same `?start=&end=` query-param shape
-  as `/stats`), defaulting to the last 30 days when unset, and passed
-  straight through to `ctdna_orders()` above so the FHIR query itself
-  stays bounded, not just the post-fetch filtering. Unlike `/stats`, the
-  range only bounds the *completed* bucket — outstanding orders are still
-  shown regardless of age/range, since an old still-active order is
-  exactly the kind of thing this screen exists to surface.
+  than `completed`; "completed" orders are only included if their linked
+  report's `issued` date (or the order's `authoredOn` if no report
+  resolved) falls within `[start, end]` — a `start`/`end` date-range picker
+  (same `?start=&end=` query-param shape as `/stats`), defaulting to the
+  last 30 days when unset, and passed straight through to `ctdna_orders()`
+  above so the FHIR query itself stays bounded, not just the post-fetch
+  filtering. The outstanding bucket is also bound to `[start, end]` now
+  (by `ctdna_orders()`, via `authored` — see above), so `ctdna_summary()`
+  itself does no additional date filtering for it, just the status check.
+  This used to be unconditionally unbounded, on the theory that an old
+  still-active order is exactly the kind of thing this screen exists to
+  surface — reverted after a live server with a large non-completed
+  backlog hit a 413 on that query specifically.
 - Rows sort Outstanding-before-Completed, most-recently-ordered first
   within each group (two stable sorts on `rows`, applied in that order so
   both hold at once), **then split by managing organisation** via
@@ -670,11 +683,14 @@ haven't been exercised against a live NHS North West Genomics IG server:
    per-resource GETs if the server ignores or errors on these params, so
    correctness doesn't depend on it, but if patient pages are slower than
    expected, confirm the server actually honours `_include` and `:iterate`.
-6. **ctDNA text matching** (`_is_ctdna_order` / `CTDNA_TEXT_MATCHES`) — no
-   confirmed code for ctDNA testing in this IG, so orders are matched by
-   `code` text. If `/ctdna` comes back empty against a real server, check
-   what `code.text`/`code.coding[].display` actually says on a known ctDNA
-   order and adjust the match list (or switch to an exact code check).
+6. **ctDNA matching** (`_is_ctdna_order` / `CTDNA_TEST_DIRECTORY_CODES` /
+   `CTDNA_TEXT_MATCHES`) — `M4.14` is confirmed as a Genomic Test Directory
+   code for ctDNA, checked first; `code` text is still the fallback for
+   anything that doesn't carry it. If `/ctdna` comes back empty against a
+   real server, check what `code.coding[]` (system
+   `GENOMIC_TEST_DIRECTORY_SYSTEM`) and `code.text`/`code.coding[].display`
+   actually say on a known ctDNA order — add any other codes you find to
+   `CTDNA_TEST_DIRECTORY_CODES`, or adjust the text match list.
 7. **`_revinclude=DiagnosticReport:based-on`** (used by `ctdna_orders()`) —
    falls back to no linked report at all (not a per-order GET) if a server
    doesn't support `_revinclude` at all, since there's no equivalent of the

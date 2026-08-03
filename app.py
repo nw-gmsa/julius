@@ -1047,8 +1047,12 @@ def ctdna_summary():
         for order in orders:
             order_id = order.get("id")
             # "Outstanding" = any status other than "completed" (draft,
-            # active, on-hold, revoked, ...) — shown regardless of age.
-            # "Completed" orders are bounded to [start, end] below.
+            # active, on-hold, revoked, ...). client.ctdna_orders() already
+            # bounds the outstanding fetch itself to [start, end] by
+            # authored date (to avoid a 413 on servers with a large
+            # backlog), so nothing further to filter here. "Completed"
+            # orders are bounded to [start, end] below, by completion
+            # (report-issued) date rather than authored date.
             is_completed = order.get("status") == "completed"
             report = reports_by_order.get(order_id)
             reported_date = None

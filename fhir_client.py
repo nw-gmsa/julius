@@ -671,10 +671,30 @@ class FhirClient:
         "circulating cell-free dna", "cell-free dna", "cfdna",
     )
 
+    #: Confirmed Genomic Test Directory code(s) for ctDNA testing (e.g.
+    #: M4.14). Checked *in addition to* CTDNA_TEXT_MATCHES above, not
+    #: instead of it — this is the more reliable signal where it's
+    #: present, but we don't have a fully exhaustive confirmed code list,
+    #: so orders that only match by text (an older/different code, or a
+    #: server that doesn't populate GENOMIC_TEST_DIRECTORY_SYSTEM
+    #: consistently) still need to keep matching. Add more codes here as
+    #: they're confirmed.
+    CTDNA_TEST_DIRECTORY_CODES = ("M4.14",)
+
     @classmethod
     def _is_ctdna_order(cls, order):
+        if cls.test_directory_code(order.get("code")) in cls.CTDNA_TEST_DIRECTORY_CODES:
+            return True
         text = (cls._code_text(order.get("code")) or "").lower()
         return any(term in text for term in cls.CTDNA_TEXT_MATCHES)
+
+    @classmethod
+    def _ctdna_code_search_value(cls):
+        """CTDNA_TEST_DIRECTORY_CODES as a FHIR token-search value (comma-
+        joined `system|code` pairs — comma means OR within one search
+        param), for the supplementary code-filtered queries in
+        ctdna_orders() below."""
+        return ",".join(f"{cls.GENOMIC_TEST_DIRECTORY_SYSTEM}|{code}" for code in cls.CTDNA_TEST_DIRECTORY_CODES)
 
     def _search_ctdna_service_requests(self, extra_params):
         """Shared `_search_all_split("ServiceRequest", ...)` + category-
@@ -702,21 +722,29 @@ class FhirClient:
         """
         All genomic test orders (ServiceRequest) that look like ctDNA tests
         (see _is_ctdna_order), system-wide — for app.ctdna_summary(), which
-        shows every *outstanding* one (any status other than "completed")
-        regardless of age, plus *completed* ones within [start, end]
-        (inclusive ISO dates). Unlike orders_in_range() (used by /stats),
-        the date bound here only applies to the completed bucket; pass
-        start=end=None to leave completed unbounded too (the old, fully
-        system-wide behaviour — fine for a small history, but can trip a
-        413 from the FHIR server on a large one, which is why
-        app.ctdna_summary() always passes a range).
+        shows *outstanding* orders (any status other than "completed") and
+        *completed* orders, both bound to [start, end] (inclusive ISO
+        dates) when given. Pass start=end=None to leave every bucket
+        unbounded (the old, fully system-wide behaviour — fine for a small
+        history, but can trip a 413 from the FHIR server on a large one,
+        which is why app.ctdna_summary() always passes a range).
 
         Three separate queries, since a single unbounded one used to pull
         back *every* ctDNA ServiceRequest this server has ever seen (plus
         each one's `_include`/`_revinclude` fan-out) on every page load:
 
           1. Outstanding orders (`status` anything but "completed",
-             NON_COMPLETED_STATUSES) — no date bound, same as before.
+             NON_COMPLETED_STATUSES), bound by `authored` to [start, end]
+             like the other two buckets. This used to be unconditionally
+             unbounded ("show every outstanding order regardless of age")
+             — deliberately, since a long-outstanding order is exactly
+             what this screen is meant to surface — but on a live server
+             with a large backlog of long-lived non-completed
+             ServiceRequests, an unbounded outstanding query turned out to
+             be exactly the same result-set-too-large 413 this function
+             was already rewritten once to avoid for the completed
+             bucket. A very old still-active order now only shows up if
+             it falls in the selected range.
           2. Completed orders that have a linked report issued within
              [start, end] — queried from the *DiagnosticReport* side
              (bound by its own `date`/`issued`, then `_include`d back to
@@ -729,6 +757,24 @@ class FhirClient:
           3. Completed orders with *no* linked report at all, bound by
              `authored` — app.ctdna_summary()'s fallback when no report
              resolved, so this is the one case query 2 can't cover.
+
+        Buckets 1 and 3 each also run a **supplementary code-filtered
+        query** — same status/date bound, plus an explicit `code=`
+        restriction to CTDNA_TEST_DIRECTORY_CODES (see
+        _ctdna_code_search_value) — pooled in alongside the category-based
+        query rather than replacing it. The category-based query should
+        already be a superset covering these (category is a broader net
+        than one specific code), but this catches a genuinely ctDNA-coded
+        order on a server where `category` isn't populated reliably,
+        same concern _search_ctdna_service_requests's own
+        categorized-then-fallback ladder exists for. Query 2 (the
+        DiagnosticReport-side completed-with-report bucket) does *not*
+        get this treatment — a report's own `code` isn't guaranteed to
+        carry the same Genomic Test Directory coding as its originating
+        ServiceRequest on every server, so a code-filtered variant there
+        would be searching a less certain field; a completed order in
+        that bucket still needs to be caught by `category` or
+        CTDNA_TEXT_MATCHES.
 
         Each order's specimen, patient, and requester (for managing-
         organisation grouping via order_organisation()) come back in the
@@ -761,7 +807,34 @@ class FhirClient:
         """
         all_resources = []
 
-        matches, included = self._search_ctdna_service_requests({"status": NON_COMPLETED_STATUSES})
+        outstanding_params = {"status": NON_COMPLETED_STATUSES}
+        if start and end:
+            # Bounded by `authored` like the other two queries — this
+            # used to be unconditionally unbounded ("show every
+            # outstanding order regardless of age"), but on a server
+            # with a large backlog of long-lived non-completed
+            # ServiceRequests that's the same unbounded-result-set 413
+            # this function was already rewritten once to avoid for the
+            # completed bucket. A very old still-active order now only
+            # shows up if it falls in the selected range — narrower than
+            # before, but a page that loads beats one that 413s.
+            outstanding_params["authored"] = [f"ge{start}", f"le{end}"]
+        matches, included = self._search_ctdna_service_requests(outstanding_params)
+        all_resources += matches + included
+
+        # Supplementary: explicitly filter by CTDNA_TEST_DIRECTORY_CODES
+        # (see _ctdna_code_search_value) on top of the category-based
+        # query above. The category query is already a superset that
+        # should include these — this exists for a server where
+        # `category` isn't populated reliably on every ServiceRequest
+        # (the same concern _search_ctdna_service_requests's own
+        # categorized-then-fallback ladder exists for, just via a
+        # different search parameter), so a genuinely ctDNA-coded order
+        # still gets found even if its category is missing/wrong. Pooled
+        # into all_resources like everything else — duplicates are
+        # harmless (orders_by_id below keys by id).
+        matches, included = self._search_ctdna_service_requests(
+            {**outstanding_params, "code": self._ctdna_code_search_value()})
         all_resources += matches + included
 
         if start and end:
@@ -783,12 +856,20 @@ class FhirClient:
                 r_matches, r_included = self._search_all_split("DiagnosticReport", report_params)
             all_resources += r_matches + r_included
 
-            matches, included = self._search_ctdna_service_requests({
-                "status": "completed", "authored": [f"ge{start}", f"le{end}"],
-            })
+            completed_params = {"status": "completed", "authored": [f"ge{start}", f"le{end}"]}
+            matches, included = self._search_ctdna_service_requests(completed_params)
+            all_resources += matches + included
+            # Supplementary code-filtered query, same reasoning as the
+            # outstanding bucket above.
+            matches, included = self._search_ctdna_service_requests(
+                {**completed_params, "code": self._ctdna_code_search_value()})
             all_resources += matches + included
         else:
-            matches, included = self._search_ctdna_service_requests({"status": "completed"})
+            completed_params = {"status": "completed"}
+            matches, included = self._search_ctdna_service_requests(completed_params)
+            all_resources += matches + included
+            matches, included = self._search_ctdna_service_requests(
+                {**completed_params, "code": self._ctdna_code_search_value()})
             all_resources += matches + included
 
         self._cache_included(all_resources)
