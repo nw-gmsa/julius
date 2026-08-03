@@ -754,24 +754,27 @@ def orders_by_organisation_geocoded(orders):
 def _normalize_icb_name(name):
     """
     Normalise an ICS display name for fuzzy-matching against the ONS
-    ICB23NM field. patient_ics() resolves an ICS name straight from a
-    Patient's managingOrganization.name — whatever this FHIR server put
-    there — which isn't guaranteed to match the ONS Open Geography
-    Portal's official wording verbatim (e.g. this server might say "NHS
-    Greater Manchester ICB" where ONS says "NHS Greater Manchester
-    Integrated Care Board", or use "&" where ONS spells out "and" — many
-    of the 42 official names are "X and Y" or "X, Y and Z" compounds, so
-    that one substitution alone accounts for a lot of otherwise-missed
-    matches). Stripping a leading "NHS", a trailing "Integrated Care
-    Board"/"ICB", normalising "&" to "and", and dropping all remaining
-    non-alphanumeric characters down to a lowercase core (e.g.
-    "greatermanchester") gives both sides a fair shot at an exact match;
-    ics_choropleth_html() falls back further to a similarity-ratio best
-    match on this normalised form (see _best_icb_match()) if that still
-    misses — needed because a plain substring check fails whenever a
-    filler word like "the" is inserted/dropped in the middle of a name
-    (e.g. "Cornwall and Isles of Scilly" vs the official "...and the
-    Isles of Scilly" — neither is a contiguous substring of the other).
+    ICB23NM field. The /stats "by requesting organisation's ICS" maps feed
+    this from FhirClient.organisation_ics() (a point-in-polygon lookup
+    against the same ONS boundary dataset), which already returns the
+    official ICB23NM string verbatim — so those rows normally hit the exact
+    match below. This normalisation/fuzzy-match pair mainly exists as a
+    safety net for any other ICS-name source that isn't guaranteed to match
+    ONS's wording verbatim (e.g. this server might say "NHS Greater
+    Manchester ICB" where ONS says "NHS Greater Manchester Integrated Care
+    Board", or use "&" where ONS spells out "and" — many of the 42 official
+    names are "X and Y" or "X, Y and Z" compounds, so that one substitution
+    alone accounts for a lot of otherwise-missed matches). Stripping a
+    leading "NHS", a trailing "Integrated Care Board"/"ICB", normalising
+    "&" to "and", and dropping all remaining non-alphanumeric characters
+    down to a lowercase core (e.g. "greatermanchester") gives both sides a
+    fair shot at an exact match; ics_choropleth_html() falls back further
+    to a similarity-ratio best match on this normalised form (see
+    _best_icb_match()) if that still misses — needed because a plain
+    substring check fails whenever a filler word like "the" is
+    inserted/dropped in the middle of a name (e.g. "Cornwall and Isles of
+    Scilly" vs the official "...and the Isles of Scilly" — neither is a
+    contiguous substring of the other).
     """
     if not name:
         return ""
@@ -937,20 +940,6 @@ def group_rows_by_organisation(rows):
     return [(org, groups[org]) for org in orgs]
 
 
-def group_clinical_terms_by_category(terms):
-    """FhirClient.extract_clinical_terms()'s flat, count-sorted list ->
-    [(category, [term, ...]), ...], categories alphabetical with "Unlinked"
-    always last; terms keep their incoming (count desc) order within a
-    category."""
-    groups = {}
-    for term in terms:
-        groups.setdefault(term["category"], []).append(term)
-    categories = sorted(c for c in groups if c != "Unlinked")
-    if "Unlinked" in groups:
-        categories.append("Unlinked")
-    return [(category, groups[category]) for category in categories]
-
-
 @app.route("/stats")
 def stats():
     end = request.args.get("end") or date.today().isoformat()
@@ -967,11 +956,12 @@ def stats():
         order_rows = []
         for o in orders:
             patient = client.patient_for(o)
+            order_org_resource = client.order_organisation_resource(o)
             order_rows.append({
                 "date": (o.get("authoredOn") or "")[:10] or "Unknown",
                 "organisation": client.order_organisation(o) or "Unknown",
                 "indication": client.order_indication(o),
-                "ics": client.patient_ics(patient) or "Unknown",
+                "ics": client.organisation_ics(order_org_resource) or "Unknown",
                 "country": client.patient_country(patient) or "Unknown",
             })
 
@@ -992,14 +982,16 @@ def stats():
             # i.e. the same "requesting organisation" concept the orders
             # side already maps, just resolved via the report's `basedOn`.
             ordering_order = client.order_for_report(r)
+            ordering_org_resource = None
             if ordering_order:
                 report_orders.append(ordering_order)
+                ordering_org_resource = client.order_organisation_resource(ordering_order)
             report_rows.append({
                 "date": (r.get("issued") or r.get("effectiveDateTime") or "")[:10] or "Unknown",
                 "organisation": client.report_organisation(r) or "Unknown",
                 "ordering_provider": (client.order_organisation(ordering_order) if ordering_order else None) or "Unknown",
                 "indication": client.report_indication(r),
-                "ics": client.patient_ics(patient) or "Unknown",
+                "ics": client.organisation_ics(ordering_org_resource) or "Unknown",
                 "country": client.patient_country(patient) or "Unknown",
             })
 
@@ -1265,56 +1257,6 @@ def cepheid_results_clear_down_duplicates():
         title="Duplicate BCRABL reports — clear-down result",
         back_url=url_for("cepheid_results", start=start, end=end), back_label="Back to Cepheid Test Results",
         deleted=result["deleted"], failed=result["failed"], error=error,
-    )
-
-
-@app.route("/report/<report_id>/variants")
-def report_variants(report_id):
-    index = int(request.args.get("index", 0))
-    try:
-        report = client.get_report(report_id)
-    except Exception as e:
-        return f"Could not load report: {e}", 502
-
-    attachment = client.get_presented_form(report, index)
-    if attachment is None:
-        abort(404, description="This report has no attached document at that index.")
-
-    try:
-        data, content_type = client.fetch_attachment_bytes(attachment)
-    except Exception as e:
-        return f"Could not fetch attachment: {e}", 502
-    if data is None:
-        abort(404, description="Attachment had neither inline data nor a URL.")
-    if content_type and "pdf" not in content_type.lower():
-        return (f"This attachment is '{content_type}', not a PDF — "
-                f"variant/clinical-term extraction only works on PDF report documents."), 415
-
-    try:
-        text = client.extract_pdf_text(data)
-    except Exception as e:
-        return f"Could not extract text from PDF: {e}", 500
-
-    variant_counts = client.extract_variant_types(text)
-
-    clinical_by_category, clinical_error = [], None
-    try:
-        clinical_terms = client.extract_clinical_terms(text)
-        clinical_by_category = group_clinical_terms_by_category(clinical_terms)
-    except ImportError:
-        clinical_error = ("scispaCy isn't installed. Run "
-                           "`pip install -r requirements.txt` (see README for the model download step).")
-    except OSError:
-        clinical_error = ("The scispaCy model 'en_core_sci_sm' or UMLS knowledge base isn't downloaded "
-                           "yet — see README for the install/first-run details.")
-    except Exception as e:
-        clinical_error = f"Clinical term extraction failed: {e}"
-
-    return render_template(
-        "variants.html", report_id=report_id,
-        variant_counts=variant_counts,
-        clinical_by_category=clinical_by_category, clinical_error=clinical_error,
-        has_text=bool(text.strip()),
     )
 
 

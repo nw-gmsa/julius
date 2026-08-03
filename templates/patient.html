@@ -99,8 +99,6 @@
               <a href="/report/{{ r.id }}/pdf?index={{ loop.index0 }}" target="_blank">
                 📄 {{ pf.title or "View report document" }}{% if pf.contentType %} ({{ pf.contentType }}){% endif %}
               </a>
-              &nbsp;|&nbsp;
-              <a href="/report/{{ r.id }}/variants?index={{ loop.index0 }}">🧬 Extract variant types</a>
               {% if not loop.last %} &nbsp;|&nbsp; {% endif %}
             {% endfor %}
           </p>

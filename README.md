@@ -34,21 +34,6 @@ fixed value in production so logged-in sessions survive an app restart
 without it a random key is generated per process and everyone's logged out
 on restart.
 
-**Note on first install**: `requirements.txt` includes `scispacy`
-and its `en_core_sci_sm` model (~150MB), needed for the clinical-term
-extraction on the report/variants page. This makes the first
-`pip install` noticeably slower than before — that's expected. If you'd
-rather skip it for now, remove the last two lines from
-`requirements.txt`; the app still works fine without it, the
-clinical-terms table just shows a setup message instead of results.
-
-**Note on first use of the clinical-terms page**: on top of the model
-above, the UMLS entity-linking step downloads scispaCy's UMLS knowledge
-base + nearest-neighbour index (~1GB) the first time `/report/<id>/variants`
-is opened — expect that first request to take noticeably longer while it
-downloads and caches under `~/.scispacy`. Subsequent requests (even after
-restarting the app) reuse the cached files.
-
 After signing in, search by patient name, NHS
 number, or FHIR patient ID, then click through to see that patient's
 genomic test orders and reports. Use the **Daily stats** link for a
@@ -274,35 +259,13 @@ NSSM Windows Service + IIS reverse proxy), see
     searches/lists, `POST` is the only thing that deletes. **No auth/CSRF
     protection** here either — same caveat as above, more so given the
     blast radius (multiple patients, or every orphaned order, in one go).
-- **Report PDFs & variant extraction** — `presentedForm.url` points at a
-  **FHIR Binary resource** (e.g. `Binary/abc123`), not a static file.
+- **Report PDFs** — `presentedForm.url` points at a **FHIR Binary
+  resource** (e.g. `Binary/abc123`), not a static file.
   `fetch_attachment_bytes()` requests it as `application/fhir+json` (which
   reliably returns the Binary resource — a JSON object with `contentType`
   and base64 `data`) and decodes that, falling back to using raw bytes
-  directly if a server ignores the Accept header. The "🧬 Extract variant
-  types" link on each report runs that PDF's text layer through a
-  **keyword scan** (`extract_variant_types()`, via `pdfplumber`) for known
-  variant-type terms (missense, frameshift, splice site, CNV, etc.) and
-  shows mention counts. This is plain keyword-spotting, not HGVS/VCF
-  parsing — it can't tell a reported variant from an incidental mention
-  (e.g. in a methods section), and finds nothing on scanned/image-only
-  PDFs (no text layer to search). Treat it as a rough signal.
-- **Clinical term extraction (scispaCy + UMLS linking)** — alongside the
-  keyword scan, each report's PDF text also runs through scispaCy's
-  `en_core_sci_sm` model for biomedical named-entity recognition. Each
-  entity is then resolved to its best-matching UMLS concept via scispaCy's
-  `EntityLinker` (CUI + canonical name + semantic type), and the
-  clinical-terms table is grouped by that semantic type (Disease or
-  Syndrome, Gene or Genome, Laboratory Procedure, etc.) instead of one flat
-  list — entities that don't link confidently show up under "Unlinked".
-  Both extractions share a single `extract_pdf_text()` call rather than
-  re-parsing the PDF twice. The NER model is a ~150MB one-time-per-process
-  download; the UMLS knowledge base + nearest-neighbour index the linker
-  uses is separate and much bigger (~1GB), downloaded lazily on first use
-  and cached under `~/.scispacy` after that — see setup below. If scispaCy
-  isn't installed, the page still shows the keyword-scan results with a
-  clear setup message in place of the clinical-terms table, rather than
-  failing the whole page.
+  directly if a server ignores the Accept header. The "📄 View report
+  document" link on each report streams that PDF straight to the browser.
 - **Geography** — each order/report row also resolves its patient
   (`subject`) and derives:
   - **ICS** from `Patient.managingOrganization`'s name.
@@ -357,57 +320,42 @@ NSSM Windows Service + IIS reverse proxy), see
    any spec-compliant server, but I couldn't test it against yours.
    If "View PDF" 404s or comes back empty, check what a direct
    `GET Binary/<id>` with that Accept header actually returns.
-8. **Variant extraction accuracy** — the keyword list in
-   `VARIANT_TYPE_TERMS` is generic HGVS/genomics terminology, not
-   tuned to this IG's actual report wording. Open a real report's
-   "Extract variant types" result next to the PDF itself and see if
-   the counts look right — the term list is the first thing to adjust
-   if your reports phrase things differently.
-9. **UMLS linker threshold/coverage** — `extract_clinical_terms()` only
-   links an entity to a UMLS concept if the top candidate scores
-   ≥ `linker_threshold` (default 0.85); below that, or with no candidate
-   at all, it's shown under "Unlinked" rather than guessing. I did run
-   this end-to-end against synthetic clinical text (not a real IG
-   report) and got sensible results — e.g. "TP53 gene" → *Gene or
-   Genome*, "breast cancer" → *Neoplastic Process* — but the threshold
-   and how much ends up "Unlinked" is worth checking against real report
-   wording, and adjusting if it's too strict/loose.
-10. **ctDNA text matching** — `/ctdna` identifies ctDNA orders by checking
-    `ServiceRequest.code`'s text for "ctDNA"/"circulating tumour DNA"/"cfDNA"
-    etc. (`CTDNA_TEXT_MATCHES` in `fhir_client.py`), since I don't have a
-    confirmed Genomic Test Directory code for it. If your server's ctDNA
-    tests come back empty on this screen, check what `code.text`/
-    `code.coding[].display` actually looks like for a real ctDNA order and
-    either adjust the match list or switch to an exact code check.
-11. **"Completed in the last 30 days" cutoff** on `/ctdna` is a rolling
-    window from today, bounded by the linked report's `issued` date — not a
-    calendar month and not configurable yet (no date-range picker like
-    `/stats` has). Outstanding orders (anything not `status: completed`)
-    are shown with no date bound at all, which could be slow or show a lot
-    of very old orders if this server has long-lived active `ServiceRequest`s
-    that were never marked completed.
-12. **ODS code system URI** — `organisation_ods_code()` looks for
+8. **ctDNA text matching** — `/ctdna` identifies ctDNA orders by checking
+   `ServiceRequest.code`'s text for "ctDNA"/"circulating tumour DNA"/"cfDNA"
+   etc. (`CTDNA_TEXT_MATCHES` in `fhir_client.py`), since I don't have a
+   confirmed Genomic Test Directory code for it. If your server's ctDNA
+   tests come back empty on this screen, check what `code.text`/
+   `code.coding[].display` actually looks like for a real ctDNA order and
+   either adjust the match list or switch to an exact code check.
+9. **"Completed in the last 30 days" cutoff** on `/ctdna` is a rolling
+   window from today, bounded by the linked report's `issued` date — not a
+   calendar month and not configurable yet (no date-range picker like
+   `/stats` has). Outstanding orders (anything not `status: completed`)
+   are shown with no date bound at all, which could be slow or show a lot
+   of very old orders if this server has long-lived active `ServiceRequest`s
+   that were never marked completed.
+10. **ODS code system URI** — `organisation_ods_code()` looks for
     `identifier.system == "https://fhir.nhs.uk/Id/ods-organization-code"` on
     the resolved Organization, falling back to the first identifier with no
     `system` at all. I haven't confirmed this is the system value this
     server's Organization resources actually use — if ODS codes never show
     up next to organisation names on `/ctdna`, print a sample
     `Organization.identifier` array and adjust.
-13. **iGene report identifier location** — `igene_report_identifier()`
+11. **iGene report identifier location** — `igene_report_identifier()`
     checks the `ServiceRequest`'s `identifier` list first, then the linked
     `DiagnosticReport`'s, for one with system
     `https://fhir.nwgenomics.nhs.uk/iGene/ReportIdentifier`. I don't know
     which resource this server actually populates it on (or whether it's
     populated at all) — if the "iGene report ID" column is always empty,
     check a real order/report pair directly.
-14. **BCRABL code system** — `_is_bcrabl_report()` matches
+12. **BCRABL code system** — `_is_bcrabl_report()` matches
     `coding[].code == "BCRABL"` regardless of `system`, since I don't know
     which coding system this server puts it under (NGTD, LOINC, a local
     code, or all three on the same report). If `/cepheid-results` comes
     back empty against a real server, check a known BCR-ABL report's
     `code.coding` directly and confirm the code value really is `BCRABL`
     (case-sensitive exact match here, unlike ctDNA's text search).
-15. **BCR-ABL results assume component-level values** — `component_rows()`
+13. **BCR-ABL results assume component-level values** — `component_rows()`
     only reads `Observation.component`, not a top-level `value[x]` on the
     Observation itself. If a server reports BCR-ABL1/ABL1/%IS as separate
     Observations each with their own top-level value (no components at
@@ -421,9 +369,3 @@ NSSM Windows Service + IIS reverse proxy), see
    records per resource type and stop; for patients with long
    histories you'll want to follow the `Bundle.link[rel=next]` URL
    (the stats screen already does this via `_search_all`).
-2. **Better variant extraction** — the current approach is a keyword
-   scan; a real implementation would want structured variant data
-   (many genomics reports include a `Genomics-Variant` FHIR profile
-   alongside/instead of the PDF, or the PDF has a consistent findings
-   table pdfplumber's `extract_tables()` could parse directly) rather
-   than text-mining free-form report prose.

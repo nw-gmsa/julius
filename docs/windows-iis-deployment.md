@@ -10,9 +10,9 @@ host WSGI apps directly — the pattern here is:
 
 This keeps the app as a single long-lived process — important here, since
 `FhirClient` caches things at class/process level (the reference-resolution
-cache, resolved ICB boundary polygons, and the lazily-loaded scispaCy/UMLS
-models) that would otherwise be discarded every time IIS recycled a worker
-process under an in-process hosting model (e.g. `wfastcgi`).
+cache and resolved ICB boundary polygons) that would otherwise be discarded
+every time IIS recycled a worker process under an in-process hosting model
+(e.g. `wfastcgi`).
 
 ## 1. Prerequisites on the server
 
@@ -29,8 +29,6 @@ process under an in-process hosting model (e.g. `wfastcgi`).
   - the FHIR base URL (`FHIR_BASE_URL`)
   - `postcodes.io` and the ONS ArcGIS FeatureServer, if using the `/stats`
     maps (server-side geocoding/boundary calls)
-  - the internet, on first use of clinical-term extraction, to download the
-    scispaCy model + UMLS knowledge base (~150MB + ~1GB) — see README
 
 ## 2. Copy the app and install dependencies
 
@@ -42,9 +40,7 @@ py -3 -m venv venv
 venv\Scripts\pip install -r requirements.txt
 ```
 
-`requirements.txt` already includes `waitress`. This step also pulls in
-`scispacy`'s NER model (~150MB) — see the README note if you want to skip
-that for now.
+`requirements.txt` already includes `waitress`.
 
 ## 3. Set environment variables
 

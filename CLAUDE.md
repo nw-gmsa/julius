@@ -31,11 +31,6 @@ against `FHIR_BASE_URL`.
 There is no test suite, linter, or build step in this repo — it's a two-file
 Flask app plus Jinja templates.
 
-`requirements.txt` includes `scispacy` and its `en_core_sci_sm` model
-(~150MB download), needed only for clinical-term extraction on the
-report/variants page. If it's not installed, the app still works — the
-clinical-terms table just shows a setup message instead of results.
-
 ## Architecture
 
 Two Python modules, both required reading before touching either:
@@ -314,9 +309,9 @@ date, date reported, and conclusion code, one row per order.
 - Rows sort Outstanding-before-Completed, most-recently-ordered first
   within each group (two stable sorts on `rows`, applied in that order so
   both hold at once), **then split by managing organisation** via
-  `app.group_rows_by_organisation()` (same alphabetical-with-"Unknown"-last
-  pattern as `group_clinical_terms_by_category()`). The organisation
-  resource itself comes from `FhirClient.order_organisation_resource()`,
+  `app.group_rows_by_organisation()` (alphabetical, with "Unknown" last).
+  The organisation resource itself comes from
+  `FhirClient.order_organisation_resource()`,
   which resolves `ServiceRequest.requester` down to the Organization
   resource (not just its name) — either it *is* an Organization directly, or
   it's a PractitionerRole whose `.organization` points at one; unresolvable
@@ -588,45 +583,15 @@ Both reuse `_delete_resources()` (ServiceRequest/DiagnosticReport-agnostic
 by now) and `admin_clear_down_result.html` with
 `back_url="/cepheid-results"`, same as the no-components delete.
 
-### Report PDFs & variant/clinical-term extraction
+### Report PDFs
 
 `DiagnosticReport.presentedForm.url` points at a **FHIR Binary resource**
 (e.g. `Binary/abc123`), not a static file. `fetch_attachment_bytes()` requests
 it as `application/fhir+json` (reliably returns a JSON object with
 `contentType` + base64 `data`) and decodes that, falling back to raw bytes if
-a server ignores the Accept header.
-
-Both extraction features share a single `extract_pdf_text()` call (via
-`pdfplumber`) rather than re-parsing the PDF twice:
-
-- **Variant keyword scan** (`extract_variant_types()`) — counts mentions of
-  known variant-type terms (`VARIANT_TYPE_TERMS`: missense, frameshift, splice
-  site, CNV, etc.). This is plain keyword-spotting, not HGVS/VCF parsing — it
-  can't distinguish a reported variant from an incidental mention (e.g. in a
-  methods section), and finds nothing on scanned/image-only PDFs. Treat it as
-  a rough signal; the term list is the first thing to adjust if reports phrase
-  things differently than expected.
-- **Clinical term extraction + UMLS linking** (`extract_clinical_terms()`) —
-  runs the PDF text through scispaCy's `en_core_sci_sm` model for biomedical
-  NER, then resolves each entity to its best-matching UMLS concept via a
-  `scispacy_linker` (`EntityLinker`) pipe, added alongside the NER model in
-  `_get_scispacy_pipeline()` (both lazily loaded once per process into
-  `FhirClient._scispacy_nlp`). A candidate is only accepted if its score
-  clears `linker_threshold` (default 0.85); otherwise the entity is returned
-  with `"category": "Unlinked"` rather than a guessed concept. Linked
-  entities get their category from the *official* UMLS semantic type name —
-  via `linker.kb.semantic_type_tree` (scispaCy's `UmlsKnowledgeBase` builds
-  this automatically, no extra code needed), not a hand-maintained mapping.
-  Returns `[{"term", "count", "cui", "canonical_name", "category"}, ...]`;
-  `app.group_clinical_terms_by_category()` groups that into
-  `[(category, [term, ...]), ...]` (alphabetical, "Unlinked" last) for
-  `variants.html` to render as one sub-table per category. Raises
-  `ImportError`/`OSError` if scispacy/the NER model/UMLS KB aren't
-  installed/downloaded — `app.py` catches both and shows a setup message
-  rather than failing the page. The UMLS KB + ANN index (~1GB, separate
-  from the ~150MB NER model) downloads lazily on first use and is cached
-  under `~/.scispacy` after that — end-to-end verified against synthetic
-  clinical text in this environment (not yet against a real IG report).
+a server ignores the Accept header. `/report/<report_id>/pdf` streams that
+straight to the browser as the "📄 View report document" link on the patient
+page.
 
 ### Geography (ICS / country)
 
@@ -656,27 +621,22 @@ haven't been exercised against a live NHS North West Genomics IG server:
    empty, check what `GET Binary/<id>` with `Accept: application/fhir+json`
    actually returns.
 3. **Country code lookup** (`_find_country_code`) — see Geography above.
-4. **scispaCy + UMLS linking** — verified end-to-end against synthetic
-   clinical text (real model, real cached UMLS KB, real grouping/rendering),
-   but not yet against an actual IG report PDF; expect some noise (header/
-   boilerplate fragments) and check whether `linker_threshold` (0.85) sends
-   too much — or too little — to "Unlinked" for real report wording.
-5. **Stats date search params** (`authored`/`date`) are correct per FHIR spec
+4. **Stats date search params** (`authored`/`date`) are correct per FHIR spec
    but this server's indexing of them wasn't confirmed — if `/stats` comes
    back empty for a range known to have data, test the same query directly
    against the FHIR endpoint.
-6. **`_include`/`_include:iterate` support** — used by `lab_orders_for_patient`/
+5. **`_include`/`_include:iterate` support** — used by `lab_orders_for_patient`/
    `lab_reports_for_patient` to bundle requester/specimen/result resources
    into one query (see Reference resolution above). Both calls fall back to
    per-resource GETs if the server ignores or errors on these params, so
    correctness doesn't depend on it, but if patient pages are slower than
    expected, confirm the server actually honours `_include` and `:iterate`.
-7. **ctDNA text matching** (`_is_ctdna_order` / `CTDNA_TEXT_MATCHES`) — no
+6. **ctDNA text matching** (`_is_ctdna_order` / `CTDNA_TEXT_MATCHES`) — no
    confirmed code for ctDNA testing in this IG, so orders are matched by
    `code` text. If `/ctdna` comes back empty against a real server, check
    what `code.text`/`code.coding[].display` actually says on a known ctDNA
    order and adjust the match list (or switch to an exact code check).
-8. **`_revinclude=DiagnosticReport:based-on`** (used by `ctdna_orders()`) —
+7. **`_revinclude=DiagnosticReport:based-on`** (used by `ctdna_orders()`) —
    falls back to no linked report at all (not a per-order GET) if a server
    doesn't support `_revinclude` at all, since there's no equivalent of the
    patient-page fallback here. If reports never show up on `/ctdna`,
@@ -684,24 +644,24 @@ haven't been exercised against a live NHS North West Genomics IG server:
    that supports `_revinclude` but doesn't tag `Bundle.entry.search.mode`
    on the results is handled — see the ctDNA summary section above — but
    worth knowing this is a real quirk this app has hit.)
-9. **ODS code system URI** (`organisation_ods_code`) — assumes
+8. **ODS code system URI** (`organisation_ods_code`) — assumes
    `identifier.system == "https://fhir.nhs.uk/Id/ods-organization-code"` on
    a resolved Organization, falling back to any system-less identifier.
    Not confirmed against a real server; if ODS codes never appear next to
    organisation names on `/ctdna`, sample a real `Organization.identifier`
    array and adjust.
-10. **iGene report identifier location** (`igene_report_identifier`) —
-    checks the order's `identifier` list, then falls back to the report's;
-    not confirmed which resource this server actually carries it on (or
-    whether it's populated at all). If the "iGene report ID" column is
-    always "—", check a real order/report pair directly.
-11. **Organization.address on this server** (`organisation_postcode`, used by
+9. **iGene report identifier location** (`igene_report_identifier`) —
+   checks the order's `identifier` list, then falls back to the report's;
+   not confirmed which resource this server actually carries it on (or
+   whether it's populated at all). If the "iGene report ID" column is
+   always "—", check a real order/report pair directly.
+10. **Organization.address on this server** (`organisation_postcode`, used by
     the `/stats` requesting-organisation map) — untested whether
     Organization resources here carry an `address` with `postalCode` at
     all. If the map never shows any markers (`order_map_unmapped_count`
     equals the total order count), sample a real Organization resource and
     check where its address actually lives.
-12. **ICS name wording vs. ONS ICB23NM** (`app._normalize_icb_name()`/
+11. **ICS name wording vs. ONS ICB23NM** (`app._normalize_icb_name()`/
     `_best_icb_match()`, used by the `/stats` ICS choropleths) — this
     server's `Patient.managingOrganization.name` values haven't been
     compared against the ONS Open Geography Portal's official ICB names.
@@ -742,6 +702,3 @@ nav, unlike the admin/clear-down screens.
 
 - Pagination on patient pages (currently capped at 50 records per resource
   type; `/stats` already paginates via `_search_all`).
-- Structured variant data (a `Genomics-Variant` FHIR profile, or
-  `pdfplumber.extract_tables()` against a report's findings table) instead of
-  free-form keyword scanning.

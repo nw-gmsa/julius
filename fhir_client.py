@@ -62,6 +62,7 @@ class FhirClient:
         self.verify_ssl = verify_ssl
         self._ref_cache = {}  # reference string -> resolved resource (or None); process-lifetime only
         self._geocode_cache = {}  # normalized postcode -> (lat, lon) or None; process-lifetime only
+        self._org_ics_cache = {}  # Organization.id -> ICB23NM name (or None); process-lifetime only
 
     def _auth(self):
         return HTTPBasicAuth(self.user, self.password) if self.user else None
@@ -601,150 +602,6 @@ class FhirClient:
         content_type = ctype_header or attachment.get("contentType", "application/octet-stream")
         return resp.content, content_type
 
-    # ---- PDF text extraction, variant keywords, and clinical terms -----
-
-    @staticmethod
-    def extract_pdf_text(pdf_bytes):
-        """Extract the text layer of a PDF via pdfplumber. Returns "" for
-        scanned/image-only PDFs (no text layer to extract) rather than
-        raising — callers should treat empty text as "nothing found",
-        not as an error."""
-        import pdfplumber
-        import io
-
-        text_parts = []
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_parts.append(page_text)
-        return "\n".join(text_parts)
-
-    #: Heuristic keyword list for spotting variant-type mentions in report
-    #: text. This is a plain-text keyword scan, not HGVS/VCF parsing — it
-    #: will miss anything phrased unusually and can't confirm a match is
-    #: describing an actually-reported variant vs. incidental text (e.g. a
-    #: methods section). Treat results as a rough signal, not ground truth.
-    VARIANT_TYPE_TERMS = [
-        "frameshift deletion", "frameshift insertion", "frameshift duplication", "frameshift variant",
-        "in-frame deletion", "in-frame insertion", "in-frame duplication",
-        "splice donor variant", "splice acceptor variant", "splice site variant", "splice region variant",
-        "missense variant", "nonsense variant", "synonymous variant",
-        "stop gained", "stop lost", "start lost",
-        "copy number gain", "copy number loss", "copy number variant",
-        "structural variant", "single nucleotide variant",
-        "deletion", "duplication", "insertion", "substitution",
-        "translocation", "inversion", "indel", "snv", "cnv",
-    ]
-
-    @classmethod
-    def extract_variant_types(cls, text):
-        """
-        Count mentions of known variant-type terms in already-extracted PDF
-        text (see extract_pdf_text). Returns {term: count}, sorted by count
-        desc, omitting terms with zero matches. More specific terms (e.g.
-        "frameshift deletion") are matched independently of their generic
-        substrings ("deletion"), so one phrase can add to more than one
-        bucket — intentional for a rough-signal tool, but means counts
-        aren't mutually exclusive.
-        """
-        import re
-
-        text_lower = text.lower()
-        counts = {}
-        for term in cls.VARIANT_TYPE_TERMS:
-            pattern = r"\b" + re.escape(term) + r"s?\b"
-            n = len(re.findall(pattern, text_lower))
-            if n:
-                counts[term] = n
-        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
-
-    #: Lazily-loaded scispaCy pipeline, cached at module level so the model
-    #: (several hundred MB, slow to load) is only loaded once per process,
-    #: not once per request.
-    _scispacy_nlp = None
-
-    @classmethod
-    def _get_scispacy_pipeline(cls):
-        if cls._scispacy_nlp is None:
-            import spacy
-            import scispacy.linking  # noqa: F401 - registers the "scispacy_linker" spaCy factory
-
-            # en_core_sci_sm is scispaCy's general-purpose biomedical NER
-            # model — broad "clinical entity" spans, not typed as
-            # disease/gene/chemical specifically. For typed extraction, swap
-            # in en_ner_bc5cdr_md (disease/chemical) or en_ner_bionlp13cg_md
-            # (genes/cell types) instead — see README.
-            nlp = spacy.load("en_core_sci_sm")
-            # UMLS EntityLinker: resolves each NER span to its best-matching
-            # UMLS concept (CUI + canonical name + semantic type), so results
-            # can be grouped by category (disease/gene/procedure/...) instead
-            # of a flat list of raw text spans. First use downloads scispaCy's
-            # UMLS knowledge base + approximate-nearest-neighbour index
-            # (~1GB, separate from and larger than the NER model above) —
-            # cached under ~/.scispacy after that.
-            nlp.add_pipe("scispacy_linker", config={"linker_name": "umls"})
-            cls._scispacy_nlp = nlp
-        return cls._scispacy_nlp
-
-    @classmethod
-    def extract_clinical_terms(cls, text, limit=50, linker_threshold=0.85):
-        """
-        Run scispaCy NER + UMLS entity linking over already-extracted PDF
-        text. Returns the most frequently mentioned clinical entities as a
-        list of dicts — {"term", "count", "cui", "canonical_name",
-        "category"} — sorted by count desc. Terms are deduplicated
-        case-insensitively (keeping the first-seen casing for "term").
-
-        Each entity is linked to its highest-scoring UMLS candidate (from
-        `Span._.kb_ents`) if that score clears `linker_threshold`; below
-        that, or with no candidates at all, the entity is left unlinked
-        ("category": "Unlinked", cui/canonical_name None) rather than
-        guessing. `category` is the linked concept's first semantic type
-        (TUI), resolved to its official UMLS name via the semantic type
-        tree that scispaCy's UMLS knowledge base loads automatically
-        (`linker.kb.semantic_type_tree`) — falling back to the raw TUI code
-        for the rare type missing from that tree.
-
-        Raises ImportError if scispacy/spacy aren't installed, or OSError if
-        the NER model or UMLS knowledge base isn't downloaded — callers
-        should catch both and show a setup hint rather than a raw traceback.
-        """
-        if not text.strip():
-            return []
-        nlp = cls._get_scispacy_pipeline()
-        linker = nlp.get_pipe("scispacy_linker")
-        type_tree = linker.kb.semantic_type_tree
-        doc = nlp(text)
-
-        counts, display, link = {}, {}, {}
-        for ent in doc.ents:
-            term = ent.text.strip()
-            if len(term) < 2:
-                continue
-            key = term.lower()
-            counts[key] = counts.get(key, 0) + 1
-            display.setdefault(key, term)
-            if key in link:
-                continue
-
-            candidates = [c for c in ent._.kb_ents if c[1] >= linker_threshold]
-            if candidates:
-                cui, _score = max(candidates, key=lambda c: c[1])
-                entity = linker.kb.cui_to_entity[cui]
-                tui = entity.types[0] if entity.types else None
-                category = "Unlinked"
-                if tui and tui in type_tree.type_id_to_node:
-                    category = type_tree.get_canonical_name(tui)
-                elif tui:
-                    category = tui
-                link[key] = {"cui": cui, "canonical_name": entity.canonical_name, "category": category}
-            else:
-                link[key] = {"cui": None, "canonical_name": None, "category": "Unlinked"}
-
-        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
-        return [{"term": display[key], "count": count, **link[key]} for key, count in ranked]
-
     # ---- Stats: system-wide date-range queries -------------------------
 
     def orders_in_range(self, start_date, end_date):
@@ -1179,6 +1036,77 @@ class FhirClient:
         except requests.RequestException:
             pass
         return cls._icb_boundary_cache
+
+    @staticmethod
+    def _point_in_ring(lon, lat, ring):
+        """Ray-casting point-in-polygon test for a single GeoJSON linear
+        ring ([lon, lat] pairs) — standard even-odd crossing count, no
+        external geometry library needed for the one shape test
+        icb_for_coordinates() below requires."""
+        inside = False
+        j = len(ring) - 1
+        for i in range(len(ring)):
+            xi, yi = ring[i][0], ring[i][1]
+            xj, yj = ring[j][0], ring[j][1]
+            if ((yi > lat) != (yj > lat)) and (
+                lon < (xj - xi) * (lat - yi) / (yj - yi) + xi
+            ):
+                inside = not inside
+            j = i
+        return inside
+
+    @classmethod
+    def _point_in_geometry(cls, lon, lat, geometry):
+        """True if (lon, lat) falls inside a GeoJSON Polygon/MultiPolygon
+        geometry — outer ring must contain the point and no hole (any ring
+        after the first) may."""
+        gtype = geometry.get("type")
+        coords = geometry.get("coordinates") or []
+        polygons = coords if gtype == "MultiPolygon" else [coords] if gtype == "Polygon" else []
+        for polygon in polygons:
+            if not polygon or not cls._point_in_ring(lon, lat, polygon[0]):
+                continue
+            if any(cls._point_in_ring(lon, lat, hole) for hole in polygon[1:]):
+                continue
+            return True
+        return False
+
+    @classmethod
+    def icb_for_coordinates(cls, lat, lon):
+        """Official ICB name (ICB23NM) whose boundary polygon
+        (fetch_icb_boundaries()) contains (lat, lon), via a simple
+        point-in-polygon test — or None if boundary data couldn't be
+        fetched, or the point doesn't fall inside any ICB polygon (e.g.
+        outside England/Wales, or just off a coastal/boundary edge)."""
+        boundaries = cls.fetch_icb_boundaries()
+        if not boundaries:
+            return None
+        for feature in boundaries.get("features", []):
+            if cls._point_in_geometry(lon, lat, feature.get("geometry") or {}):
+                return feature.get("properties", {}).get("ICB23NM")
+        return None
+
+    def organisation_ics(self, organisation):
+        """The Integrated Care System a requesting Organization resource's
+        address falls within, via organisation_geocode() (postcode ->
+        lat/lon) + icb_for_coordinates() (lat/lon -> ICB polygon) — used for
+        the /stats "by requesting organisation's ICS" choropleths in place
+        of the patient's own managingOrganization (which reflects where the
+        *patient* is registered, not where the order was *placed from*).
+        Returns None if the organisation has no resolvable postcode, or the
+        geocoded point doesn't fall inside any ICB polygon. Cached per
+        Organization id for the process lifetime — the same handful of
+        requesting organisations recur across a date range."""
+        if not organisation:
+            return None
+        key = organisation.get("id")
+        if key and key in self._org_ics_cache:
+            return self._org_ics_cache[key]
+        geocode = self.organisation_geocode(organisation)
+        result = self.icb_for_coordinates(geocode[0], geocode[1]) if geocode else None
+        if key:
+            self._org_ics_cache[key] = result
+        return result
 
     #: iGene report identifier system (NW Genomics IG-specific) — a local
     #: cross-reference id, e.g. into the iGene LIMS, that may be carried on

@@ -137,17 +137,17 @@
   <p class="muted">Top 10 indications by volume; the rest are folded into "Other".</p>
   {{ render_pivot(order_pivot_indication, "Date", "orders") }}
 
-  <h2>Orders by patient ICS</h2>
-  <p class="muted">Integrated Care System, from the patient's managingOrganization.</p>
+  <h2>Orders by requesting organisation's ICS</h2>
+  <p class="muted">Integrated Care System the requesting organisation's postcode falls within.</p>
   {% if order_ics_map_html %}
     <div>{{ order_ics_map_html|safe }}</div>
     <p class="muted">
-      Shaded by NHS Integrated Care Board (ONS boundaries), matched against
-      each patient's ICS name.
+      Shaded by NHS Integrated Care Board (ONS boundaries), located from
+      each requesting organisation's geocoded postcode.
       {% if order_ics_map_unmatched_count %}
-        {{ order_ics_map_unmatched_count }} order(s) whose ICS name didn't
-        match a known ICB aren't shown on the map (still counted in the
-        table below): {{ order_ics_map_unmatched_names|join(", ") }}.
+        {{ order_ics_map_unmatched_count }} order(s) whose requesting
+        organisation's ICS couldn't be determined aren't shown on the map
+        (still counted in the table below): {{ order_ics_map_unmatched_names|join(", ") }}.
       {% endif %}
     </p>
   {% elif order_by_ics %}
@@ -274,17 +274,17 @@
   <p class="muted">Top 10 indications by volume; the rest are folded into "Other".</p>
   {{ render_pivot(report_pivot_indication, "Date", "reports") }}
 
-  <h2>Reports by patient ICS</h2>
-  <p class="muted">Integrated Care System, from the patient's managingOrganization.</p>
+  <h2>Reports by ordering provider's ICS</h2>
+  <p class="muted">Integrated Care System the ordering provider's postcode falls within.</p>
   {% if report_ics_map_html %}
     <div>{{ report_ics_map_html|safe }}</div>
     <p class="muted">
-      Shaded by NHS Integrated Care Board (ONS boundaries), matched against
-      each patient's ICS name.
+      Shaded by NHS Integrated Care Board (ONS boundaries), located from
+      each ordering provider's geocoded postcode.
       {% if report_ics_map_unmatched_count %}
-        {{ report_ics_map_unmatched_count }} report(s) whose ICS name
-        didn't match a known ICB aren't shown on the map (still counted in
-        the table below): {{ report_ics_map_unmatched_names|join(", ") }}.
+        {{ report_ics_map_unmatched_count }} report(s) whose ordering
+        provider's ICS couldn't be determined aren't shown on the map
+        (still counted in the table below): {{ report_ics_map_unmatched_names|join(", ") }}.
       {% endif %}
     </p>
   {% elif report_by_ics %}
