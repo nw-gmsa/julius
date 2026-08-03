@@ -3,11 +3,12 @@
   <h1>ctDNA summary</h1>
   <p class="muted">
     All outstanding ctDNA orders (any status other than "completed"),
-    regardless of age, plus orders completed in the last month, split by
-    managing organisation (resolved from <code>ServiceRequest.requester</code>
-    — either an Organization directly, or the Organization referenced by a
-    PractitionerRole requester), shown with its NHS ODS code where the
-    Organization resource has one. "Test code" is the coding under
+    regardless of age, plus orders completed within the date range below,
+    split by managing organisation (resolved from
+    <code>ServiceRequest.requester</code> — either an Organization directly,
+    or the Organization referenced by a PractitionerRole requester), shown
+    with its NHS ODS code where the Organization resource has one. "Test
+    code" is the coding under
     <code>https://fhir.nhs.uk/CodeSystem/England-GenomicTestDirectory</code>
     specifically (not its display text, and not any other coding the same
     CodeableConcept might carry). ctDNA orders are identified by a
@@ -19,6 +20,14 @@
     <code>https://fhir.nwgenomics.nhs.uk/iGene/ReportIdentifier</code>
     system, checked on the order first and then the report.
   </p>
+
+  <form action="/ctdna" method="get">
+    <p>
+      Completed between <input type="date" name="start" value="{{ start }}">
+      and <input type="date" name="end" value="{{ end }}">
+      <button type="submit">Update</button>
+    </p>
+  </form>
 
   {% if error %}
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>

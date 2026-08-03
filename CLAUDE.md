@@ -303,9 +303,12 @@ date, date reported, and conclusion code, one row per order.
   in `fhir_client.py`: "outstanding" is any `ServiceRequest.status` other
   than `completed`, shown regardless of age; "completed" orders are only
   included if their linked report's `issued` date (or the order's
-  `authoredOn` if no report resolved) falls within a rolling 30-day window
-  from today. There's no date-range picker on this screen (unlike
-  `/stats`) — the 30-day cutoff is currently fixed.
+  `authoredOn` if no report resolved) falls within `[start, end]` — a
+  `start`/`end` date-range picker (same `?start=&end=` query-param shape
+  as `/stats`), defaulting to the last 30 days when unset. Unlike `/stats`,
+  the range only bounds the *completed* bucket — outstanding orders are
+  still shown regardless of age/range, since an old still-active order is
+  exactly the kind of thing this screen exists to surface.
 - Rows sort Outstanding-before-Completed, most-recently-ordered first
   within each group (two stable sorts on `rows`, applied in that order so
   both hold at once), **then split by managing organisation** via

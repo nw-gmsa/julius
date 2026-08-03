@@ -99,10 +99,14 @@ NSSM Windows Service + IIS reverse proxy), see
   tumour/tumor DNA", "cfDNA", etc.) instead of an exact code — swap this for
   an exact code check if your server's ctDNA tests use a consistent one. The
   initial view shows **all outstanding orders** (any `ServiceRequest.status`
-  other than `completed`) regardless of age, plus **orders completed in the
-  last 30 days** (bounded by the linked report's `issued` date, or the order
-  date if no report resolved) — there's no date-range picker on this screen
-  yet, unlike `/stats`. `ctdna_orders()` queries `ServiceRequest` system-wide
+  other than `completed`) regardless of age, plus **orders completed within
+  a date range** (bounded by the linked report's `issued` date, or the order
+  date if no report resolved) — a `start`/`end` picker at the top of the
+  page, same `?start=&end=` query params as `/stats`, defaulting to the
+  last 30 days. Only the completed bucket is bounded by the range; outstanding
+  orders are always shown regardless of age, since a long-outstanding order is
+  exactly what this screen is meant to surface. `ctdna_orders()` queries
+  `ServiceRequest` system-wide
   with no date bound (paginating like `/stats` does, same 1,000-record cap)
   and pulls in each order's specimen/patient/requester plus any linked
   `DiagnosticReport` via `_include`/`_revinclude` in the same query. Since
@@ -327,13 +331,14 @@ NSSM Windows Service + IIS reverse proxy), see
    tests come back empty on this screen, check what `code.text`/
    `code.coding[].display` actually looks like for a real ctDNA order and
    either adjust the match list or switch to an exact code check.
-9. **"Completed in the last 30 days" cutoff** on `/ctdna` is a rolling
-   window from today, bounded by the linked report's `issued` date — not a
-   calendar month and not configurable yet (no date-range picker like
-   `/stats` has). Outstanding orders (anything not `status: completed`)
-   are shown with no date bound at all, which could be slow or show a lot
-   of very old orders if this server has long-lived active `ServiceRequest`s
-   that were never marked completed.
+9. **Completed-orders date range** on `/ctdna` defaults to the last 30 days
+   but is now picker-configurable (bounded by the linked report's `issued`
+   date, or the order date if no report resolved) — same `?start=&end=`
+   query params as `/stats`. Outstanding orders (anything not
+   `status: completed`) are shown with no date bound at all regardless of
+   the picker, which could be slow or show a lot of very old orders if this
+   server has long-lived active `ServiceRequest`s that were never marked
+   completed.
 10. **ODS code system URI** — `organisation_ods_code()` looks for
     `identifier.system == "https://fhir.nhs.uk/Id/ods-organization-code"` on
     the resolved Organization, falling back to the first identifier with no

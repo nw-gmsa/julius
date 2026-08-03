@@ -1036,17 +1036,19 @@ def stats():
 
 @app.route("/ctdna")
 def ctdna_summary():
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
+
     error = None
     rows = []
     try:
         orders, reports_by_order = client.ctdna_orders()
-        cutoff = (date.today() - timedelta(days=30)).isoformat()
 
         for order in orders:
             order_id = order.get("id")
             # "Outstanding" = any status other than "completed" (draft,
             # active, on-hold, revoked, ...) — shown regardless of age.
-            # "Completed" orders are bounded to the last month below.
+            # "Completed" orders are bounded to [start, end] below.
             is_completed = order.get("status") == "completed"
             report = reports_by_order.get(order_id)
             reported_date = None
@@ -1058,7 +1060,7 @@ def ctdna_summary():
                 # completion event), falling back to order date if no
                 # report resolved.
                 completion_date = reported_date or (order.get("authoredOn") or "")[:10]
-                if not completion_date or completion_date < cutoff:
+                if not completion_date or completion_date < start or completion_date > end:
                     continue
 
             specimens = client.resolve_specimens(order)
@@ -1101,7 +1103,7 @@ def ctdna_summary():
         error = str(e)
         rows_by_org = []
 
-    return render_template("ctdna.html", rows_by_org=rows_by_org, error=error)
+    return render_template("ctdna.html", rows_by_org=rows_by_org, error=error, start=start, end=end)
 
 
 @app.route("/cepheid-results")
