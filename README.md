@@ -1,4 +1,4 @@
-# FHIR Lab Explorer
+# Lab Explorer
 
 A minimal Flask app for browsing genomic test orders (`ServiceRequest`)
 and reports (`DiagnosticReport` + `Observation`) on a FHIR R4 server

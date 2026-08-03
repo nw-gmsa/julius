@@ -12,6 +12,27 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
+  <form method="get" action="/work-orders">
+    <p>
+      Requested by:
+      <select name="org">
+        <option value="" {% if not selected_org %}selected{% endif %}>All</option>
+        {% for org in organisations %}
+          <option value="{{ org }}" {% if org == selected_org %}selected{% endif %}>{{ org }}</option>
+        {% endfor %}
+      </select>
+      Test:
+      <select name="test">
+        <option value="" {% if not selected_test %}selected{% endif %}>All</option>
+        {% for t in tests %}
+          <option value="{{ t }}" {% if t == selected_test %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+      </select>
+      {% if sort %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+      <button type="submit">Filter</button>
+    </p>
+  </form>
+
   {% macro render_order_chain(nodes, depth=0) %}
     {% for node in nodes %}
       <tr>
@@ -42,15 +63,21 @@
 
   <h2>Active work orders ({{ orders|length }})</h2>
   {% if orders %}
+    {% set next_sort = 'ordered_desc' if sort == 'ordered_asc' else 'ordered_asc' %}
     <table>
       <tr>
-        <th>Patient</th><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th>
+        <th>Patient</th><th>Test</th><th>Status</th><th>Intent</th>
+        <th><a href="{{ url_for('work_orders', org=selected_org, test=selected_test, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
         <th>Requested by</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>ID</th>
       </tr>
       {{ render_order_chain(order_chains) }}
     </table>
     <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
   {% else %}
-    <p class="muted">No active filler-order test orders found.</p>
+    {% if selected_org or selected_test %}
+      <p class="muted">No active work orders match the selected filter.</p>
+    {% else %}
+      <p class="muted">No active filler-order test orders found.</p>
+    {% endif %}
   {% endif %}
 {% endblock %}

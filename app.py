@@ -592,21 +592,76 @@ def _order_worklist(fetch_orders):
 @app.route("/work-orders")
 def work_orders():
     orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(client.active_filler_orders)
+
+    order_organisation = {o["id"]: (client.order_organisation(o) or "Unknown") for o in orders}
+    order_test = {o["id"]: (FhirClient.test_directory_code(o.get("code")) or "—") for o in orders}
+    organisations = sorted(set(order_organisation.values()))
+    tests = sorted(set(order_test.values()))
+
+    selected_org = request.args.get("org", "")
+    selected_test = request.args.get("test", "")
+    sort = request.args.get("sort", "")
+
+    filtered_orders = _filter_orders_by_org_and_test(orders, order_organisation, order_test, selected_org, selected_test)
+    order_chains = client.build_order_chains(filtered_orders)
+    if sort in ("ordered_asc", "ordered_desc"):
+        _sort_order_chains(order_chains, reverse=(sort == "ordered_desc"))
+
     return render_template(
-        "work_orders.html", orders=orders, order_chains=order_chains,
+        "work_orders.html", orders=filtered_orders, order_chains=order_chains,
         order_requester=order_requester, order_performer=order_performer,
-        order_patient=order_patient, error=error,
+        order_patient=order_patient,
+        organisations=organisations, tests=tests,
+        selected_org=selected_org, selected_test=selected_test, sort=sort,
+        error=error,
     )
+
+
+def _sort_order_chains(nodes, reverse=False):
+    """Sort build_order_chains()'s node list by the node's own order's
+    authoredOn, in place, recursing into each node's children so a
+    reanalysis/cascade child is sorted the same way among its siblings —
+    not just the root level. Orders with no authoredOn sort first
+    ascending / last descending."""
+    nodes.sort(key=lambda n: n["order"].get("authoredOn") or "", reverse=reverse)
+    for n in nodes:
+        _sort_order_chains(n["children"], reverse=reverse)
+
+
+def _filter_orders_by_org_and_test(orders, order_organisation, order_test, selected_org, selected_test):
+    filtered = orders
+    if selected_org:
+        filtered = [o for o in filtered if order_organisation.get(o["id"]) == selected_org]
+    if selected_test:
+        filtered = [o for o in filtered if order_test.get(o["id"]) == selected_test]
+    return filtered
 
 
 @app.route("/test-orders")
 def test_orders():
     orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(client.active_placer_orders)
-    unknown_patient_count = sum(1 for o in orders if order_patient.get(o["id"], {}).get("id") is None)
+
+    order_organisation = {o["id"]: (client.order_organisation(o) or "Unknown") for o in orders}
+    order_test = {o["id"]: (FhirClient.test_directory_code(o.get("code")) or "—") for o in orders}
+    organisations = sorted(set(order_organisation.values()))
+    tests = sorted(set(order_test.values()))
+
+    selected_org = request.args.get("org", "")
+    selected_test = request.args.get("test", "")
+    sort = request.args.get("sort", "")
+
+    filtered_orders = _filter_orders_by_org_and_test(orders, order_organisation, order_test, selected_org, selected_test)
+    order_chains = client.build_order_chains(filtered_orders)
+    if sort in ("ordered_asc", "ordered_desc"):
+        _sort_order_chains(order_chains, reverse=(sort == "ordered_desc"))
+
+    unknown_patient_count = sum(1 for o in filtered_orders if order_patient.get(o["id"], {}).get("id") is None)
     return render_template(
-        "test_orders.html", orders=orders, order_chains=order_chains,
+        "test_orders.html", orders=filtered_orders, order_chains=order_chains,
         order_requester=order_requester, order_performer=order_performer,
         order_patient=order_patient,
+        organisations=organisations, tests=tests,
+        selected_org=selected_org, selected_test=selected_test, sort=sort,
         unknown_patient_count=unknown_patient_count, error=error,
     )
 
@@ -621,17 +676,27 @@ def test_orders_clear_down_unknown_patient():
     ServiceRequest delete: no patient identity is involved (the whole
     point is the patient is unknown), and /test-orders's GET already shows
     "Unknown" against every one of these before this button is reachable.
+
+    Scoped to the same org/test filter the page was showing when the
+    button was clicked (passed through as hidden fields) — otherwise the
+    displayed "N of the orders above" count could disagree with how many
+    this actually deletes.
     """
+    selected_org = request.form.get("org", "")
+    selected_test = request.form.get("test", "")
     error = None
     result = {"deleted": [], "failed": []}
     try:
         orders = client.active_placer_orders()
+        order_organisation = {o["id"]: (client.order_organisation(o) or "Unknown") for o in orders}
+        order_test = {o["id"]: (FhirClient.test_directory_code(o.get("code")) or "—") for o in orders}
+        orders = _filter_orders_by_org_and_test(orders, order_organisation, order_test, selected_org, selected_test)
         result = client.clear_down_orders_with_unknown_patient(orders)
     except Exception as e:
         error = str(e)
     return render_template(
         "admin_clear_down_result.html", title="Unknown-patient test orders clear-down result",
-        back_url="/test-orders", back_label="Back to test orders",
+        back_url=url_for("test_orders", org=selected_org, test=selected_test), back_label="Back to test orders",
         deleted=result["deleted"], failed=result["failed"], error=error,
     )
 
@@ -1056,13 +1121,21 @@ def cepheid_results():
     linked Observation's top-level `value[x]` and `dataAbsentReason`), and a
     component-level results table built from every linked Observation's
     `.component` entries (component_rows()).
+
+    Bounded to DiagnosticReport.date within [start, end] (query params,
+    same convention as /stats), defaulting to a rolling last-30-days
+    window rather than the unbounded query bcrabl_reports() still supports
+    if called with no dates.
     """
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
+
     error = None
     rows = []
     no_identifier_count = 0
     duplicate_count = 0
     try:
-        reports = client.bcrabl_reports()
+        reports = client.bcrabl_reports(start, end)
         no_identifier_count = len(client.bcrabl_reports_without_identifiers(reports))
         duplicate_count = len(client.duplicate_bcrabl_reports(reports))
         for report in reports:
@@ -1106,7 +1179,7 @@ def cepheid_results():
         no_component_results_count=no_component_results_count,
         no_identifier_count=no_identifier_count,
         duplicate_count=duplicate_count,
-        error=error,
+        error=error, start=start, end=end,
     )
 
 
@@ -1124,17 +1197,19 @@ def cepheid_results_clear_down_no_components():
     found on this report's Observations" against every one of these
     before this button is reachable.
     """
+    start = request.form.get("start")
+    end = request.form.get("end")
     error = None
     result = {"deleted": [], "failed": []}
     try:
-        reports = client.bcrabl_reports()
+        reports = client.bcrabl_reports(start, end)
         result = client.clear_down_bcrabl_reports_without_components(reports)
     except Exception as e:
         error = str(e)
     return render_template(
         "admin_clear_down_result.html",
         title="BCRABL reports without component results — clear-down result",
-        back_url="/cepheid-results", back_label="Back to Cepheid Test Results",
+        back_url=url_for("cepheid_results", start=start, end=end), back_label="Back to Cepheid Test Results",
         deleted=result["deleted"], failed=result["failed"], error=error,
     )
 
@@ -1149,17 +1224,19 @@ def cepheid_results_clear_down_no_identifiers():
     Single POST, no separate confirm route — same reasoning as the other
     mechanical clear-downs on this screen.
     """
+    start = request.form.get("start")
+    end = request.form.get("end")
     error = None
     result = {"deleted": [], "failed": []}
     try:
-        reports = client.bcrabl_reports()
+        reports = client.bcrabl_reports(start, end)
         result = client.clear_down_bcrabl_reports_without_identifiers(reports)
     except Exception as e:
         error = str(e)
     return render_template(
         "admin_clear_down_result.html",
         title="BCRABL reports without identifiers — clear-down result",
-        back_url="/cepheid-results", back_label="Back to Cepheid Test Results",
+        back_url=url_for("cepheid_results", start=start, end=end), back_label="Back to Cepheid Test Results",
         deleted=result["deleted"], failed=result["failed"], error=error,
     )
 
@@ -1174,17 +1251,19 @@ def cepheid_results_clear_down_duplicates():
     separate confirm route — same reasoning as the other mechanical
     clear-downs on this screen.
     """
+    start = request.form.get("start")
+    end = request.form.get("end")
     error = None
     result = {"deleted": [], "failed": []}
     try:
-        reports = client.bcrabl_reports()
+        reports = client.bcrabl_reports(start, end)
         result = client.clear_down_duplicate_bcrabl_reports(reports)
     except Exception as e:
         error = str(e)
     return render_template(
         "admin_clear_down_result.html",
         title="Duplicate BCRABL reports — clear-down result",
-        back_url="/cepheid-results", back_label="Back to Cepheid Test Results",
+        back_url=url_for("cepheid_results", start=start, end=end), back_label="Back to Cepheid Test Results",
         deleted=result["deleted"], failed=result["failed"], error=error,
     )
 

@@ -490,12 +490,17 @@ class FhirClient:
         codings = (report.get("code") or {}).get("coding", [])
         return any(c.get("code") == cls.BCRABL_CODE for c in codings)
 
-    def bcrabl_reports(self):
+    def bcrabl_reports(self, start_date=None, end_date=None):
         """
         All DiagnosticReport resources system-wide with a BCRABL code (see
-        _is_bcrabl_report) — the Cepheid Test Results screen. No date
-        bound, paginated like other system-wide queries in this file (see
-        README for the pagination cap).
+        _is_bcrabl_report) — the Cepheid Test Results screen. Paginated
+        like other system-wide queries in this file (see README for the
+        pagination cap).
+
+        Optionally bounded to DiagnosticReport.date within
+        [start_date, end_date] (ISO dates, same convention as
+        orders_in_range()/reports_in_range()) — pass neither to fall back
+        to the old unbounded query.
 
         Each report's specimen/patient/result(Observation) come back in
         the same query via `_include`, along with the originating
@@ -518,6 +523,8 @@ class FhirClient:
             ],
             "_include:iterate": ["ServiceRequest:specimen"],
         }
+        if start_date and end_date:
+            base_params["date"] = [f"ge{start_date}", f"le{end_date}"]
         try:
             matches, included = self._search_all_split(
                 "DiagnosticReport", {**base_params, "category": DIAGNOSTIC_REPORT_CATEGORY})

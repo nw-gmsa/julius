@@ -5,13 +5,22 @@
     <code>DiagnosticReport</code>s with a BCRABL code
     (<code>FhirClient.BCRABL_CODE</code>, matched by <code>coding[].code</code>
     regardless of system — see <code>_is_bcrabl_report()</code>), across all
-    patients, with no date bound. Each report is shown with its originating
-    order, specimen, <code>meta.lastUpdated</code>, every
-    <code>identifier</code> on the report, an Observation-level results
-    table (each linked Observation's own <code>value[x]</code> and
-    <code>dataAbsentReason</code>), and a component-level results table
-    built from every linked Observation's <code>component</code> entries.
+    patients, bounded to <code>DiagnosticReport.date</code> within the range
+    below. Each report is shown with its originating order, specimen,
+    <code>meta.lastUpdated</code>, every <code>identifier</code> on the
+    report, an Observation-level results table (each linked Observation's
+    own <code>value[x]</code> and <code>dataAbsentReason</code>), and a
+    component-level results table built from every linked Observation's
+    <code>component</code> entries.
   </p>
+
+  <form action="/cepheid-results" method="get">
+    <p>
+      From <input type="date" name="start" value="{{ start }}">
+      to <input type="date" name="end" value="{{ end }}">
+      <button type="submit">Update</button>
+    </p>
+  </form>
 
   {% if error %}
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
@@ -88,6 +97,8 @@
 
     {% if no_component_results_count %}
       <form method="post" action="/cepheid-results/clear-down-no-components">
+        <input type="hidden" name="start" value="{{ start }}">
+        <input type="hidden" name="end" value="{{ end }}">
         <p class="muted">
           {{ no_component_results_count }} of the reports above have no
           component-level results at all (shown as "No component-level
@@ -100,6 +111,8 @@
 
     {% if no_identifier_count %}
       <form method="post" action="/cepheid-results/clear-down-no-identifiers">
+        <input type="hidden" name="start" value="{{ start }}">
+        <input type="hidden" name="end" value="{{ end }}">
         <p class="muted">
           {{ no_identifier_count }} of the reports above have no
           identifiers at all (shown as "Identifiers: —" above). Deleting
@@ -112,6 +125,8 @@
 
     {% if duplicate_count %}
       <form method="post" action="/cepheid-results/clear-down-duplicates">
+        <input type="hidden" name="start" value="{{ start }}">
+        <input type="hidden" name="end" value="{{ end }}">
         <p class="muted">
           {{ duplicate_count }} of the reports above are duplicates —
           they share an identifier with another report in this list. The
