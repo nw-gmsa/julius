@@ -510,6 +510,61 @@ def order_view(order_id):
         medical_record_numbers=client.medical_record_numbers(patient) if patient else [],
         requester=client.requester_display(order) if order else None,
         performer=client.performer_display(order) if order else None,
+        placer_assigner=client.placer_identifier_assigner(order) if order else None,
+    )
+
+
+@app.route("/report/<report_id>")
+def report_view(report_id):
+    """
+    Single-report "view report" screen, reached from a patient's report
+    card (patient.html links each report's test name here, the same way
+    order_view is reached from the orders table). Same lead-with-context
+    ordering as order_view: patient details first, then the requesting/
+    performing organisations, before the report's own details — see that
+    route's docstring.
+
+    Two sections order_view has no equivalent of:
+      - **Findings** — the report's actual clinical content: conclusion
+        code, results interpreter, linked Observation results (same table
+        shape as patient.html's report card), and a link to the source
+        PDF(s) (`presentedForm`) — identical markup to patient.html's
+        "📄 View report document" link, reused rather than reinvented.
+      - **Implications** — a placeholder only. This IG/FHIR server has no
+        modelled genomic-implications data (familial risk, cascade-testing
+        recommendations, etc.) yet, so this section marks where that would
+        go rather than fabricating content.
+    """
+    error = None
+    report = None
+    patient = None
+    order = None
+    specimens = []
+    observations = []
+    try:
+        report = client.get_report(report_id)
+        patient = client.patient_for(report)
+        # The report's *requesting* organisation isn't on the report
+        # itself — DiagnosticReport has no requester — so it's resolved
+        # via the originating ServiceRequest, same as the ctDNA/stats
+        # "ordering provider" lookups.
+        order = client.order_for_report(report)
+        specimens = client.resolve_specimens(report)
+        observations = client.observations_for_report(report)
+    except Exception as e:
+        error = str(e)
+
+    return render_template(
+        "report_view.html", report=report, patient=patient, order=order,
+        specimens=specimens, observations=observations, error=error,
+        nhs_number=FhirClient.nhs_number(patient) if patient else None,
+        nhs_number_verification_status=FhirClient.nhs_number_verification_status(patient) if patient else None,
+        postcode=_patient_postcode(patient),
+        medical_record_numbers=client.medical_record_numbers(patient) if patient else [],
+        requester=client.requester_display(order) if order else None,
+        performer=client.report_organisation(report) if report else None,
+        results_interpreter=client.results_interpreter_display(report) if report else None,
+        igene_id=client.igene_report_identifier(order, report) if report else None,
     )
 
 

@@ -336,11 +336,14 @@ class FhirClient:
     def medical_record_numbers(self, patient):
         """
         Every medical record number (HL7 v2-0203 type "MR") on a Patient, as
-        [{"value", "assigner_name", "assigner_ods"}, ...] — a patient can
-        carry more than one MRN, one per assigning organisation (e.g. a
-        separate MRN at each trust that's treated them), so this returns a
-        list rather than a single value like nhs_number()/
-        igene_patient_identifier() above.
+        [{"value", "assigner_name", "assigner_ods", "assigner_display"}, ...]
+        — a patient can carry more than one MRN, one per assigning
+        organisation (e.g. a separate MRN at each trust that's treated
+        them), so this returns a list rather than a single value like
+        nhs_number()/igene_patient_identifier() above. `assigner_display`
+        is `assigner_name`/`assigner_ods` combined via _name_with_ods() —
+        order_view.html's single "Hospital number" cell uses that; the two
+        separate fields exist for patient.html's dedicated columns.
 
         `identifier.assigner` is a Reference, which per FHIR can point at an
         Organization either by literal `.reference` (fetched and passed to
@@ -365,6 +368,7 @@ class FhirClient:
                 "value": ident.get("value"),
                 "assigner_name": assigner_name,
                 "assigner_ods": assigner_ods,
+                "assigner_display": self._name_with_ods(assigner_name, assigner_ods),
             })
         return results
 
@@ -1481,19 +1485,29 @@ class FhirClient:
         return None
 
     @staticmethod
-    def _identifier_by_type(resource, type_code):
-        """Identifier value from `resource.identifier` whose `.type.coding`
-        includes the given v2-0203 code (see IDENTIFIER_TYPE_SYSTEM/
-        PLACER_IDENTIFIER_TYPE/FILLER_IDENTIFIER_TYPE) — the standard FHIR
-        way of distinguishing a placer order number from a filler order
-        number on the same ServiceRequest."""
+    def _identifier_by_type_full(resource, type_code):
+        """Full Identifier dict (not just its value) from `resource.identifier`
+        whose `.type.coding` includes the given v2-0203 code (see
+        IDENTIFIER_TYPE_SYSTEM/PLACER_IDENTIFIER_TYPE/FILLER_IDENTIFIER_TYPE)
+        — the standard FHIR way of distinguishing a placer order number from
+        a filler order number on the same ServiceRequest. Kept separate from
+        _identifier_by_type() below so callers that only want the value
+        aren't forced to unpack a dict, while placer_identifier_assigner()
+        can still get at `.assigner`."""
         if not resource:
             return None
         for ident in resource.get("identifier", []):
             codings = (ident.get("type") or {}).get("coding", [])
             if any(c.get("code") == type_code for c in codings):
-                return ident.get("value")
+                return ident
         return None
+
+    @classmethod
+    def _identifier_by_type(cls, resource, type_code):
+        """Identifier value from `resource.identifier` whose `.type.coding`
+        includes the given v2-0203 code — see _identifier_by_type_full()."""
+        ident = cls._identifier_by_type_full(resource, type_code)
+        return ident.get("value") if ident else None
 
     @classmethod
     def placer_identifier(cls, order):
@@ -1506,6 +1520,17 @@ class FhirClient:
         """Filler order number (HL7 v2-0203 code "FILL") — the identifier
         assigned by the fulfilling/lab system."""
         return cls._identifier_by_type(order, cls.FILLER_IDENTIFIER_TYPE)
+
+    def placer_identifier_assigner(self, order):
+        """Assigning-authority display (name and/or ODS code — see
+        _name_with_ods()) for the placer order number's `Identifier.assigner`
+        — order_view.html shows this next to the placer number, same idea as
+        the hospital number's assigner shown next to it (medical_record_
+        numbers()'s assigner_name/assigner_ods). Returns None if there's no
+        placer identifier, no assigner on it, or the assigner resolves to
+        neither a name nor an ODS code."""
+        ident = self._identifier_by_type_full(order, self.PLACER_IDENTIFIER_TYPE)
+        return self._resolve_assigner_display(ident.get("assigner")) if ident else None
 
     def order_indication(self, order):
         """Genomic disease / clinical indication for a ServiceRequest, from
@@ -1615,6 +1640,23 @@ class FhirClient:
         if name and ods:
             return f"{name} ({ods})"
         return name or ods
+
+    def _resolve_assigner_display(self, assigner_ref):
+        """Name/ODS display (_name_with_ods()) for an Identifier.assigner
+        Reference — shared by medical_record_numbers() and
+        placer_identifier_assigner(). `assigner` can point at an
+        Organization either by literal `.reference` (fetched and passed to
+        organisation_ods_code() for its ODS code) or by an inline
+        `.identifier` — a logical reference with no resource to fetch, where
+        this server puts the ODS code directly as `assigner.identifier.value`;
+        resolve_organisation_ods() checks both. Returns None if there's no
+        assigner at all, or it resolves to neither a name nor an ODS code."""
+        if not assigner_ref:
+            return None
+        assigner = self.resolve_reference(assigner_ref)
+        name = (assigner.get("name") if assigner else None) or assigner_ref.get("display")
+        ods = self.resolve_organisation_ods(assigner_ref)
+        return self._name_with_ods(name, ods)
 
     def patient_ics_display(self, patient):
         """

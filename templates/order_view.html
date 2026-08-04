@@ -16,6 +16,60 @@
   {% endif %}
 
   {% if order %}
+    <h2>Patient details</h2>
+    {% if patient %}
+      <table>
+        <tr><th>Name</th><td>{{ patient|human_name }}</td></tr>
+        <tr><th>Date of birth</th><td>{{ patient.birthDate or "—" }}</td></tr>
+        <tr><th>Sex</th><td>{{ patient.gender or "—" }}</td></tr>
+        <tr>
+          <th>NHS number</th>
+          <td>
+            {{ nhs_number or "—" }}
+            {% if nhs_number and nhs_number_verification_status != "01" %}
+              <span class="badge" title="NHS number verification status extension is {{ nhs_number_verification_status or 'absent' }}, not &quot;01&quot; (Number present and verified)">Not verified</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr><th>Postcode</th><td>{{ postcode or "—" }}</td></tr>
+        <tr>
+          <th>Hospital number</th>
+          <td>
+            {{ (medical_record_numbers[0].value if medical_record_numbers else None) or "—" }}
+            {% if medical_record_numbers and medical_record_numbers[0].assigner_display %}
+              <span class="muted">({{ medical_record_numbers[0].assigner_display }})</span>
+            {% endif %}
+          </td>
+        </tr>
+      </table>
+    {% else %}
+      <p class="muted">Patient could not be resolved for this order.</p>
+    {% endif %}
+
+    <h2>Requesting organisation / laboratory</h2>
+    <table>
+      <tr><th>Requesting organisation</th><td>{{ requester or "—" }}</td></tr>
+      <tr><th>GMS/GLH laboratory</th><td>{{ performer or "—" }}</td></tr>
+    </table>
+
+    <h2>Samples</h2>
+    {% if specimens %}
+      <table>
+        <tr><th>Type</th><th>Collection date</th><th>Received date</th><th>Specimen identifier</th><th>ID</th></tr>
+        {% for s in specimens %}
+          <tr>
+            <td>{{ s.type|code_text }}</td>
+            <td>{{ s|specimen_collected }}</td>
+            <td>{{ s|specimen_received }}</td>
+            <td>{{ (s|specimen_identifier) or "—" }}</td>
+            <td class="muted">{{ s.id }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">No specimens found for this order.</p>
+    {% endif %}
+
     <h2>Test request</h2>
     <table>
       <tr><th>Test Directory Clinical Indication &amp; code</th><td>{{ (order.code|test_directory_code) or "—" }} — {{ order.code|code_text }}</td></tr>
@@ -24,7 +78,15 @@
       <tr><th>Intent</th><td>{{ order.intent or "—" }}</td></tr>
       <tr><th>Priority</th><td>{{ order.priority or "—" }}</td></tr>
       <tr><th>Date ordered</th><td>{{ order.authoredOn or "—" }}</td></tr>
-      <tr><th>Placer number</th><td>{{ (order|placer_identifier) or "—" }}</td></tr>
+      <tr>
+        <th>Placer number</th>
+        <td>
+          {{ (order|placer_identifier) or "—" }}
+          {% if placer_assigner %}
+            <span class="muted">({{ placer_assigner }})</span>
+          {% endif %}
+        </td>
+      </tr>
       <tr><th>Filler number</th><td>{{ (order|filler_identifier) or "—" }}</td></tr>
       <tr><th class="muted">ID</th><td class="muted">{{ order.id }}</td></tr>
     </table>
@@ -66,52 +128,6 @@
       </table>
     {% else %}
       <p class="muted">No supporting information found.</p>
-    {% endif %}
-
-    <h2>Requesting organisation / laboratory</h2>
-    <table>
-      <tr><th>Requesting organisation</th><td>{{ requester or "—" }}</td></tr>
-      <tr><th>GMS/GLH laboratory</th><td>{{ performer or "—" }}</td></tr>
-    </table>
-
-    <h2>Patient details</h2>
-    {% if patient %}
-      <table>
-        <tr><th>Name</th><td>{{ patient|human_name }}</td></tr>
-        <tr><th>Date of birth</th><td>{{ patient.birthDate or "—" }}</td></tr>
-        <tr><th>Sex</th><td>{{ patient.gender or "—" }}</td></tr>
-        <tr>
-          <th>NHS number</th>
-          <td>
-            {{ nhs_number or "—" }}
-            {% if nhs_number and nhs_number_verification_status != "01" %}
-              <span class="badge" title="NHS number verification status extension is {{ nhs_number_verification_status or 'absent' }}, not &quot;01&quot; (Number present and verified)">Not verified</span>
-            {% endif %}
-          </td>
-        </tr>
-        <tr><th>Postcode</th><td>{{ postcode or "—" }}</td></tr>
-        <tr><th>Hospital number</th><td>{{ (medical_record_numbers[0].value if medical_record_numbers else None) or "—" }}</td></tr>
-      </table>
-    {% else %}
-      <p class="muted">Patient could not be resolved for this order.</p>
-    {% endif %}
-
-    <h2>Samples</h2>
-    {% if specimens %}
-      <table>
-        <tr><th>Type</th><th>Collection date</th><th>Received date</th><th>Specimen identifier</th><th>ID</th></tr>
-        {% for s in specimens %}
-          <tr>
-            <td>{{ s.type|code_text }}</td>
-            <td>{{ s|specimen_collected }}</td>
-            <td>{{ s|specimen_received }}</td>
-            <td>{{ (s|specimen_identifier) or "—" }}</td>
-            <td class="muted">{{ s.id }}</td>
-          </tr>
-        {% endfor %}
-      </table>
-    {% else %}
-      <p class="muted">No specimens found for this order.</p>
     {% endif %}
 
     {% if patient %}

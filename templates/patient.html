@@ -100,7 +100,7 @@
   {% if reports %}
     {% for r in reports %}
       <div class="card">
-        <strong>{{ (r.code|test_directory_code) or "—" }}</strong>
+        <strong><a href="/report/{{ r.id }}">{{ (r.code|test_directory_code) or "—" }}</a></strong>
         <span class="muted">— {{ r.status or "—" }}, {{ r.effectiveDateTime or r.issued or "no date" }}</span>
         <span class="muted">— Report ID: {{ (r|report_identifier) or "—" }}</span>
         <span class="muted">— Conclusion code: {{ r|conclusion_code_reference }}</span>
