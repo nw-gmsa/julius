@@ -512,10 +512,29 @@ class FhirClient:
     #: _is_bcrabl_report() matches by `coding[].code` regardless of system.
     BCRABL_CODE = "BCRABL"
 
+    #: LOINC code for BCR-ABL1 fusion transcript quantitation — an
+    #: alternative to BCRABL_CODE some servers may use instead (or as well
+    #: as) the local/Cepheid code above. Checked in addition to it, not
+    #: instead of it, same reasoning as CTDNA_TEST_DIRECTORY_CODES growing
+    #: over time rather than being a single fixed value.
+    BCRABL_LOINC_CODE = "69380-4"
+
+    #: Both known BCR-ABL1 codes, for _is_bcrabl_report() and the `code=`
+    #: FHIR search parameter in bcrabl_reports() below.
+    BCRABL_CODES = (BCRABL_CODE, BCRABL_LOINC_CODE)
+
     @classmethod
     def _is_bcrabl_report(cls, report):
         codings = (report.get("code") or {}).get("coding", [])
-        return any(c.get("code") == cls.BCRABL_CODE for c in codings)
+        return any(c.get("code") in cls.BCRABL_CODES for c in codings)
+
+    @classmethod
+    def _bcrabl_code_search_value(cls):
+        """BCRABL_CODES as a FHIR token-search value — bare codes (no
+        `system|` prefix), comma-joined for OR, since the coding system is
+        unconfirmed and _is_bcrabl_report() itself matches on `code`
+        regardless of system (see BCRABL_CODE)."""
+        return ",".join(cls.BCRABL_CODES)
 
     def bcrabl_reports(self, start_date=None, end_date=None):
         """
@@ -527,7 +546,20 @@ class FhirClient:
         Optionally bounded to DiagnosticReport.date within
         [start_date, end_date] (ISO dates, same convention as
         orders_in_range()/reports_in_range()) — pass neither to fall back
-        to the old unbounded query.
+        to the old unbounded-by-date query.
+
+        `code` (BCRABL_CODES, via _bcrabl_code_search_value()) is a
+        required part of this query, not a client-side-only filter — this
+        used to be a `category=Genetics` search with no code restriction
+        at all, filtered down to BCRABL reports only after fetching
+        everything, which is exactly what 413'd on a live server (same
+        class of bug ctdna_orders()'s DiagnosticReport-side query hit).
+        `_is_bcrabl_report()` is still applied after fetching (rather than
+        trusting the search to be exact) since a bare-code token search
+        can't distinguish "this coding's code is BCRABL" from a
+        coincidental match elsewhere on the resource, but the FHIR query
+        itself is now what keeps the result set small, not just the
+        client-side filter.
 
         Each report's specimen/patient/result(Observation) come back in
         the same query via `_include`, along with the originating
@@ -544,6 +576,7 @@ class FhirClient:
         """
         base_params = {
             "_count": 100,
+            "code": self._bcrabl_code_search_value(),
             "_include": [
                 "DiagnosticReport:specimen", "DiagnosticReport:patient",
                 "DiagnosticReport:result", "DiagnosticReport:based-on",
@@ -807,14 +840,17 @@ class FhirClient:
         than one specific code), but this catches a genuinely ctDNA-coded
         order on a server where `category` isn't populated reliably,
         same concern _search_ctdna_service_requests's own
-        categorized-then-fallback ladder exists for. Query 2 (the
-        DiagnosticReport-side completed-with-report bucket) does *not*
-        get this treatment — a report's own `code` isn't guaranteed to
-        carry the same Genomic Test Directory coding as its originating
-        ServiceRequest on every server, so a code-filtered variant there
-        would be searching a less certain field; a completed order in
-        that bucket still needs to be caught by `category` or
-        CTDNA_TEXT_MATCHES.
+        categorized-then-fallback ladder exists for.
+
+        Query 2 (the DiagnosticReport-side completed-with-report bucket)
+        is different: `code` is *required* there, not supplementary — an
+        unrestricted `category=Genetics` DiagnosticReport search 413'd on
+        a live server, so this bucket doesn't run a separate broad
+        variant at all any more, only the categorized-then-fallback pair
+        with `code` baked into both. The trade-off: a completed order
+        whose *report* doesn't carry a CTDNA_TEST_DIRECTORY_CODES code
+        won't be found via this bucket (buckets 1/3 still fall back to
+        CTDNA_TEXT_MATCHES for their own ServiceRequest-side searches).
 
         Each order's specimen, patient, and requester (for managing-
         organisation grouping via order_organisation()) come back in the
@@ -878,9 +914,24 @@ class FhirClient:
         all_resources += matches + included
 
         if start and end:
+            # `code` is required here (not supplementary) — this query
+            # used to be category-only, which is exactly what 413'd on a
+            # live server: a broad `category=Genetics` DiagnosticReport
+            # search with no code restriction at all. DiagnosticReport.code
+            # is bound to the same Genomic Test Directory value set as
+            # ServiceRequest.code in this IG (see
+            # GENOMIC_TEST_DIRECTORY_SYSTEM), so restricting by it here is
+            # just as valid as on the ServiceRequest side, and keeps this
+            # query's result set small regardless of how large this
+            # server's overall Genetics-category report volume is. The
+            # trade-off: a completed order whose *report* doesn't carry
+            # one of CTDNA_TEST_DIRECTORY_CODES won't be found via this
+            # bucket any more (buckets 1/3 on the ServiceRequest side still
+            # have the CTDNA_TEXT_MATCHES fallback for that case).
             report_params = {
                 "_count": 100,
                 "date": [f"ge{start}", f"le{end}"],
+                "code": self._ctdna_code_search_value(),
                 "_include": ["DiagnosticReport:based-on", "DiagnosticReport:specimen"],
                 # No ServiceRequest:patient here either — see
                 # _search_ctdna_service_requests() for why.
@@ -897,22 +948,6 @@ class FhirClient:
             if not r_matches:
                 r_matches, r_included = self._search_all_split("DiagnosticReport", report_params)
             all_resources += r_matches + r_included
-
-            # Supplementary code-filtered query, same reasoning as the
-            # outstanding/completed ServiceRequest buckets below —
-            # DiagnosticReport.code is bound to the same Genomic Test
-            # Directory value set as ServiceRequest.code in this IG (see
-            # GENOMIC_TEST_DIRECTORY_SYSTEM), so filtering on it here is
-            # just as valid as on the ServiceRequest side.
-            code_report_params = {**report_params, "code": self._ctdna_code_search_value()}
-            try:
-                cr_matches, cr_included = self._search_all_split(
-                    "DiagnosticReport", {**code_report_params, "category": DIAGNOSTIC_REPORT_CATEGORY})
-            except requests.HTTPError:
-                cr_matches, cr_included = [], []
-            if not cr_matches:
-                cr_matches, cr_included = self._search_all_split("DiagnosticReport", code_report_params)
-            all_resources += cr_matches + cr_included
 
             completed_params = {"status": "completed", "authored": [f"ge{start}", f"le{end}"]}
             matches, included = self._search_ctdna_service_requests(completed_params)

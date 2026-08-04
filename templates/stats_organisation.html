@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>{{ org }}</h1>
+  <p class="muted">
+    Orders where this organisation is the requesting organisation, and
+    reports where it's the ordering provider (resolved via the report's
+    originating <code>ServiceRequest</code>), authored/dated between
+    <strong>{{ start }}</strong> and <strong>{{ end }}</strong> — same
+    range as <a href="/stats?start={{ start }}&end={{ end }}">Daily
+    stats</a>, broken down by Genomic Test Directory code instead of a
+    single count.
+  </p>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <h2>Orders by test directory code ({{ order_count }})</h2>
+  {% if order_by_test %}
+    <table>
+      <tr><th>Test code</th><th>Orders</th></tr>
+      {% for code, count in order_by_test %}
+        <tr><td>{{ code }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders for this organisation in this range.</p>
+  {% endif %}
+
+  <h2>Reports by test directory code ({{ report_count }})</h2>
+  {% if report_by_test %}
+    <table>
+      <tr><th>Test code</th><th>Reports</th></tr>
+      {% for code, count in report_by_test %}
+        <tr><td>{{ code }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No reports for this organisation in this range.</p>
+  {% endif %}
+{% endblock %}

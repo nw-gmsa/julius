@@ -444,8 +444,11 @@ turned out to be exactly the same unbounded-result-set 413 risk
 `ctdna_orders()` was rewritten to avoid, just triggered by a large active-
 order backlog instead of a large ctDNA history. `work_orders()`/
 `test_orders()` both read `start`/`end` query params (same `?start=&end=`
-convention as `/stats`/`/ctdna`, defaulting to the last 30 days) and close
-over them in the `fetch_orders` lambda passed to `_order_worklist`.
+convention as `/stats`/`/ctdna`) and close over them in the `fetch_orders`
+lambda passed to `_order_worklist` — `work_orders()` defaults to the last
+30 days, `test_orders()` to the last 7 (same as `/stats`'s default): a
+30-day range of placer-side orders was still enough to 413 on a live
+server, so it was tightened after the fact for this screen specifically.
 
 **Both screens also have an organisation/test filter and a sortable
 Ordered column**, applied client-side after the date-bounded fetch (not
@@ -580,19 +583,32 @@ radius (multiple patients, or every orphaned order, per click).
 
 ### Cepheid Test Results (`/cepheid-results`)
 
-Cross-patient, system-wide, no date bound: `DiagnosticReport`s with a
-BCRABL code. `FhirClient.bcrabl_reports()` matches
-`coding[].code == "BCRABL"` (`_is_bcrabl_report()`/`BCRABL_CODE`) across
-*any* coding regardless of `system` — a known exact code but unconfirmed
-system, distinct from both the Genomic Test Directory code (confirmed
-system, matched via `test_directory_code()`) and ctDNA (no confirmed code
-at all, text-matched via `_is_ctdna_order()`). Query shape mirrors
-`ctdna_orders()`/`active_filler_orders()`: `_include`s specimen/patient/
-result plus the originating order via `_include=DiagnosticReport:based-on`
-— a **forward** include this time (the report references the order via
-its own `basedOn`, so no revinclude is needed, unlike `ctdna_orders()`
-which searches from the ServiceRequest side and needs `_revinclude` to
-reach the report) — and identifies reports by `resourceType` across
+Cross-patient, system-wide, bounded to `DiagnosticReport.date` within a
+`start`/`end` range (`?start=&end=`, defaulting to the last 30 days —
+same convention as `/stats`): `DiagnosticReport`s with a BCRABL code.
+`FhirClient.bcrabl_reports(start, end)`'s FHIR query itself is filtered
+by `code` — `BCRABL_CODES` (`BCRABL_CODE` = `"BCRABL"`, plus
+`BCRABL_LOINC_CODE` = LOINC `"69380-4"`), joined bare (no `system|`
+prefix, via `_bcrabl_code_search_value()`) since the coding system is
+unconfirmed. This used to be a `category=Genetics` search with no code
+restriction at all — filtering only client-side after fetching
+everything — which 413'd on a live server the same way `ctdna_orders()`'s
+DiagnosticReport-side query did; `code` is now required in both the
+categorized and fallback query attempts, not optional. `_is_bcrabl_report()`
+still re-checks `coding[].code in BCRABL_CODES` client-side after
+fetching (a bare-code token search can match a coincidental hit
+elsewhere on the resource, so this isn't redundant), but the FHIR query
+is what keeps the result set small now, not just the post-fetch filter.
+Distinct from both the Genomic Test Directory code (confirmed system,
+matched via `test_directory_code()`) and ctDNA (matched via
+`CTDNA_TEST_DIRECTORY_CODES` where confirmed, `CTDNA_TEXT_MATCHES` as
+fallback). Query shape otherwise mirrors `ctdna_orders()`/
+`active_filler_orders()`: `_include`s specimen/patient/result plus the
+originating order via `_include=DiagnosticReport:based-on` — a
+**forward** include this time (the report references the order via its
+own `basedOn`, so no revinclude is needed, unlike `ctdna_orders()` which
+searches from the ServiceRequest side and needs `_revinclude` to reach
+the report) — and identifies reports by `resourceType` across
 `matches + included` combined, same `Bundle.entry.search.mode` caveat as
 the other system-wide queries.
 

@@ -110,7 +110,7 @@
     <table>
       <tr><th>Requesting organisation</th><th>Orders</th></tr>
       {% for org, count in order_by_org %}
-        <tr><td>{{ org }}</td><td>{{ count }}</td></tr>
+        <tr><td><a href="{{ url_for('stats_organisation', org=org, start=start, end=end) }}">{{ org }}</a></td><td>{{ count }}</td></tr>
       {% endfor %}
     </table>
   {% else %}
@@ -164,7 +164,7 @@
     <table>
       <tr><th>ICS</th><th>Orders</th></tr>
       {% for ics, count in order_by_ics %}
-        <tr><td>{{ ics }}</td><td>{{ count }}</td></tr>
+        <tr><td><a href="{{ url_for('stats_ics', ics=ics, start=start, end=end) }}">{{ ics }}</a></td><td>{{ count }}</td></tr>
       {% endfor %}
     </table>
   {% else %}
@@ -250,7 +250,7 @@
     <table>
       <tr><th>Ordering provider</th><th>Reports</th></tr>
       {% for org, count in report_by_ordering_provider %}
-        <tr><td>{{ org }}</td><td>{{ count }}</td></tr>
+        <tr><td><a href="{{ url_for('stats_organisation', org=org, start=start, end=end) }}">{{ org }}</a></td><td>{{ count }}</td></tr>
       {% endfor %}
     </table>
   {% else %}
@@ -301,7 +301,7 @@
     <table>
       <tr><th>ICS</th><th>Reports</th></tr>
       {% for ics, count in report_by_ics %}
-        <tr><td>{{ ics }}</td><td>{{ count }}</td></tr>
+        <tr><td><a href="{{ url_for('stats_ics', ics=ics, start=start, end=end) }}">{{ ics }}</a></td><td>{{ count }}</td></tr>
       {% endfor %}
     </table>
   {% else %}

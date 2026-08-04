@@ -644,7 +644,7 @@ def _filter_orders_by_org_and_test(orders, order_organisation, order_test, selec
 @app.route("/test-orders")
 def test_orders():
     end = request.args.get("end") or date.today().isoformat()
-    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=6)).isoformat()
 
     orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(
         lambda: client.active_placer_orders(start, end))
@@ -1043,6 +1043,100 @@ def stats():
         order_pivot_indication=pivot_by_day(order_rows, "indication"),
         report_pivot_org=pivot_by_day(report_rows, "organisation"),
         report_pivot_indication=pivot_by_day(report_rows, "indication"),
+    )
+
+
+@app.route("/stats/organisation")
+def stats_organisation():
+    """
+    Drill-down from /stats's "Orders by requesting organisation" and
+    "Reports by ordering provider" tables: one organisation's orders and
+    reports (same [start, end] range as the /stats page linked from —
+    carried through as query params, not re-defaulted here) broken down
+    by Genomic Test Directory code instead of just a single count. Both
+    source tables link here — "requesting organisation" (orders) and
+    "ordering provider" (reports) are the same concept from two different
+    resource types, so one screen covers both.
+
+    Reuses orders_in_range()/reports_in_range() (same date-bounded,
+    _include-bundled queries /stats itself uses) and filters down to this
+    one organisation client-side, same as /stats's own row-building —
+    there's no FHIR search param for "requesting organisation display
+    name" to push this down to the query itself.
+    """
+    org = request.args.get("org", "")
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=6)).isoformat()
+
+    error = None
+    order_rows, report_rows = [], []
+    try:
+        orders = client.orders_in_range(start, end)
+        order_rows = [
+            {"test": FhirClient.test_directory_code(o.get("code")) or "—"}
+            for o in orders
+            if (client.order_organisation(o) or "Unknown") == org
+        ]
+
+        reports = client.reports_in_range(start, end)
+        for r in reports:
+            ordering_order = client.order_for_report(r)
+            ordering_provider = (client.order_organisation(ordering_order) if ordering_order else None) or "Unknown"
+            if ordering_provider == org:
+                report_rows.append({"test": FhirClient.test_directory_code(r.get("code")) or "—"})
+    except Exception as e:
+        error = str(e)
+
+    return render_template(
+        "stats_organisation.html", org=org, start=start, end=end, error=error,
+        order_count=len(order_rows), report_count=len(report_rows),
+        order_by_test=group_count(order_rows, "test"),
+        report_by_test=group_count(report_rows, "test"),
+    )
+
+
+@app.route("/stats/ics")
+def stats_ics():
+    """
+    Same drill-down idea as stats_organisation() above, but for /stats's
+    "Orders by requesting organisation's ICS" and "Reports by ordering
+    provider's ICS" tables — grouped by ICS instead of organisation name.
+    ICS here is organisation_ics() (geocoded from the requesting/ordering
+    organisation's own postcode), the same derivation /stats itself uses
+    for these two tables — not Patient.managingOrganization, which is a
+    different "ICS" concept used elsewhere on /stats (the country/ICS
+    breakdown further down the page, off the patient rather than the
+    organisation).
+    """
+    ics = request.args.get("ics", "")
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=6)).isoformat()
+
+    error = None
+    order_rows, report_rows = [], []
+    try:
+        orders = client.orders_in_range(start, end)
+        order_rows = [
+            {"test": FhirClient.test_directory_code(o.get("code")) or "—"}
+            for o in orders
+            if (client.organisation_ics(client.order_organisation_resource(o)) or "Unknown") == ics
+        ]
+
+        reports = client.reports_in_range(start, end)
+        for r in reports:
+            ordering_order = client.order_for_report(r)
+            ordering_org_resource = client.order_organisation_resource(ordering_order) if ordering_order else None
+            report_ics = client.organisation_ics(ordering_org_resource) or "Unknown"
+            if report_ics == ics:
+                report_rows.append({"test": FhirClient.test_directory_code(r.get("code")) or "—"})
+    except Exception as e:
+        error = str(e)
+
+    return render_template(
+        "stats_ics.html", ics=ics, start=start, end=end, error=error,
+        order_count=len(order_rows), report_count=len(report_rows),
+        order_by_test=group_count(order_rows, "test"),
+        report_by_test=group_count(report_rows, "test"),
     )
 
 

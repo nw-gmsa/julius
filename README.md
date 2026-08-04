@@ -163,11 +163,18 @@ NSSM Windows Service + IIS reverse proxy), see
 - **Cepheid Test Results** (`/cepheid-results`) shows `DiagnosticReport`s
   with a **BCRABL** code (`bcrabl_reports()`) — BCR-ABL1 quantitative
   monitoring results, e.g. from a Cepheid GeneXpert. Matched by
-  `coding[].code == "BCRABL"` regardless of `system` (`_is_bcrabl_report()`)
-  since the exact code is known but not which coding system carries it on
-  this server — unlike the Genomic Test Directory code (a confirmed
-  system) or ctDNA (no confirmed code at all, so text-matched instead).
-  System-wide, no date bound. Each report is shown with its originating
+  `coding[].code` in `BCRABL_CODES` (`"BCRABL"`, plus LOINC `"69380-4"`)
+  regardless of `system` (`_is_bcrabl_report()`) since the exact codes
+  are known but not which coding system carries them on this server —
+  unlike the Genomic Test Directory code (a confirmed system) or ctDNA
+  (matched by `CTDNA_TEST_DIRECTORY_CODES` where confirmed,
+  `CTDNA_TEXT_MATCHES` as fallback). The FHIR query itself is filtered
+  by `code=BCRABL,69380-4` too, not just client-side — this used to be
+  an unfiltered `category=Genetics` search, which 413'd on a live server
+  the same way `/ctdna`'s DiagnosticReport-side query did. System-wide,
+  bounded to `DiagnosticReport.date` within a `start`/`end` range
+  (`?start=&end=`, defaulting to the last 30 days). Each report is shown
+  with its originating
   order (via `basedOn` → `order_for_report()`), specimen,
   **`meta.lastUpdated`**, **every `identifier` on the report** (not just
   the iGene one — `all_identifiers()` in `app.py`, formatted as "value
@@ -224,7 +231,11 @@ NSSM Windows Service + IIS reverse proxy), see
   set — no splitting by organisation the way `/ctdna` does.
 - **Test orders** (`/test-orders`) is the placer-side counterpart to Work
   orders — same screen, same date range/org/test filter and sortable
-  "Ordered" column, same `active_filler_orders()`/`active_placer_orders()`
+  "Ordered" column, except the date range defaults to the last **7** days
+  here rather than 30 — a 30-day range of placer-side orders was still
+  enough to 413 on a live server, so this screen's default was tightened
+  after the fact (it's still just a default; widen it with the picker).
+  Same `active_filler_orders()`/`active_placer_orders()`
   query shape (both built on a shared `_active_orders_with_intent()`), but
   filters `ServiceRequest.intent` to "order" or "original-order" instead of
   "filler-order". The two intent values are joined into one comma-separated
