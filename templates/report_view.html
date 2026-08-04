@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Genomic Test Report</h1>
+  <p class="muted">
+    Laid out the same way as the
+    {% if order %}<a href="{{ request.script_root }}/order/{{ order.id }}">order view</a>{% else %}order view{% endif %}
+    screen — patient and organisation context first, then the report's own
+    details — plus two sections an order doesn't have: the report's
+    findings, and a placeholder for genomic implications.
+  </p>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  {% if report %}
+    <h2>Patient details</h2>
+    {% if patient %}
+      <table>
+        <tr><th>Name</th><td>{{ patient|human_name }}</td></tr>
+        <tr><th>Date of birth</th><td>{{ patient.birthDate or "—" }}</td></tr>
+        <tr><th>Sex</th><td>{{ patient.gender or "—" }}</td></tr>
+        <tr>
+          <th>NHS number</th>
+          <td>
+            {{ nhs_number or "—" }}
+            {% if nhs_number and nhs_number_verification_status != "01" %}
+              <span class="badge" title="NHS number verification status extension is {{ nhs_number_verification_status or 'absent' }}, not &quot;01&quot; (Number present and verified)">Not verified</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr><th>Postcode</th><td>{{ postcode or "—" }}</td></tr>
+        <tr>
+          <th>Hospital number</th>
+          <td>
+            {{ (medical_record_numbers[0].value if medical_record_numbers else None) or "—" }}
+            {% if medical_record_numbers and medical_record_numbers[0].assigner_display %}
+              <span class="muted">({{ medical_record_numbers[0].assigner_display }})</span>
+            {% endif %}
+          </td>
+        </tr>
+      </table>
+    {% else %}
+      <p class="muted">Patient could not be resolved for this report.</p>
+    {% endif %}
+
+    <h2>Requesting organisation / laboratory</h2>
+    <table>
+      <tr><th>Requesting organisation</th><td>{{ requester or "—" }}</td></tr>
+      <tr><th>Performing organisation</th><td>{{ performer or "—" }}</td></tr>
+    </table>
+
+    <h2>Samples</h2>
+    {% if specimens %}
+      <table>
+        <tr><th>Type</th><th>Collection date</th><th>Received date</th><th>Specimen identifier</th><th>ID</th></tr>
+        {% for s in specimens %}
+          <tr>
+            <td>{{ s.type|code_text }}</td>
+            <td>{{ s|specimen_collected }}</td>
+            <td>{{ s|specimen_received }}</td>
+            <td>{{ (s|specimen_identifier) or "—" }}</td>
+            <td class="muted">{{ s.id }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">No specimens found for this report.</p>
+    {% endif %}
+
+    <h2>Report details</h2>
+    <table>
+      <tr><th>Test Directory Clinical Indication &amp; code</th><td>{{ (report.code|test_directory_code) or "—" }} — {{ report.code|code_text }}</td></tr>
+      <tr><th>Status</th><td>{{ report.status or "—" }}</td></tr>
+      <tr><th>Date reported</th><td>{{ report.issued or report.effectiveDateTime or "—" }}</td></tr>
+      <tr><th>Report ID</th><td>{{ igene_id or "—" }}</td></tr>
+      <tr><th class="muted">ID</th><td class="muted">{{ report.id }}</td></tr>
+    </table>
+
+    <h2>Findings</h2>
+    <table>
+      <tr><th>Conclusion code</th><td>{{ report|conclusion_code_reference }}</td></tr>
+      <tr><th>Results interpreter</th><td>{{ results_interpreter or "—" }}</td></tr>
+    </table>
+    {% if report.presentedForm %}
+      <p>
+        {% for pf in report.presentedForm %}
+          <a href="{{ request.script_root }}/report/{{ report.id }}/pdf?index={{ loop.index0 }}" target="_blank">
+            📄 {{ pf.title or "View report document" }}{% if pf.contentType %} ({{ pf.contentType }}){% endif %}
+          </a>
+          {% if not loop.last %} &nbsp;|&nbsp; {% endif %}
+        {% endfor %}
+      </p>
+    {% endif %}
+    {% if observations %}
+      <table>
+        <tr><th>Result</th><th>Value</th><th>Reference range</th><th>Flag</th></tr>
+        {% for o in observations %}
+          <tr>
+            <td>{{ o.code|code_text }}</td>
+            <td>{{ o|obs_value }}</td>
+            <td>
+              {% if o.referenceRange %}
+                {{ o.referenceRange[0].text or
+                   (o.referenceRange[0].low.value ~ '–' ~ o.referenceRange[0].high.value
+                    if o.referenceRange[0].low and o.referenceRange[0].high else "—") }}
+              {% else %}—{% endif %}
+            </td>
+            <td>{{ o.interpretation[0]|code_text if o.interpretation else "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">No resolvable Observation results for this report.</p>
+    {% endif %}
+
+    <h2>Implications</h2>
+    <p class="muted">
+      Placeholder — this FHIR server has no modelled genomic-implications
+      data yet (e.g. familial/cascade-testing implications, actionability).
+      Reserved for future work rather than fabricated here.
+    </p>
+
+    {% if patient %}
+      <p><a href="{{ request.script_root }}/patient/{{ patient.id }}">&larr; Back to patient</a></p>
+    {% endif %}
+  {% elif not error %}
+    <p class="muted">Report not found.</p>
+  {% endif %}
+{% endblock %}
