@@ -267,6 +267,20 @@ def conclusion_code_reference(report):
     return "; ".join(entries) if entries else "—"
 
 
+def slugify(text):
+    """Lowercase, non-alphanumeric runs collapsed to single hyphens,
+    stripped — turns an organisation's display name into a valid HTML id
+    for the ctDNA map's popup links to jump to that organisation's table
+    section on the same page. Used both as a Jinja filter (on the exact
+    string ctdna.html's <h2> already renders) and directly in
+    ctdna_summary() (on the same string, built the identical way via
+    _org_display_name()) — same input through the same function is what
+    keeps the map's anchors and the sections' ids in sync, not a shared
+    lookup table."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return slug or "unknown"
+
+
 app.jinja_env.filters["human_name"] = human_name
 app.jinja_env.filters["code_text"] = code_text
 app.jinja_env.filters["code_value"] = code_value
@@ -280,6 +294,7 @@ app.jinja_env.filters["filler_identifier"] = FhirClient.filler_identifier
 app.jinja_env.filters["report_identifier"] = FhirClient.report_identifier
 app.jinja_env.filters["reason_code_reference"] = reason_code_reference
 app.jinja_env.filters["conclusion_code_reference"] = conclusion_code_reference
+app.jinja_env.filters["slugify"] = slugify
 
 
 @app.route("/", methods=["GET"])
@@ -394,7 +409,7 @@ def patient_detail(patient_id):
         orders=orders, order_chains=order_chains,
         reports=reports, report_obs=report_obs, report_interpreters=report_interpreters,
         order_requester=order_requester, order_performer=order_performer,
-        specimens=specimens, error=error,
+        specimens=specimens, error=error, is_production=client.is_production(),
     )
 
 
@@ -412,7 +427,18 @@ def patient_clear_down(patient_id):
     clear_down_patient() (orders/reports/specimens only) to
     clear_down_patient_and_record() (same, plus the Patient resource),
     the same distinction the admin screen's bulk clear-down makes.
+
+    Disabled entirely (both GET and POST) when client.is_production() —
+    the patient page also hides the link there, but that's just UI; this
+    is the actual gate, since a direct hit on this URL would otherwise
+    still work.
     """
+    if client.is_production():
+        return render_template(
+            "patient_clear_down_confirm.html", patient_id=patient_id,
+            orders=[], reports=[], specimens=[], error=None, production_blocked=True,
+        ), 403
+
     if request.method == "POST":
         error = None
         result = {"deleted": [], "failed": []}
@@ -938,6 +964,76 @@ def pivot_by_day(rows, key, top_n=10):
     return {"days": days, "columns": columns, "table": table}
 
 
+def _org_display_name(name, ods):
+    """"Name (ODS)" if ods is known, else just the name — the exact
+    format ctdna_summary() groups rows by and the ctDNA map's popups link
+    to (via slugify(), see above), so both sides agree on one identity
+    string per organisation."""
+    return f"{name} ({ods})" if ods else name
+
+
+def _requester_code(resource):
+    """The raw code/reference identifying a ServiceRequest's `requester` —
+    used on stats_organisation()'s "Unknown" group, since the display
+    name having failed to resolve is exactly when this raw value is the
+    only lead left to trace an order back to its real requester. Prefers
+    requester.identifier.value (a logical reference's own code) over the
+    literal .reference path, since that's more directly "the code of the
+    requester"; falls back to .reference, then .display. Returns "—" if
+    resource is None (e.g. a report with no basedOn link at all) or has
+    no requester."""
+    if not resource:
+        return "—"
+    requester = resource.get("requester") or {}
+    identifier = requester.get("identifier") or {}
+    if identifier.get("value"):
+        return identifier["value"]
+    if requester.get("reference"):
+        return requester["reference"]
+    if requester.get("display"):
+        return requester["display"]
+    return "—"
+
+
+def _order_report_row(order, report):
+    """One order (+ its linked report, if any) in the ctDNA screen's row
+    shape — Patient, Status (Completed/Outstanding, from
+    order.status == "completed"), Test code, Conclusion code, Order
+    date, Sample collected/received, Date reported, iGene report ID,
+    Placer number. Shared by ctdna_summary() and stats_organisation(),
+    which both show orders enriched with their linked report's data this
+    same way — `report` may be None (no linked report resolved)."""
+    is_completed = order.get("status") == "completed"
+    reported_date = None
+    if report:
+        reported_date = (report.get("issued") or report.get("effectiveDateTime") or "")[:10] or None
+
+    specimens = client.resolve_specimens(order)
+    if not specimens and report:
+        specimens = client.resolve_specimens(report)
+    specimen = specimens[0] if specimens else None
+    patient = client.patient_for(order)
+    conclusion = "; ".join(
+        code_text(cc) for cc in (report.get("conclusionCode") or [])
+    ) if report else ""
+
+    return {
+        "order_id": order.get("id"),
+        "patient_id": patient.get("id") if patient else None,
+        "patient_name": human_name(patient) if patient else "Unknown",
+        "test": FhirClient.test_directory_code(order.get("code")) or "—",
+        "status": "Completed" if is_completed else "Outstanding",
+        "order_date_raw": order.get("authoredOn") or "",
+        "order_date": order.get("authoredOn") or "—",
+        "collected_date": specimen_collected(specimen) if specimen else "—",
+        "received_date": specimen_received(specimen) if specimen else "—",
+        "reported_date": reported_date or "—",
+        "placer_id": FhirClient.placer_identifier(order) or "—",
+        "igene_id": client.igene_report_identifier(order, report) or "—",
+        "conclusion": conclusion or "—",
+    }
+
+
 def group_rows_by_organisation(rows):
     """ctdna_summary()'s flat, pre-sorted row list -> [(organisation,
     [row, ...]), ...], alphabetical with "Unknown" last; rows keep their
@@ -1018,7 +1114,6 @@ def stats():
     return render_template(
         "stats.html", start=start, end=end, error=error,
         order_count=len(order_rows), report_count=len(report_rows),
-        order_by_day=group_count(order_rows, "date"),
         order_by_org=group_count(order_rows, "organisation"),
         order_by_indication=group_count(order_rows, "indication"),
         order_by_ics=group_count(order_rows, "ics"),
@@ -1028,7 +1123,6 @@ def stats():
         order_ics_map_html=order_ics_map_html,
         order_ics_map_unmatched_count=order_ics_map_unmatched_count,
         order_ics_map_unmatched_names=order_ics_map_unmatched_names,
-        report_by_day=group_count(report_rows, "date"),
         report_by_org=group_count(report_rows, "organisation"),
         report_by_ordering_provider=group_count(report_rows, "ordering_provider"),
         report_by_indication=group_count(report_rows, "indication"),
@@ -1052,46 +1146,103 @@ def stats_organisation():
     Drill-down from /stats's "Orders by requesting organisation" and
     "Reports by ordering provider" tables: one organisation's orders and
     reports (same [start, end] range as the /stats page linked from —
-    carried through as query params, not re-defaulted here) broken down
-    by Genomic Test Directory code instead of just a single count. Both
-    source tables link here — "requesting organisation" (orders) and
-    "ordering provider" (reports) are the same concept from two different
-    resource types, so one screen covers both.
+    carried through as query params, not re-defaulted here). Both source
+    tables link here — "requesting organisation" (orders) and "ordering
+    provider" (reports) are the same concept from two different resource
+    types, so one screen covers both.
+
+    Two views of the same data: the "by test directory code" tables
+    (unchanged from before — a single count per code), and a detailed row
+    list in the same shape as /ctdna's table (Patient/Status/Test code/
+    Conclusion code/Order date/Sample collected/Sample received/Date
+    reported/iGene report ID/Placer number), via the shared
+    _order_report_row() helper.
 
     Reuses orders_in_range()/reports_in_range() (same date-bounded,
     _include-bundled queries /stats itself uses) and filters down to this
-    one organisation client-side, same as /stats's own row-building —
-    there's no FHIR search param for "requesting organisation display
-    name" to push this down to the query itself.
+    one organisation client-side — there's no FHIR search param for
+    "requesting organisation display name" to push this down to the
+    query itself. Unlike ctdna_orders(), these two queries don't come
+    with a ready-made order-id -> report lookup, so one is built here
+    from the fetched `reports` list (same "keep the most recently issued"
+    logic as ctdna_orders()'s reports_by_order_id).
     """
     org = request.args.get("org", "")
     end = request.args.get("end") or date.today().isoformat()
     start = request.args.get("start") or (date.today() - timedelta(days=6)).isoformat()
 
     error = None
-    order_rows, report_rows = [], []
+    rows = []
+    order_by_test, report_by_test = [], []
     try:
         orders = client.orders_in_range(start, end)
-        order_rows = [
-            {"test": FhirClient.test_directory_code(o.get("code")) or "—"}
-            for o in orders
-            if (client.order_organisation(o) or "Unknown") == org
-        ]
-
         reports = client.reports_in_range(start, end)
+
+        report_by_order_id = {}
+        for r in reports:
+            ordering_order = client.order_for_report(r)
+            if not ordering_order:
+                continue
+            oid = ordering_order.get("id")
+            existing = report_by_order_id.get(oid)
+            issued = r.get("issued") or r.get("effectiveDateTime") or ""
+            existing_issued = (existing.get("issued") or existing.get("effectiveDateTime") or "") if existing else ""
+            if existing is None or issued > existing_issued:
+                report_by_order_id[oid] = r
+
+        matched_order_ids = set()
+        order_test_rows, report_test_rows = [], []
+        for o in orders:
+            if (client.order_organisation(o) or "Unknown") != org:
+                continue
+            matched_order_ids.add(o.get("id"))
+            order_test_rows.append({"test": FhirClient.test_directory_code(o.get("code")) or "—"})
+            row = _order_report_row(o, report_by_order_id.get(o.get("id")))
+            if org == "Unknown":
+                row["requester_code"] = _requester_code(o)
+            rows.append(row)
+
+        # Reports whose ordering provider matches org but whose order
+        # either didn't resolve, or wasn't itself in orders_in_range()'s
+        # result for this range (e.g. authored outside [start, end] while
+        # the report itself is within range) — still shown, with
+        # order-only fields left as "—", rather than silently dropped.
         for r in reports:
             ordering_order = client.order_for_report(r)
             ordering_provider = (client.order_organisation(ordering_order) if ordering_order else None) or "Unknown"
-            if ordering_provider == org:
-                report_rows.append({"test": FhirClient.test_directory_code(r.get("code")) or "—"})
+            if ordering_provider != org:
+                continue
+            report_test_rows.append({"test": FhirClient.test_directory_code(r.get("code")) or "—"})
+            if ordering_order and ordering_order.get("id") in matched_order_ids:
+                continue  # already emitted above, via its order
+            patient = client.patient_for(r)
+            row = {
+                "order_id": ordering_order.get("id") if ordering_order else None,
+                "patient_id": patient.get("id") if patient else None,
+                "patient_name": human_name(patient) if patient else "Unknown",
+                "test": FhirClient.test_directory_code(r.get("code")) or "—",
+                "status": r.get("status") or "—",
+                "order_date": (ordering_order.get("authoredOn") if ordering_order else None) or "—",
+                "collected_date": "—",
+                "received_date": "—",
+                "reported_date": (r.get("issued") or r.get("effectiveDateTime") or "")[:10] or "—",
+                "placer_id": (FhirClient.placer_identifier(ordering_order) if ordering_order else None) or "—",
+                "igene_id": client.igene_report_identifier(ordering_order or {}, r) or "—",
+                "conclusion": "; ".join(code_text(cc) for cc in (r.get("conclusionCode") or [])) or "—",
+            }
+            if org == "Unknown":
+                row["requester_code"] = _requester_code(ordering_order)
+            rows.append(row)
+
+        order_by_test = group_count(order_test_rows, "test")
+        report_by_test = group_count(report_test_rows, "test")
     except Exception as e:
         error = str(e)
 
     return render_template(
         "stats_organisation.html", org=org, start=start, end=end, error=error,
-        order_count=len(order_rows), report_count=len(report_rows),
-        order_by_test=group_count(order_rows, "test"),
-        report_by_test=group_count(report_rows, "test"),
+        rows=rows, order_by_test=order_by_test, report_by_test=report_by_test,
+        show_requester_code=(org == "Unknown"),
     )
 
 
@@ -1149,6 +1300,7 @@ def ctdna_summary():
     rows = []
     try:
         orders, reports_by_order = client.ctdna_orders(start=start, end=end)
+        mapped_orders = []  # orders that survive the completed-date filter below — see map building after the loop
 
         for order in orders:
             order_id = order.get("id")
@@ -1161,59 +1313,58 @@ def ctdna_summary():
             # (report-issued) date rather than authored date.
             is_completed = order.get("status") == "completed"
             report = reports_by_order.get(order_id)
-            reported_date = None
-            if report:
-                reported_date = (report.get("issued") or report.get("effectiveDateTime") or "")[:10] or None
 
             if is_completed:
                 # Bound "completed" by when it was reported (the actual
                 # completion event), falling back to order date if no
                 # report resolved.
+                reported_date = (report.get("issued") or report.get("effectiveDateTime") or "")[:10] if report else None
                 completion_date = reported_date or (order.get("authoredOn") or "")[:10]
                 if not completion_date or completion_date < start or completion_date > end:
                     continue
 
-            specimens = client.resolve_specimens(order)
-            if not specimens and report:
-                specimens = client.resolve_specimens(report)
-            specimen = specimens[0] if specimens else None
-            patient = client.patient_for(order)
-            conclusion = "; ".join(
-                code_text(cc) for cc in (report.get("conclusionCode") or [])
-            ) if report else ""
-
+            mapped_orders.append(order)
             org_resource = client.order_organisation_resource(order)
             org_name = (org_resource.get("name") if org_resource else None) or client.order_organisation(order) or "Unknown"
             ods_code = client.order_organisation_ods(order)
-            organisation = f"{org_name} ({ods_code})" if ods_code else org_name
+            organisation = _org_display_name(org_name, ods_code)
 
-            rows.append({
-                "order_id": order_id,
-                "organisation": organisation,
-                "patient_id": patient.get("id") if patient else None,
-                "patient_name": human_name(patient) if patient else "Unknown",
-                "test": FhirClient.test_directory_code(order.get("code")) or "—",
-                "status": "Completed" if is_completed else "Outstanding",
-                "order_date_raw": order.get("authoredOn") or "",
-                "order_date": order.get("authoredOn") or "—",
-                "collected_date": specimen_collected(specimen) if specimen else "—",
-                "received_date": specimen_received(specimen) if specimen else "—",
-                "reported_date": reported_date or "—",
-                "placer_id": FhirClient.placer_identifier(order) or "—",
-                "igene_id": client.igene_report_identifier(order, report) or "—",
-                "conclusion": conclusion or "—",
-            })
+            row = _order_report_row(order, report)
+            row["organisation"] = organisation
+            rows.append(row)
 
         # Most recently ordered first within each group; Outstanding above
         # Completed (two stable sorts so both orderings hold at once).
         rows.sort(key=lambda r: r["order_date_raw"], reverse=True)
         rows.sort(key=lambda r: r["status"] != "Outstanding")
         rows_by_org = group_rows_by_organisation(rows)
+
+        # Map of orders by ordering provider (NHS Trust), same points/popup
+        # shape /stats's "Orders by requesting organisation" map uses —
+        # orders_by_organisation_geocoded() is shared, unmodified. Built
+        # from mapped_orders (the orders that actually made it into `rows`
+        # after the completed-date filter above), not the raw `orders`
+        # list, so the map agrees with what the tables below it show.
+        # Each point's "anchor" is the slugified org display name — the
+        # exact same string, run through the exact same slugify() Jinja
+        # filter, is set as each <h2>'s id in ctdna.html, so a popup's
+        # "View NHS Trust details" link jumps straight to that
+        # organisation's table section on this page.
+        org_geo = orders_by_organisation_geocoded(mapped_orders)
+        order_map_points = [
+            {**g, "anchor": slugify(_org_display_name(g["name"], g["ods"]))}
+            for g in org_geo if g["lat"] is not None and g["lon"] is not None
+        ]
+        order_map_unmapped_count = sum(g["count"] for g in org_geo if g["lat"] is None)
     except Exception as e:
         error = str(e)
         rows_by_org = []
+        order_map_points, order_map_unmapped_count = [], 0
 
-    return render_template("ctdna.html", rows_by_org=rows_by_org, error=error, start=start, end=end)
+    return render_template(
+        "ctdna.html", rows_by_org=rows_by_org, error=error, start=start, end=end,
+        order_map_points=order_map_points, order_map_unmapped_count=order_map_unmapped_count,
+    )
 
 
 @app.route("/cepheid-results")

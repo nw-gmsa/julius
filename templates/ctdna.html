@@ -1,4 +1,10 @@
 {% extends "base.html" %}
+{% block head %}
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+{% endblock %}
 {% block content %}
   <h1>ctDNA summary</h1>
   <p class="muted">
@@ -33,9 +39,55 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
+  <h2>Orders by ordering provider (NHS Trust)</h2>
+  {% if order_map_points %}
+    <div id="ctdna-org-map" style="height: 480px; border: 1px solid #ddd; border-radius: 4px; margin: .5rem 0 .5rem;"></div>
+    <p class="muted">
+      Marker area is proportional to order count. Geocoded from each
+      ordering provider Organization resource's postcode via
+      <a href="https://postcodes.io" target="_blank">postcodes.io</a>.
+      Click a marker's "View NHS Trust details" link to jump straight to
+      that organisation's table below.
+      {% if order_map_unmapped_count %}
+        {{ order_map_unmapped_count }} order(s) at an organisation with no
+        resolvable address/postcode aren't shown on the map (still counted
+        in the table below).
+      {% endif %}
+    </p>
+    <script>
+      (function () {
+        var points = {{ order_map_points|tojson }};
+        var map = L.map("ctdna-org-map").setView([54.5, -3], 6);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          attribution: "&copy; OpenStreetMap contributors",
+          maxZoom: 18,
+        }).addTo(map);
+        var maxCount = Math.max.apply(null, points.map(function (p) { return p.count; }));
+        points.forEach(function (p) {
+          var radius = 6 + 24 * Math.sqrt(p.count / maxCount);
+          L.circleMarker([p.lat, p.lon], {
+            radius: radius, color: "#2b5fad", fillColor: "#2b5fad", fillOpacity: 0.5,
+          })
+            .bindPopup(
+              "<strong>" + p.name + "</strong>" +
+              (p.ods ? " (" + p.ods + ")" : "") +
+              "<br>" + p.count + " order(s)" +
+              "<br><a href=\"#" + p.anchor + "\">View NHS Trust details</a>"
+            )
+            .addTo(map);
+        });
+      })();
+    </script>
+  {% elif error is none %}
+    <p class="muted">
+      No orders in this range could be placed on a map (no resolvable
+      ordering-provider postcode).
+    </p>
+  {% endif %}
+
   {% if rows_by_org %}
     {% for organisation, rows in rows_by_org %}
-      <h2>{{ organisation }} ({{ rows|length }})</h2>
+      <h2 id="{{ organisation|slugify }}">{{ organisation }} ({{ rows|length }})</h2>
       <table>
         <tr>
           <th>Patient</th>

@@ -15,7 +15,7 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
-  <h2>Orders by test directory code ({{ order_count }})</h2>
+  <h2>Orders by test directory code</h2>
   {% if order_by_test %}
     <table>
       <tr><th>Test code</th><th>Orders</th></tr>
@@ -27,7 +27,7 @@
     <p class="muted">No orders for this organisation in this range.</p>
   {% endif %}
 
-  <h2>Reports by test directory code ({{ report_count }})</h2>
+  <h2>Reports by test directory code</h2>
   {% if report_by_test %}
     <table>
       <tr><th>Test code</th><th>Reports</th></tr>
@@ -37,5 +37,61 @@
     </table>
   {% else %}
     <p class="muted">No reports for this organisation in this range.</p>
+  {% endif %}
+
+  <h2>Orders and reports ({{ rows|length }})</h2>
+  <p class="muted">
+    Same layout as the ctDNA summary's table — one row per order, with
+    its linked report's data where one resolved. A report whose order
+    isn't itself in this organisation's order list for this range (e.g.
+    authored outside the date range while the report was issued within
+    it) still gets a row, with the order-only columns shown as "—".
+  </p>
+  {% if show_requester_code %}
+    <p class="muted">
+      Organisation/ordering provider is "Unknown" for these — the
+      requester reference is shown in an extra column instead, since the
+      display name couldn't be resolved.
+    </p>
+  {% endif %}
+  {% if rows %}
+    <table>
+      <tr>
+        <th>Patient</th>
+        <th>Status</th>
+        <th>Test code</th>
+        <th>Conclusion code</th>
+        <th>Order date</th>
+        <th>Sample collected</th>
+        <th>Sample received</th>
+        <th>Date reported</th>
+        <th>iGene report ID</th>
+        <th>Placer number</th>
+        {% if show_requester_code %}<th>Requester</th>{% endif %}
+      </tr>
+      {% for row in rows %}
+        <tr>
+          <td>
+            {% if row.patient_id %}
+              <a href="/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
+            {% else %}
+              {{ row.patient_name }}
+            {% endif %}
+          </td>
+          <td>{{ row.status }}</td>
+          <td>{{ row.test }}</td>
+          <td>{{ row.conclusion }}</td>
+          <td>{{ row.order_date }}</td>
+          <td>{{ row.collected_date }}</td>
+          <td>{{ row.received_date }}</td>
+          <td>{{ row.reported_date }}</td>
+          <td>{{ row.igene_id }}</td>
+          <td>{{ row.placer_id }}</td>
+          {% if show_requester_code %}<td>{{ row.requester_code }}</td>{% endif %}
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders or reports for this organisation in this range.</p>
   {% endif %}
 {% endblock %}

@@ -2,6 +2,15 @@
 {% block content %}
   <h1>Clear down patient {{ patient_id }}</h1>
 
+  {% if production_blocked %}
+    <div class="error">
+      <strong>Clear-down is disabled on this server.</strong>
+      <code>FHIR_BASE_URL</code> contains "prod", which this app treats as
+      a live production system — patient data can't be deleted from here.
+      <p><a href="/patient/{{ patient_id }}">Back to patient</a></p>
+    </div>
+  {% else %}
+
   {% if error %}
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
@@ -76,4 +85,6 @@
     &nbsp;
     <a href="/patient/{{ patient_id }}">Cancel</a>
   </form>
+
+  {% endif %}
 {% endblock %}

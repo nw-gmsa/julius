@@ -73,6 +73,17 @@ class FhirClient:
     def _auth(self):
         return HTTPBasicAuth(self.user, self.password) if self.user else None
 
+    def is_production(self):
+        """Best-effort guess at whether this client is pointed at a live
+        production system, purely from FHIR_BASE_URL containing "prod"
+        (case-insensitive) — there's no other environment signal
+        available. Used to gate destructive per-patient actions (e.g. the
+        patient clear-down screen) so they can't be fired against real
+        patient records by mistake. Not a security boundary (anyone who
+        can edit FHIR_BASE_URL or the URL bypasses it), just a guard rail
+        against an accidental click."""
+        return "prod" in self.base_url.lower()
+
     def verify_credentials(self):
         """Minimal authenticated request to confirm self.user/self.password
         are accepted by the FHIR server. Raises requests.HTTPError (e.g. a

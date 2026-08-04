@@ -40,30 +40,6 @@
 
   <p class="muted">{{ order_count }} orders and {{ report_count }} reports in this range.</p>
 
-  <h2>Orders by day</h2>
-  {% if order_by_day %}
-    <table>
-      <tr><th>Date</th><th>Orders</th></tr>
-      {% for day, count in order_by_day|sort %}
-        <tr><td>{{ day }}</td><td>{{ count }}</td></tr>
-      {% endfor %}
-    </table>
-  {% else %}
-    <p class="muted">No orders in this range.</p>
-  {% endif %}
-
-  <h2>Reports by day</h2>
-  {% if report_by_day %}
-    <table>
-      <tr><th>Date</th><th>Reports</th></tr>
-      {% for day, count in report_by_day|sort %}
-        <tr><td>{{ day }}</td><td>{{ count }}</td></tr>
-      {% endfor %}
-    </table>
-  {% else %}
-    <p class="muted">No reports in this range.</p>
-  {% endif %}
-
   <h2>Orders by requesting organisation</h2>
   {% if order_map_points %}
     <div id="org-map" style="height: 480px; border: 1px solid #ddd; border-radius: 4px; margin: .5rem 0 .5rem;"></div>
@@ -116,8 +92,136 @@
   {% else %}
     <p class="muted">No orders in this range.</p>
   {% endif %}
+<h2>Orders by requesting organisation's ICS</h2>
+<p class="muted">Integrated Care System the requesting organisation's postcode falls within.</p>
+{% if order_ics_map_html %}
+<div>{{ order_ics_map_html|safe }}</div>
+<p class="muted">
+    Shaded by NHS Integrated Care Board (ONS boundaries), located from
+    each requesting organisation's geocoded postcode.
+    {% if order_ics_map_unmatched_count %}
+    {{ order_ics_map_unmatched_count }} order(s) whose requesting
+    organisation's ICS couldn't be determined aren't shown on the map
+    (still counted in the table below): {{ order_ics_map_unmatched_names|join(", ") }}.
+    {% endif %}
+</p>
+{% elif order_by_ics %}
+<p class="muted">
+    {% if order_ics_map_unmatched_count %}
+    No ICS names in this range matched a known NHS Integrated Care
+    Board, so no map is shown: {{ order_ics_map_unmatched_names|join(", ") }}.
+    {% else %}
+    ICB boundary data couldn't be fetched, so no map is shown.
+    {% endif %}
+</p>
+{% endif %}
+{% if order_by_ics %}
+<table>
+    <tr><th>ICS</th><th>Orders</th></tr>
+    {% for ics, count in order_by_ics %}
+    <tr><td><a href="{{ url_for('stats_ics', ics=ics, start=start, end=end) }}">{{ ics }}</a></td><td>{{ count }}</td></tr>
+    {% endfor %}
+</table>
+{% else %}
+<p class="muted">No orders in this range.</p>
+{% endif %}
 
-  <h3>Orders by day &times; organisation</h3>
+
+
+<h2>Reports by ordering provider</h2>
+<p class="muted">
+    The organisation that <em>ordered</em> the test (via the report's
+    originating <code>ServiceRequest</code>), as opposed to "Reports by
+    performing organisation" above (the lab that produced the report).
+</p>
+{% if report_map_points %}
+<div id="report-org-map" style="height: 480px; border: 1px solid #ddd; border-radius: 4px; margin: .5rem 0 .5rem;"></div>
+<p class="muted">
+    Marker area is proportional to report count. Geocoded from each
+    ordering Organization resource's postcode via
+    <a href="https://postcodes.io" target="_blank">postcodes.io</a>.
+    {% if report_map_unmapped_count %}
+    {{ report_map_unmapped_count }} report(s) at an ordering
+    organisation with no resolvable address/postcode aren't shown on
+    the map (still counted in the table below).
+    {% endif %}
+</p>
+<script>
+    (function () {
+        var points = {{ report_map_points|tojson }};
+        var map = L.map("report-org-map").setView([54.5, -3], 6);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: "&copy; OpenStreetMap contributors",
+            maxZoom: 18,
+        }).addTo(map);
+        var maxCount = Math.max.apply(null, points.map(function (p) { return p.count; }));
+        points.forEach(function (p) {
+            var radius = 6 + 24 * Math.sqrt(p.count / maxCount);
+            L.circleMarker([p.lat, p.lon], {
+                radius: radius, color: "#2b5fad", fillColor: "#2b5fad", fillOpacity: 0.5,
+            })
+                .bindPopup(
+                    "<strong>" + p.name + "</strong>" +
+                    (p.ods ? " (" + p.ods + ")" : "") +
+                    "<br>" + p.count + " report(s)"
+                )
+                .addTo(map);
+        });
+    })();
+</script>
+{% elif error is none %}
+<p class="muted">
+    No reports in this range could be placed on a map (no resolvable
+    ordering-organisation postcode).
+</p>
+{% endif %}
+{% if report_by_ordering_provider %}
+<table>
+    <tr><th>Ordering provider</th><th>Reports</th></tr>
+    {% for org, count in report_by_ordering_provider %}
+    <tr><td><a href="{{ url_for('stats_organisation', org=org, start=start, end=end) }}">{{ org }}</a></td><td>{{ count }}</td></tr>
+    {% endfor %}
+</table>
+{% else %}
+<p class="muted">No reports in this range.</p>
+{% endif %}
+
+<h2>Reports by ordering provider's ICS</h2>
+<p class="muted">Integrated Care System the ordering provider's postcode falls within.</p>
+{% if report_ics_map_html %}
+<div>{{ report_ics_map_html|safe }}</div>
+<p class="muted">
+    Shaded by NHS Integrated Care Board (ONS boundaries), located from
+    each ordering provider's geocoded postcode.
+    {% if report_ics_map_unmatched_count %}
+    {{ report_ics_map_unmatched_count }} report(s) whose ordering
+    provider's ICS couldn't be determined aren't shown on the map
+    (still counted in the table below): {{ report_ics_map_unmatched_names|join(", ") }}.
+    {% endif %}
+</p>
+{% elif report_by_ics %}
+<p class="muted">
+    {% if report_ics_map_unmatched_count %}
+    No ICS names in this range matched a known NHS Integrated Care
+    Board, so no map is shown: {{ report_ics_map_unmatched_names|join(", ") }}.
+    {% else %}
+    ICB boundary data couldn't be fetched, so no map is shown.
+    {% endif %}
+</p>
+{% endif %}
+{% if report_by_ics %}
+<table>
+    <tr><th>ICS</th><th>Reports</th></tr>
+    {% for ics, count in report_by_ics %}
+    <tr><td><a href="{{ url_for('stats_ics', ics=ics, start=start, end=end) }}">{{ ics }}</a></td><td>{{ count }}</td></tr>
+    {% endfor %}
+</table>
+{% else %}
+<p class="muted">No reports in this range.</p>
+{% endif %}
+
+
+<h3>Orders by day &times; organisation</h3>
   <p class="muted">Top 10 organisations by volume; the rest are folded into "Other".</p>
   {{ render_pivot(order_pivot_org, "Date", "orders") }}
 
@@ -137,39 +241,6 @@
   <p class="muted">Top 10 indications by volume; the rest are folded into "Other".</p>
   {{ render_pivot(order_pivot_indication, "Date", "orders") }}
 
-  <h2>Orders by requesting organisation's ICS</h2>
-  <p class="muted">Integrated Care System the requesting organisation's postcode falls within.</p>
-  {% if order_ics_map_html %}
-    <div>{{ order_ics_map_html|safe }}</div>
-    <p class="muted">
-      Shaded by NHS Integrated Care Board (ONS boundaries), located from
-      each requesting organisation's geocoded postcode.
-      {% if order_ics_map_unmatched_count %}
-        {{ order_ics_map_unmatched_count }} order(s) whose requesting
-        organisation's ICS couldn't be determined aren't shown on the map
-        (still counted in the table below): {{ order_ics_map_unmatched_names|join(", ") }}.
-      {% endif %}
-    </p>
-  {% elif order_by_ics %}
-    <p class="muted">
-      {% if order_ics_map_unmatched_count %}
-        No ICS names in this range matched a known NHS Integrated Care
-        Board, so no map is shown: {{ order_ics_map_unmatched_names|join(", ") }}.
-      {% else %}
-        ICB boundary data couldn't be fetched, so no map is shown.
-      {% endif %}
-    </p>
-  {% endif %}
-  {% if order_by_ics %}
-    <table>
-      <tr><th>ICS</th><th>Orders</th></tr>
-      {% for ics, count in order_by_ics %}
-        <tr><td><a href="{{ url_for('stats_ics', ics=ics, start=start, end=end) }}">{{ ics }}</a></td><td>{{ count }}</td></tr>
-      {% endfor %}
-    </table>
-  {% else %}
-    <p class="muted">No orders in this range.</p>
-  {% endif %}
 
   <h2>Orders by country</h2>
   {% if order_by_country %}
@@ -199,64 +270,6 @@
   <p class="muted">Top 10 organisations by volume; the rest are folded into "Other".</p>
   {{ render_pivot(report_pivot_org, "Date", "reports") }}
 
-  <h2>Reports by ordering provider</h2>
-  <p class="muted">
-    The organisation that <em>ordered</em> the test (via the report's
-    originating <code>ServiceRequest</code>), as opposed to "Reports by
-    performing organisation" above (the lab that produced the report).
-  </p>
-  {% if report_map_points %}
-    <div id="report-org-map" style="height: 480px; border: 1px solid #ddd; border-radius: 4px; margin: .5rem 0 .5rem;"></div>
-    <p class="muted">
-      Marker area is proportional to report count. Geocoded from each
-      ordering Organization resource's postcode via
-      <a href="https://postcodes.io" target="_blank">postcodes.io</a>.
-      {% if report_map_unmapped_count %}
-        {{ report_map_unmapped_count }} report(s) at an ordering
-        organisation with no resolvable address/postcode aren't shown on
-        the map (still counted in the table below).
-      {% endif %}
-    </p>
-    <script>
-      (function () {
-        var points = {{ report_map_points|tojson }};
-        var map = L.map("report-org-map").setView([54.5, -3], 6);
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          attribution: "&copy; OpenStreetMap contributors",
-          maxZoom: 18,
-        }).addTo(map);
-        var maxCount = Math.max.apply(null, points.map(function (p) { return p.count; }));
-        points.forEach(function (p) {
-          var radius = 6 + 24 * Math.sqrt(p.count / maxCount);
-          L.circleMarker([p.lat, p.lon], {
-            radius: radius, color: "#2b5fad", fillColor: "#2b5fad", fillOpacity: 0.5,
-          })
-            .bindPopup(
-              "<strong>" + p.name + "</strong>" +
-              (p.ods ? " (" + p.ods + ")" : "") +
-              "<br>" + p.count + " report(s)"
-            )
-            .addTo(map);
-        });
-      })();
-    </script>
-  {% elif error is none %}
-    <p class="muted">
-      No reports in this range could be placed on a map (no resolvable
-      ordering-organisation postcode).
-    </p>
-  {% endif %}
-  {% if report_by_ordering_provider %}
-    <table>
-      <tr><th>Ordering provider</th><th>Reports</th></tr>
-      {% for org, count in report_by_ordering_provider %}
-        <tr><td><a href="{{ url_for('stats_organisation', org=org, start=start, end=end) }}">{{ org }}</a></td><td>{{ count }}</td></tr>
-      {% endfor %}
-    </table>
-  {% else %}
-    <p class="muted">No reports in this range.</p>
-  {% endif %}
-
   <h2>Reports by genomic disease / indication</h2>
   <p class="muted">Resolved from the originating order's reason code where possible, falling back to the report's own conclusion code.</p>
   {% if report_by_indication %}
@@ -274,39 +287,6 @@
   <p class="muted">Top 10 indications by volume; the rest are folded into "Other".</p>
   {{ render_pivot(report_pivot_indication, "Date", "reports") }}
 
-  <h2>Reports by ordering provider's ICS</h2>
-  <p class="muted">Integrated Care System the ordering provider's postcode falls within.</p>
-  {% if report_ics_map_html %}
-    <div>{{ report_ics_map_html|safe }}</div>
-    <p class="muted">
-      Shaded by NHS Integrated Care Board (ONS boundaries), located from
-      each ordering provider's geocoded postcode.
-      {% if report_ics_map_unmatched_count %}
-        {{ report_ics_map_unmatched_count }} report(s) whose ordering
-        provider's ICS couldn't be determined aren't shown on the map
-        (still counted in the table below): {{ report_ics_map_unmatched_names|join(", ") }}.
-      {% endif %}
-    </p>
-  {% elif report_by_ics %}
-    <p class="muted">
-      {% if report_ics_map_unmatched_count %}
-        No ICS names in this range matched a known NHS Integrated Care
-        Board, so no map is shown: {{ report_ics_map_unmatched_names|join(", ") }}.
-      {% else %}
-        ICB boundary data couldn't be fetched, so no map is shown.
-      {% endif %}
-    </p>
-  {% endif %}
-  {% if report_by_ics %}
-    <table>
-      <tr><th>ICS</th><th>Reports</th></tr>
-      {% for ics, count in report_by_ics %}
-        <tr><td><a href="{{ url_for('stats_ics', ics=ics, start=start, end=end) }}">{{ ics }}</a></td><td>{{ count }}</td></tr>
-      {% endfor %}
-    </table>
-  {% else %}
-    <p class="muted">No reports in this range.</p>
-  {% endif %}
 
   <h2>Reports by country</h2>
   {% if report_by_country %}

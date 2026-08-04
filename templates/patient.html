@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
   <h1>Patient {{ patient_id }}</h1>
-  <p><a class="danger-link" href="/patient/{{ patient_id }}/clear-down">🗑 Clear down patient data</a></p>
+  {% if is_production %}
+    <p class="muted">🗑 Clear down patient data — disabled on this server (<code>FHIR_BASE_URL</code> looks like production).</p>
+  {% else %}
+    <p><a class="danger-link" href="/patient/{{ patient_id }}/clear-down">🗑 Clear down patient data</a></p>
+  {% endif %}
 
   {% if error %}
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
