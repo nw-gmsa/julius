@@ -632,39 +632,60 @@ class FhirClient:
 
     def orders_in_range(self, start_date, end_date):
         """All genomic test orders authored within [start_date, end_date]
-        (ISO dates), across all patients — used by the daily stats screen."""
+        (ISO dates), across all patients — used by the daily stats screen.
+
+        Bundles each order's patient and requester via `_include` (+
+        `_include:iterate` for the Practitioner/Organization behind a
+        PractitionerRole requester) and seeds the reference cache from
+        them (_cache_included()). app.stats() calls patient_for() and
+        order_organisation_resource() once per row; without this, every
+        one of those was a separate uncached resolve_reference() GET — an
+        N+1 that was slow enough to time the page out on a real week of
+        data. Same try-categorized-then-fall-back pattern used throughout
+        this file (see _active_orders_with_intent, _search_ctdna_service_requests)."""
         params = {
             "authored": [f"ge{start_date}", f"le{end_date}"],
-            "category": SERVICE_REQUEST_CATEGORY,
             "_count": 100,
+            "_include": ["ServiceRequest:patient", "ServiceRequest:requester"],
+            "_include:iterate": SERVICE_REQUEST_ITERATE_INCLUDES,
         }
         try:
-            entries = self._search_all("ServiceRequest", params)
-            if entries:
-                return entries
+            matches, included = self._search_all_split(
+                "ServiceRequest", {**params, "category": SERVICE_REQUEST_CATEGORY})
         except requests.HTTPError:
-            pass
-        return self._search_all("ServiceRequest", {
-            "authored": [f"ge{start_date}", f"le{end_date}"], "_count": 100,
-        })
+            matches, included = [], []
+        if not matches:
+            matches, included = self._search_all_split("ServiceRequest", params)
+        self._cache_included(included)
+        return matches
 
     def reports_in_range(self, start_date, end_date):
         """All genomic test reports dated within [start_date, end_date]
-        (ISO dates), across all patients — used by the daily stats screen."""
+        (ISO dates), across all patients — used by the daily stats screen.
+
+        Bundles each report's patient, performer, and originating
+        ServiceRequest (via `_include=DiagnosticReport:based-on`) plus
+        that order's requester one hop further (`_include:iterate`, same
+        Practitioner/Organization chain as orders_in_range() above), and
+        seeds the reference cache from them. app.stats() calls
+        patient_for(), report_organisation(), order_for_report(), and
+        order_organisation_resource() once per row — same N+1 concern as
+        orders_in_range(), just with more references per row."""
         params = {
             "date": [f"ge{start_date}", f"le{end_date}"],
-            "category": DIAGNOSTIC_REPORT_CATEGORY,
             "_count": 100,
+            "_include": ["DiagnosticReport:patient", "DiagnosticReport:performer", "DiagnosticReport:based-on"],
+            "_include:iterate": ["ServiceRequest:requester"] + SERVICE_REQUEST_ITERATE_INCLUDES,
         }
         try:
-            entries = self._search_all("DiagnosticReport", params)
-            if entries:
-                return entries
+            matches, included = self._search_all_split(
+                "DiagnosticReport", {**params, "category": DIAGNOSTIC_REPORT_CATEGORY})
         except requests.HTTPError:
-            pass
-        return self._search_all("DiagnosticReport", {
-            "date": [f"ge{start_date}", f"le{end_date}"], "_count": 100,
-        })
+            matches, included = [], []
+        if not matches:
+            matches, included = self._search_all_split("DiagnosticReport", params)
+        self._cache_included(included)
+        return matches
 
     # ---- ctDNA summary: system-wide, completed bucket date-bound -------
 

@@ -164,19 +164,34 @@ PractitionerRole requester).
 
 Queries `ServiceRequest`/`DiagnosticReport` system-wide for a date range
 (default: last 7 days) via `authored`/`date` search params, using
-`_search_all()` to follow `Bundle.link[rel=next]` pages (capped at
+`_search_all_split()` to follow `Bundle.link[rel=next]` pages (capped at
 `max_pages=10`, i.e. 1,000 records per resource type per query — raise
 `max_pages` if a high-volume range silently hits the cap). Breaks results down
 by day, organisation, indication, ICS, and country.
 
+- **`orders_in_range()`/`reports_in_range()` bundle patient/requester (and,
+  for reports, the originating order via `_include=DiagnosticReport:based-on`
+  + that order's requester one hop further) via `_include`/`_include:iterate`,
+  same as `ctdna_orders()`/`_active_orders_with_intent()`, and seed the
+  reference cache from them (`_cache_included()`).** This used to be a
+  plain `_search_all()` with no `_include` at all — `app.stats()` calls
+  `patient_for()`/`order_organisation_resource()`/`report_organisation()`/
+  `order_for_report()` once per row, so every one of those was a separate
+  uncached `resolve_reference()` GET: an N+1 that scaled with order/report
+  count (not distinct-entity count, since patients rarely repeat within a
+  week) and was slow enough to time the page out on a real week of data.
 - Order indication comes from `ServiceRequest.reasonCode`.
 - Reports don't carry their own indication: `report_indication()` follows
   `DiagnosticReport.basedOn` back to the originating order and reuses its
   `reasonCode`, falling back to the report's own `conclusionCode` if the link
   can't be resolved.
-- Stats resolves one `Patient` per order/report for ICS/country — a date range
-  with many distinct patients will be noticeably slower than an org-only
-  aggregation would be, even with the reference cache.
+- Stats still resolves one `Patient` per order/report for ICS/country, but
+  the `_include` above means that's now a cache hit rather than a GET for
+  every patient the paginated queries actually returned — the only way it
+  still falls back to per-patient GETs is a server that doesn't honour
+  `_include` at all (see the `_include`/`_include:iterate` support caveat
+  below), the same graceful-degradation case `lab_orders_for_patient()`
+  already handles.
 - Beyond the range-wide `group_count()` breakdowns, `app.pivot_by_day()`
   builds a day-by-organisation and day-by-indication cross-tab for both
   orders and reports (`order_pivot_org`/`order_pivot_indication`/

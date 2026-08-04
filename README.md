@@ -82,7 +82,14 @@ NSSM Windows Service + IIS reverse proxy), see
   the report's own `conclusionCode` if that link can't be resolved.
   Organisation/practitioner lookups are cached in-process for the
   life of the server, since the same few organisations show up
-  repeatedly across a day's worth of orders. On top of the day/org/
+  repeatedly across a day's worth of orders. `orders_in_range()`/
+  `reports_in_range()` bundle each order/report's patient and requester
+  (and, for reports, the originating order plus **its** requester one hop
+  further) into the same query via `_include`/`_include:iterate`, seeding
+  that cache up front rather than firing one GET per order/report — this
+  used to be a plain unbundled query, which meant `/stats` could time out
+  on a real week of data (an N+1 that scaled with order/report count, not
+  distinct-organisation count). On top of the day/org/
   indication/ICS/country range totals, each of "by organisation" and
   "by indication" also gets a **day &times; that field pivot table**
   (`pivot_by_day()` in `app.py`), so trends over time are visible rather
@@ -343,11 +350,13 @@ NSSM Windows Service + IIS reverse proxy), see
    results (1,000 records) per resource type per query. Fine for a
    week at a time; a very high-volume day range could silently hit
    that cap. Raise `max_pages` in `_search_all()` if needed.
-6. **Stats now resolves one Patient per order/report** (for ICS and
-   country), on top of the organisation lookups from before. The
-   reference cache helps when the same patients recur, but a date
-   range with many distinct patients will be noticeably slower than
-   the org-only version was.
+6. **Stats resolves one Patient per order/report** (for country), on top
+   of the organisation lookups. `orders_in_range()`/`reports_in_range()`
+   now bundle patient/requester via `_include` (see above), so this is a
+   reference-cache hit rather than a GET for every patient the query
+   itself returned — the exception is a server that doesn't honour
+   `_include` at all, which falls back to the old one-GET-per-patient
+   behaviour (see the `_include`/`_include:iterate` support caveat below).
 7. **Binary content negotiation** — I request Binary resources as
    `application/fhir+json` and decode `.data`, which should work on
    any spec-compliant server, but I couldn't test it against yours.
