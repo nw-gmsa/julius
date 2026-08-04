@@ -397,7 +397,7 @@ class FhirClient:
                 roots.append(nodes[oid])
         return roots
 
-    def _active_orders_with_intent(self, intent):
+    def _active_orders_with_intent(self, intent, start, end):
         """
         Shared implementation behind active_filler_orders()/
         active_placer_orders(): active genomic test orders (ServiceRequest)
@@ -408,6 +408,14 @@ class FhirClient:
         this file for date ranges), which no single resource's one `intent`
         value could ever satisfy, so multiple intents must go in one
         comma-joined param, not a list.
+
+        `start`/`end` (inclusive ISO dates) are required, not optional —
+        unlike ctdna_orders()'s start/end, which can be left unbounded.
+        This query used to have no date bound at all (only `status=active`
+        + `intent`), which is exactly the same unbounded-result-set 413
+        that ctdna_orders() was rewritten to avoid — a server with a large
+        active-order backlog could 413 here just as easily. Bound by
+        `authored`, same convention as orders_in_range()/ctdna_orders().
 
         Not scoped to one patient, so each order's specimen/patient/
         requester come back in the same query via `_include` (same shape
@@ -423,6 +431,7 @@ class FhirClient:
         base_params = {
             "intent": intent,
             "status": "active",
+            "authored": [f"ge{start}", f"le{end}"],
             "_count": 100,
             "_include": ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"],
             "_include:iterate": SERVICE_REQUEST_ITERATE_INCLUDES,
@@ -442,19 +451,19 @@ class FhirClient:
         }
         return list(orders_by_id.values())
 
-    def active_filler_orders(self):
+    def active_filler_orders(self, start, end):
         """All active genomic test orders with `intent=filler-order` — i.e.
         orders as seen from the filler/lab system's side. Used by the work
         orders screen. See _active_orders_with_intent()."""
-        return self._active_orders_with_intent("filler-order")
+        return self._active_orders_with_intent("filler-order", start, end)
 
-    def active_placer_orders(self):
+    def active_placer_orders(self, start, end):
         """All active genomic test orders with `intent` of "order" or
         "original-order" — i.e. orders as seen from the placer/requesting
         system's side, as opposed to active_filler_orders()'s filler-order
         orders. Used by the test orders screen. See
         _active_orders_with_intent()."""
-        return self._active_orders_with_intent("order,original-order")
+        return self._active_orders_with_intent("order,original-order", start, end)
 
     # ---- Genomic test reports (DiagnosticReport + Observation) --------
 
@@ -679,7 +688,7 @@ class FhirClient:
     #: server that doesn't populate GENOMIC_TEST_DIRECTORY_SYSTEM
     #: consistently) still need to keep matching. Add more codes here as
     #: they're confirmed.
-    CTDNA_TEST_DIRECTORY_CODES = ("M4.14",)
+    CTDNA_TEST_DIRECTORY_CODES = ("M4.14", "M3.13", "M226.7")
 
     @classmethod
     def _is_ctdna_order(cls, order):
@@ -855,6 +864,22 @@ class FhirClient:
             if not r_matches:
                 r_matches, r_included = self._search_all_split("DiagnosticReport", report_params)
             all_resources += r_matches + r_included
+
+            # Supplementary code-filtered query, same reasoning as the
+            # outstanding/completed ServiceRequest buckets below —
+            # DiagnosticReport.code is bound to the same Genomic Test
+            # Directory value set as ServiceRequest.code in this IG (see
+            # GENOMIC_TEST_DIRECTORY_SYSTEM), so filtering on it here is
+            # just as valid as on the ServiceRequest side.
+            code_report_params = {**report_params, "code": self._ctdna_code_search_value()}
+            try:
+                cr_matches, cr_included = self._search_all_split(
+                    "DiagnosticReport", {**code_report_params, "category": DIAGNOSTIC_REPORT_CATEGORY})
+            except requests.HTTPError:
+                cr_matches, cr_included = [], []
+            if not cr_matches:
+                cr_matches, cr_included = self._search_all_split("DiagnosticReport", code_report_params)
+            all_resources += cr_matches + cr_included
 
             completed_params = {"status": "completed", "authored": [f"ge{start}", f"le{end}"]}
             matches, included = self._search_ctdna_service_requests(completed_params)

@@ -204,11 +204,20 @@ NSSM Windows Service + IIS reverse proxy), see
   seen from the filler/lab system's side rather than the requesting
   system's. Same table layout and `basedOn` chain rendering
   (`build_order_chains()`) as a patient page's "Genomic test orders" table,
-  plus a Patient column since it spans multiple patients. First version —
-  no filtering/date range yet, and no splitting by organisation the way
-  `/ctdna` does.
+  plus a Patient column since it spans multiple patients. Bounded to
+  `ServiceRequest.authored` within a `start`/`end` date range (same
+  `?start=&end=` query params as `/stats`, defaulting to the last 30
+  days) — **required**, not optional, unlike `/ctdna`'s range: this used
+  to be a fully unbounded system-wide query, which could 413 a server
+  with a large active-order backlog the same way the ctDNA screen's
+  outstanding-orders query did (see `_active_orders_with_intent()`).
+  Also has a "Requested by"/"Test" filter (organisation and Genomic Test
+  Directory code, each "All" or one specific value) and a sortable
+  "Ordered" column header, both client-side over the fetched date-bounded
+  set — no splitting by organisation the way `/ctdna` does.
 - **Test orders** (`/test-orders`) is the placer-side counterpart to Work
-  orders — same screen, same `active_filler_orders()`/`active_placer_orders()`
+  orders — same screen, same date range/org/test filter and sortable
+  "Ordered" column, same `active_filler_orders()`/`active_placer_orders()`
   query shape (both built on a shared `_active_orders_with_intent()`), but
   filters `ServiceRequest.intent` to "order" or "original-order" instead of
   "filler-order". The two intent values are joined into one comma-separated
@@ -230,7 +239,10 @@ NSSM Windows Service + IIS reverse proxy), see
     absent one. Single `POST`, no separate confirm route — same reasoning
     as the admin screen's orphaned clear-down: no patient identity is
     involved, and the "Unknown" patient cells are already visible on the
-    same page before the button is reachable.
+    same page before the button is reachable. Scoped to the same
+    date/org/test filter the page was showing (passed through as hidden
+    form fields), so the "N of the orders above" count it deletes matches
+    what was actually on screen.
 - **Clear down patient data** (`/patient/<id>/clear-down`) — a **destructive,
   irreversible** button on the patient page that deletes every Specimen,
   DiagnosticReport, and ServiceRequest for that patient from the FHIR server

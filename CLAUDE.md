@@ -403,10 +403,10 @@ means AND instead (as used elsewhere in this file for date ranges), which
 no single order's one `intent` value could ever satisfy.
 
 `app._order_worklist(fetch_orders)` is the shared route logic behind both
-`/work-orders` and `/test-orders`: it calls `fetch_orders()` (one of the
-two methods above), then builds the per-order requester/patient lookups
-and the `build_order_chains()` tree — the two routes just plug in a
-different fetch function and template.
+`/work-orders` and `/test-orders`: it calls `fetch_orders()` (a zero-arg
+closure the route builds — see date range below), then builds the
+per-order requester/patient lookups and the `build_order_chains()` tree —
+the two routes just plug in a different closure and template.
 
 Both screens deliberately reuse the patient page's "Genomic test orders"
 table shape — same columns (Test/Status/Intent/Ordered/Requested
@@ -415,12 +415,35 @@ by/Placer ID/Filler ID/Reason Code Ref#/ID) and the same
 (`order_patient` dict, built the same way `order_requester` already is)
 since these span multiple patients rather than being scoped to one.
 
-`_active_orders_with_intent()` mirrors `ctdna_orders()`'s query shape:
-`_include`s `specimen`/`patient`/`requester` (plus `_include:iterate` for
-the Practitioner/Organization behind a PractitionerRole requester), and —
-same lesson as the real bug fixed in `ctdna_orders()` — filters by
-`resourceType` across `matches + included` combined rather than trusting
-`Bundle.entry.search.mode`.
+`_active_orders_with_intent(intent, start, end)` mirrors `ctdna_orders()`'s
+query shape: `_include`s `specimen`/`patient`/`requester` (plus
+`_include:iterate` for the Practitioner/Organization behind a
+PractitionerRole requester), and — same lesson as the real bug fixed in
+`ctdna_orders()` — filters by `resourceType` across `matches + included`
+combined rather than trusting `Bundle.entry.search.mode`.
+
+**`start`/`end` (bounding `ServiceRequest.authored`) are required
+parameters here, not optional like `ctdna_orders()`'s** — this query used
+to have no date bound at all (only `status=active` + `intent`), which
+turned out to be exactly the same unbounded-result-set 413 risk
+`ctdna_orders()` was rewritten to avoid, just triggered by a large active-
+order backlog instead of a large ctDNA history. `work_orders()`/
+`test_orders()` both read `start`/`end` query params (same `?start=&end=`
+convention as `/stats`/`/ctdna`, defaulting to the last 30 days) and close
+over them in the `fetch_orders` lambda passed to `_order_worklist`.
+
+**Both screens also have an organisation/test filter and a sortable
+Ordered column**, applied client-side after the date-bounded fetch (not
+separate FHIR queries): `order_organisation()`/`test_directory_code()` are
+computed per order, `organisations`/`tests` are the distinct sorted values
+for the two "All or specific value" `<select>`s
+(`app._filter_orders_by_org_and_test()`, shared by both routes), and
+`app._sort_order_chains()` sorts `build_order_chains()`'s node list by
+`authoredOn` (recursing into children too) when the "Ordered" column
+header link is clicked — it toggles `?sort=ordered_asc`/`ordered_desc` via
+`url_for`, carrying the current date range/org/test selection forward. No
+splitting by organisation into separate sections the way `/ctdna` does
+(just a filter down to one at a time).
 
 **Test orders only** (not Work orders) has two extra pieces, both added to
 `_order_worklist`'s `order_patient` dict since `patient_for()` is already
@@ -437,12 +460,17 @@ unused key harmlessly):
 - **Delete orders with unknown patient** (`/test-orders/
   clear-down-unknown-patient`, destructive) — `test_orders()` computes
   `unknown_patient_count` straight from `order_patient` (no extra
-  fhir_client call needed for the count); the delete route calls
-  `FhirClient.orders_with_unknown_patient(orders)` /
-  `clear_down_orders_with_unknown_patient(orders)`, which filter on
+  fhir_client call needed for the count); the delete route re-fetches via
+  `client.active_placer_orders(start, end)` and reapplies
+  `_filter_orders_by_org_and_test()` — both passed through as hidden form
+  fields — before calling `FhirClient.orders_with_unknown_patient(orders)`
+  / `clear_down_orders_with_unknown_patient(orders)`, which filter on
   `patient_for(order) is None` — broader than `orphaned_service_requests()`
   (wholly-absent `subject` only), since a present-but-dangling reference
-  counts too. Both delete methods for ServiceRequests
+  counts too. Scoping the re-fetch to the same date/org/test filter the
+  page was showing matters here — otherwise the displayed "N of the
+  orders above" count could disagree with how many this actually deletes.
+  Both delete methods for ServiceRequests
   (`clear_down_orphaned_service_requests()` and this one) now share a
   `_delete_service_requests(orders)` helper. Single POST, no separate
   confirm route, same reasoning as the admin screen's orphaned-SR delete:
@@ -450,11 +478,12 @@ unused key harmlessly):
   visible on the page before the button is reachable.
   `admin_clear_down_result.html` (the shared result template) now takes
   optional `back_url`/`back_label` params so this route's result page
-  links back to `/test-orders` instead of `/admin`.
+  links back to `/test-orders` (with the same date/org/test query string)
+  instead of `/admin`.
 
-First version: no date-range picker, and no splitting by organisation the
-way `/ctdna` does — flagged in README as the obvious next steps if either
-needs to scale.
+No splitting by organisation into separate sections the way `/ctdna`
+does — flagged in README as an obvious next step if either screen needs
+it.
 
 ### Patient data clear-down (`/patient/<id>/clear-down`) — destructive
 

@@ -2,12 +2,14 @@
 {% block content %}
   <h1>Test orders</h1>
   <p class="muted">
-    All active genomic test orders with <code>ServiceRequest.intent</code> =
+    Active genomic test orders with <code>ServiceRequest.intent</code> =
     "order" or "original-order" — i.e. orders as seen from the placer/
     requesting system's side, as opposed to the filler/lab-side orders on
-    the Work orders screen — across all patients. Same layout as the
-    "Genomic test orders" table on a patient's page, plus a Patient column
-    since this spans multiple patients. A <span class="badge">Real NHS number</span>
+    the Work orders screen — across all patients, bounded to
+    <code>ServiceRequest.authored</code> within the date range below. Same
+    layout as the "Genomic test orders" table on a patient's page, plus a
+    Patient column since this spans multiple patients. A
+    <span class="badge">Real NHS number</span>
     badge marks a patient whose NHS number falls in 400,000,000&ndash;499,999,999
     or 600,000,000&ndash;799,999,999.
   </p>
@@ -18,6 +20,8 @@
 
   <form method="get" action="/test-orders">
     <p>
+      From <input type="date" name="start" value="{{ start }}">
+      to <input type="date" name="end" value="{{ end }}">
       Requested by:
       <select name="org">
         <option value="" {% if not selected_org %}selected{% endif %}>All</option>
@@ -73,7 +77,7 @@
     <table>
       <tr>
         <th>Patient</th><th>Test</th><th>Status</th><th>Intent</th>
-        <th><a href="{{ url_for('test_orders', org=selected_org, test=selected_test, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
+        <th><a href="{{ url_for('test_orders', start=start, end=end, org=selected_org, test=selected_test, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
         <th>Requested by</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>ID</th>
       </tr>
       {{ render_order_chain(order_chains) }}
@@ -82,6 +86,8 @@
 
     {% if unknown_patient_count %}
       <form method="post" action="/test-orders/clear-down-unknown-patient">
+        <input type="hidden" name="start" value="{{ start }}">
+        <input type="hidden" name="end" value="{{ end }}">
         <input type="hidden" name="org" value="{{ selected_org }}">
         <input type="hidden" name="test" value="{{ selected_test }}">
         <p class="muted">

@@ -591,7 +591,11 @@ def _order_worklist(fetch_orders):
 
 @app.route("/work-orders")
 def work_orders():
-    orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(client.active_filler_orders)
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
+
+    orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(
+        lambda: client.active_filler_orders(start, end))
 
     order_organisation = {o["id"]: (client.order_organisation(o) or "Unknown") for o in orders}
     order_test = {o["id"]: (FhirClient.test_directory_code(o.get("code")) or "—") for o in orders}
@@ -613,7 +617,7 @@ def work_orders():
         order_patient=order_patient,
         organisations=organisations, tests=tests,
         selected_org=selected_org, selected_test=selected_test, sort=sort,
-        error=error,
+        start=start, end=end, error=error,
     )
 
 
@@ -639,7 +643,11 @@ def _filter_orders_by_org_and_test(orders, order_organisation, order_test, selec
 
 @app.route("/test-orders")
 def test_orders():
-    orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(client.active_placer_orders)
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
+
+    orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(
+        lambda: client.active_placer_orders(start, end))
 
     order_organisation = {o["id"]: (client.order_organisation(o) or "Unknown") for o in orders}
     order_test = {o["id"]: (FhirClient.test_directory_code(o.get("code")) or "—") for o in orders}
@@ -662,6 +670,7 @@ def test_orders():
         order_patient=order_patient,
         organisations=organisations, tests=tests,
         selected_org=selected_org, selected_test=selected_test, sort=sort,
+        start=start, end=end,
         unknown_patient_count=unknown_patient_count, error=error,
     )
 
@@ -677,17 +686,19 @@ def test_orders_clear_down_unknown_patient():
     point is the patient is unknown), and /test-orders's GET already shows
     "Unknown" against every one of these before this button is reachable.
 
-    Scoped to the same org/test filter the page was showing when the
-    button was clicked (passed through as hidden fields) — otherwise the
-    displayed "N of the orders above" count could disagree with how many
-    this actually deletes.
+    Scoped to the same start/end/org/test filter the page was showing when
+    the button was clicked (passed through as hidden fields) — otherwise
+    the displayed "N of the orders above" count could disagree with how
+    many this actually deletes.
     """
+    start = request.form.get("start", "")
+    end = request.form.get("end", "")
     selected_org = request.form.get("org", "")
     selected_test = request.form.get("test", "")
     error = None
     result = {"deleted": [], "failed": []}
     try:
-        orders = client.active_placer_orders()
+        orders = client.active_placer_orders(start, end)
         order_organisation = {o["id"]: (client.order_organisation(o) or "Unknown") for o in orders}
         order_test = {o["id"]: (FhirClient.test_directory_code(o.get("code")) or "—") for o in orders}
         orders = _filter_orders_by_org_and_test(orders, order_organisation, order_test, selected_org, selected_test)
@@ -696,7 +707,8 @@ def test_orders_clear_down_unknown_patient():
         error = str(e)
     return render_template(
         "admin_clear_down_result.html", title="Unknown-patient test orders clear-down result",
-        back_url=url_for("test_orders", org=selected_org, test=selected_test), back_label="Back to test orders",
+        back_url=url_for("test_orders", start=start, end=end, org=selected_org, test=selected_test),
+        back_label="Back to test orders",
         deleted=result["deleted"], failed=result["failed"], error=error,
     )
 

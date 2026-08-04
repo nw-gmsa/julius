@@ -2,10 +2,12 @@
 {% block content %}
   <h1>Work orders</h1>
   <p class="muted">
-    All active genomic test orders with <code>ServiceRequest.intent</code> =
+    Active genomic test orders with <code>ServiceRequest.intent</code> =
     "filler-order" — i.e. orders as seen from the filler/lab system's side —
-    across all patients. Same layout as the "Genomic test orders" table on a
-    patient's page, plus a Patient column since this spans multiple patients.
+    across all patients, bounded to <code>ServiceRequest.authored</code>
+    within the date range below. Same layout as the "Genomic test orders"
+    table on a patient's page, plus a Patient column since this spans
+    multiple patients.
   </p>
 
   {% if error %}
@@ -14,6 +16,8 @@
 
   <form method="get" action="/work-orders">
     <p>
+      From <input type="date" name="start" value="{{ start }}">
+      to <input type="date" name="end" value="{{ end }}">
       Requested by:
       <select name="org">
         <option value="" {% if not selected_org %}selected{% endif %}>All</option>
@@ -67,7 +71,7 @@
     <table>
       <tr>
         <th>Patient</th><th>Test</th><th>Status</th><th>Intent</th>
-        <th><a href="{{ url_for('work_orders', org=selected_org, test=selected_test, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
+        <th><a href="{{ url_for('work_orders', start=start, end=end, org=selected_org, test=selected_test, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
         <th>Requested by</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>ID</th>
       </tr>
       {{ render_order_chain(order_chains) }}
