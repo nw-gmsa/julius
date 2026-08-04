@@ -710,10 +710,20 @@ class FhirClient:
         filter-then-fallback plumbing for ctdna_orders()'s three
         ServiceRequest queries (outstanding / completed-with-no-report) —
         same try-categorized-then-fall-back pattern used throughout this
-        file (see orders_in_range, _active_orders_with_intent)."""
+        file (see orders_in_range, _active_orders_with_intent).
+
+        No `ServiceRequest:patient` `_include` — dropped to cut down the
+        `_include`/`_include:iterate`/`_revinclude` parameter count after
+        this query started 413ing on a live server. app.ctdna_summary()
+        still resolves each order's patient via patient_for() for the
+        Patient column; without the bundled include, resolve_reference()
+        just falls back to one GET per distinct patient instead of getting
+        them for free in this Bundle — slower on a range with many
+        distinct patients, but each is cached for the rest of the process
+        once fetched, and a page that loads slower beats one that 413s."""
         params = {
             "_count": 100,
-            "_include": ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"],
+            "_include": ["ServiceRequest:specimen", "ServiceRequest:requester"],
             "_revinclude": "DiagnosticReport:based-on",
             "_include:iterate": SERVICE_REQUEST_ITERATE_INCLUDES + ["DiagnosticReport:specimen"],
             **extra_params,
@@ -851,8 +861,10 @@ class FhirClient:
                 "_count": 100,
                 "date": [f"ge{start}", f"le{end}"],
                 "_include": ["DiagnosticReport:based-on", "DiagnosticReport:specimen"],
+                # No ServiceRequest:patient here either — see
+                # _search_ctdna_service_requests() for why.
                 "_include:iterate": (
-                    ["ServiceRequest:specimen", "ServiceRequest:patient", "ServiceRequest:requester"]
+                    ["ServiceRequest:specimen", "ServiceRequest:requester"]
                     + SERVICE_REQUEST_ITERATE_INCLUDES
                 ),
             }
