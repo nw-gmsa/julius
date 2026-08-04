@@ -402,6 +402,7 @@ def patient_detail(patient_id):
     return render_template(
         "patient.html", patient_id=patient_id, patient=patient,
         nhs_number=FhirClient.nhs_number(patient),
+        nhs_number_verification_status=FhirClient.nhs_number_verification_status(patient),
         igene_patient_id=FhirClient.igene_patient_identifier(patient),
         medical_record_numbers=medical_record_numbers,
         general_practitioner=client.general_practitioner_display(patient),
@@ -410,6 +411,105 @@ def patient_detail(patient_id):
         reports=reports, report_obs=report_obs, report_interpreters=report_interpreters,
         order_requester=order_requester, order_performer=order_performer,
         specimens=specimens, error=error, is_production=client.is_production(),
+    )
+
+
+def _patient_postcode(patient):
+    """First Address.postalCode on a Patient, or None. Used by the "view
+    order form" screen — no existing helper for this since nothing else
+    in the app has needed a patient's own postcode before (organisation
+    postcodes are geocoded via organisation_geocode() instead)."""
+    if not patient:
+        return None
+    for addr in patient.get("address", []):
+        if addr.get("postalCode"):
+            return addr["postalCode"]
+    return None
+
+
+@app.route("/order/<order_id>")
+def order_view(order_id):
+    """
+    Single-order "view order form" screen, reached from a patient's
+    order table (patient.html links each order's test name here). Laid
+    out like the sections on NHS England's Genomic Medicine Service WGS
+    Test Request forms (rare disease / cancer —
+    https://www.england.nhs.uk/publication/
+    nhs-genomic-medicine-service-test-order-forms/): requesting
+    organisation/laboratory, patient details, test request details,
+    sample details, requesting clinician/contact details.
+
+    Not every field on the paper form has a FHIR equivalent this IG
+    populates on ServiceRequest/Patient (ethnicity, HPO terms, family
+    members, tumour-specific fields, etc. aren't modelled here) — those
+    sections are simply omitted rather than fabricated. This reproduces
+    the *available* subset of order data in the same grouping/layout a
+    clinician used to the paper form would recognise, not a full replica.
+    """
+    error = None
+    order = None
+    patient = None
+    specimens = []
+    clinical_notes = []
+    supporting_info = []
+    try:
+        order = client.get_order(order_id)
+        patient = client.patient_for(order)
+        specimens = client.resolve_specimens(order)
+
+        # "Clinical information" — ServiceRequest.note (Annotation: free-text
+        # plus optional author/time), the closest FHIR equivalent of the
+        # paper form's "Relevant clinical information" field.
+        for note in (order.get("note") or []):
+            if note.get("text"):
+                clinical_notes.append(note)
+
+        # "Supporting information" — ServiceRequest.supportingInfo, a list
+        # of References (Observations in this IG, per a real example —
+        # ServiceRequest/5743). Resolved via resolve_reference() same as
+        # everywhere else, then flattened to one row per actual code/value
+        # pair: an Observation's `.component` entries if it has any (same
+        # per-component breakdown as the Cepheid screen's component_rows()
+        # — a panel-style Observation's real data is in its components,
+        # not a single top-level value), otherwise its own top-level
+        # code/value[x]. A reference that isn't an Observation, or doesn't
+        # resolve at all, still gets a row (code "—", value falls back to
+        # the reference's display text/path) rather than being dropped.
+        for ref in (order.get("supportingInfo") or []):
+            resource = client.resolve_reference(ref)
+            if resource and resource.get("resourceType") == "Observation":
+                components = resource.get("component") or []
+                if components:
+                    for c in components:
+                        supporting_info.append({
+                            "code": code_text(c.get("code")),
+                            "value": obs_value(c),
+                            "resource_id": resource.get("id"),
+                        })
+                else:
+                    supporting_info.append({
+                        "code": code_text(resource.get("code")),
+                        "value": obs_value(resource),
+                        "resource_id": resource.get("id"),
+                    })
+            else:
+                supporting_info.append({
+                    "code": resource.get("resourceType") if resource else None,
+                    "value": ref.get("display") or ref.get("reference") or "—",
+                    "resource_id": resource.get("id") if resource else None,
+                })
+    except Exception as e:
+        error = str(e)
+
+    return render_template(
+        "order_view.html", order=order, patient=patient, specimens=specimens, error=error,
+        clinical_notes=clinical_notes, supporting_info=supporting_info,
+        nhs_number=FhirClient.nhs_number(patient) if patient else None,
+        nhs_number_verification_status=FhirClient.nhs_number_verification_status(patient) if patient else None,
+        postcode=_patient_postcode(patient),
+        medical_record_numbers=client.medical_record_numbers(patient) if patient else [],
+        requester=client.requester_display(order) if order else None,
+        performer=client.performer_display(order) if order else None,
     )
 
 

@@ -15,7 +15,15 @@
   {% if patient %}
     <table>
       <tr><th>Name</th><td>{{ patient|human_name }}</td></tr>
-      <tr><th>NHS Number</th><td>{{ nhs_number or "—" }}</td></tr>
+      <tr>
+        <th>NHS Number</th>
+        <td>
+          {{ nhs_number or "—" }}
+          {% if nhs_number and nhs_number_verification_status != "01" %}
+            <span class="badge" title="NHS number verification status extension is {{ nhs_number_verification_status or 'absent' }}, not &quot;01&quot; (Number present and verified)">Not verified</span>
+          {% endif %}
+        </td>
+      </tr>
       <tr><th>iGene Patient ID</th><td>{{ igene_patient_id or "—" }}</td></tr>
       <tr><th>GP</th><td>{{ general_practitioner or "—" }}</td></tr>
       <tr><th>ICS</th><td>{{ patient_ics or "—" }}</td></tr>
@@ -61,7 +69,7 @@
     {% for node in nodes %}
       <tr>
         <td style="padding-left: {{ depth * 24 }}px">
-          {% if depth %}↳ {% endif %}{{ (node.order.code|test_directory_code) or "—" }}
+          {% if depth %}↳ {% endif %}<a href="/order/{{ node.order.id }}">{{ (node.order.code|test_directory_code) or "—" }}</a>
         </td>
         <td>{{ node.order.status or "—" }}</td>
         <td>{{ node.order.intent or "—" }}</td>

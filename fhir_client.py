@@ -287,6 +287,37 @@ class FhirClient:
         """The patient's NHS number (see NHS_NUMBER_SYSTEM)."""
         return cls._identifier_value(patient, cls.NHS_NUMBER_SYSTEM)
 
+    #: UK Core extension on the NHS number identifier itself, carrying its
+    #: trace/verification status. "01" ("Number present and verified") is
+    #: the only fully-trusted value in the NHS Data Dictionary's NHS
+    #: NUMBER STATUS INDICATOR CODE value set — other codes (e.g. "02"
+    #: "Number present but not traced", "03" "Trace required") mean the
+    #: number hasn't been confirmed against PDS. Unconfirmed whether this
+    #: server populates this extension at all — see nhs_number_verification_status().
+    NHS_NUMBER_VERIFICATION_STATUS_EXTENSION = "https://fhir.hl7.org.uk/StructureDefinition/Extension-UKCore-NHSNumberVerificationStatus"
+
+    @classmethod
+    def nhs_number_verification_status(cls, patient):
+        """The NHS number verification status code (see
+        NHS_NUMBER_VERIFICATION_STATUS_EXTENSION), read off the NHS
+        number identifier's own `.extension` array — not the identifier
+        list generally, since this extension is specifically scoped to
+        that one identifier entry per the UK Core profile. Returns None
+        if there's no NHS number identifier, it has no verification
+        status extension at all, or the extension has no coded value —
+        callers should treat None the same as "not verified" (patient.html
+        warns whenever this isn't exactly "01")."""
+        if not patient:
+            return None
+        for ident in patient.get("identifier", []):
+            if ident.get("system") != cls.NHS_NUMBER_SYSTEM:
+                continue
+            for ext in ident.get("extension", []):
+                if ext.get("url") == cls.NHS_NUMBER_VERIFICATION_STATUS_EXTENSION:
+                    coding = (ext.get("valueCodeableConcept") or {}).get("coding", [])
+                    return coding[0].get("code") if coding else None
+        return None
+
     @classmethod
     def igene_patient_identifier(cls, patient):
         """The iGene patient identifier — type PI, matched by its IG-specific
@@ -515,6 +546,12 @@ class FhirClient:
         """Fetch a single DiagnosticReport by ID (used to re-fetch presentedForm
         when serving a PDF, since we don't keep search results in server state)."""
         return self._get(f"DiagnosticReport/{report_id}")
+
+    def get_order(self, order_id):
+        """Fetch a single ServiceRequest by ID — used by the "view order
+        form" screen (/order/<id>), reached from a patient's order table
+        rather than kept in server state between requests."""
+        return self._get(f"ServiceRequest/{order_id}")
 
     #: Cepheid GeneXpert BCR-ABL1 quantitative monitoring test code. Unlike
     #: ctDNA (no confirmed code at all, so text-matched) or the Genomic Test
