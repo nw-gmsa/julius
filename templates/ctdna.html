@@ -27,7 +27,7 @@
     system, checked on the order first and then the report.
   </p>
 
-  <form action="/ctdna" method="get">
+  <form action="{{ request.script_root }}/ctdna" method="get">
     <p>
       Completed between <input type="date" name="start" value="{{ start }}">
       and <input type="date" name="end" value="{{ end }}">
@@ -173,7 +173,7 @@
           <tr>
             <td>
               {% if row.patient_id %}
-                <a href="/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
+                <a href="{{ request.script_root }}/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
               {% else %}
                 {{ row.patient_name }}
               {% endif %}

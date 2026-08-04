@@ -6,7 +6,7 @@
     reports where it's the ordering provider (resolved via the report's
     originating <code>ServiceRequest</code>), authored/dated between
     <strong>{{ start }}</strong> and <strong>{{ end }}</strong> — same
-    range as <a href="/stats?start={{ start }}&end={{ end }}">Daily
+    range as <a href="{{ request.script_root }}/stats?start={{ start }}&end={{ end }}">Daily
     stats</a>, broken down by Genomic Test Directory code instead of a
     single count.
   </p>
@@ -73,7 +73,7 @@
         <tr>
           <td>
             {% if row.patient_id %}
-              <a href="/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
+              <a href="{{ request.script_root }}/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
             {% else %}
               {{ row.patient_name }}
             {% endif %}

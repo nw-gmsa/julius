@@ -7,7 +7,7 @@
       <strong>Clear-down is disabled on this server.</strong>
       <code>FHIR_BASE_URL</code> contains "prod", which this app treats as
       a live production system — patient data can't be deleted from here.
-      <p><a href="/patient/{{ patient_id }}">Back to patient</a></p>
+      <p><a href="{{ request.script_root }}/patient/{{ patient_id }}">Back to patient</a></p>
     </div>
   {% else %}
 
@@ -72,7 +72,7 @@
     </table>
   {% endif %}
 
-  <form method="post" action="/patient/{{ patient_id }}/clear-down">
+  <form method="post" action="{{ request.script_root }}/patient/{{ patient_id }}/clear-down">
     <p>
       <label>
         <input type="checkbox" name="delete_patient_record" value="1">
@@ -83,7 +83,7 @@
     </p>
     <button type="submit" class="danger">Yes, permanently delete the above</button>
     &nbsp;
-    <a href="/patient/{{ patient_id }}">Cancel</a>
+    <a href="{{ request.script_root }}/patient/{{ patient_id }}">Cancel</a>
   </form>
 
   {% endif %}

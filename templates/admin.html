@@ -17,13 +17,13 @@
     ServiceRequest for that patient. Irreversible.
   </p>
   {% if test_patients %}
-    <form method="post" action="/admin/patients/confirm">
+    <form method="post" action="{{ request.script_root }}/admin/patients/confirm">
       <table>
         <tr><th></th><th>Name</th><th>NHS number</th><th>ID</th></tr>
         {% for p in test_patients %}
           <tr>
             <td><input type="checkbox" name="patient_id" value="{{ p.id }}"></td>
-            <td><a href="/patient/{{ p.id }}">{{ p.name }}</a></td>
+            <td><a href="{{ request.script_root }}/patient/{{ p.id }}">{{ p.name }}</a></td>
             <td>{{ p.nhs_number }}</td>
             <td class="muted">{{ p.id }}</td>
           </tr>
@@ -53,7 +53,7 @@
         </tr>
       {% endfor %}
     </table>
-    <form method="post" action="/admin/orphaned/clear-down">
+    <form method="post" action="{{ request.script_root }}/admin/orphaned/clear-down">
       <button type="submit" class="danger">Delete all {{ orphaned_orders|length }} orphaned ServiceRequests</button>
     </form>
   {% else %}

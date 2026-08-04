@@ -15,7 +15,7 @@
     <code>component</code> entries.
   </p>
 
-  <form action="/cepheid-results" method="get">
+  <form action="{{ request.script_root }}/cepheid-results" method="get">
     <p>
       From <input type="date" name="start" value="{{ start }}">
       to <input type="date" name="end" value="{{ end }}">
@@ -37,7 +37,7 @@
         <span class="muted">— Last updated: {{ row.last_updated }}</span>
         <span class="muted">— Patient:
           {% if row.patient_id %}
-            <a href="/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
+            <a href="{{ request.script_root }}/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
           {% else %}
             {{ row.patient_name }}
           {% endif %}
@@ -97,7 +97,7 @@
     {% endfor %}
 
     {% if no_component_results_count %}
-      <form method="post" action="/cepheid-results/clear-down-no-components">
+      <form method="post" action="{{ request.script_root }}/cepheid-results/clear-down-no-components">
         <input type="hidden" name="start" value="{{ start }}">
         <input type="hidden" name="end" value="{{ end }}">
         <p class="muted">
@@ -111,7 +111,7 @@
     {% endif %}
 
     {% if no_identifier_count %}
-      <form method="post" action="/cepheid-results/clear-down-no-identifiers">
+      <form method="post" action="{{ request.script_root }}/cepheid-results/clear-down-no-identifiers">
         <input type="hidden" name="start" value="{{ start }}">
         <input type="hidden" name="end" value="{{ end }}">
         <p class="muted">
@@ -125,7 +125,7 @@
     {% endif %}
 
     {% if duplicate_count %}
-      <form method="post" action="/cepheid-results/clear-down-duplicates">
+      <form method="post" action="{{ request.script_root }}/cepheid-results/clear-down-duplicates">
         <input type="hidden" name="start" value="{{ start }}">
         <input type="hidden" name="end" value="{{ end }}">
         <p class="muted">

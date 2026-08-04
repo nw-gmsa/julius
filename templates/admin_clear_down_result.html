@@ -26,5 +26,5 @@
     </div>
   {% endif %}
 
-  <p><a href="{{ back_url or '/admin' }}">&larr; {{ back_label or "Back to admin" }}</a></p>
+  <p><a href="{{ back_url or (request.script_root + '/admin') }}">&larr; {{ back_label or "Back to admin" }}</a></p>
 {% endblock %}

@@ -4,7 +4,7 @@
   {% if is_production %}
     <p class="muted">🗑 Clear down patient data — disabled on this server (<code>FHIR_BASE_URL</code> looks like production).</p>
   {% else %}
-    <p><a class="danger-link" href="/patient/{{ patient_id }}/clear-down">🗑 Clear down patient data</a></p>
+    <p><a class="danger-link" href="{{ request.script_root }}/patient/{{ patient_id }}/clear-down">🗑 Clear down patient data</a></p>
   {% endif %}
 
   {% if error %}
@@ -69,7 +69,7 @@
     {% for node in nodes %}
       <tr>
         <td style="padding-left: {{ depth * 24 }}px">
-          {% if depth %}↳ {% endif %}<a href="/order/{{ node.order.id }}">{{ (node.order.code|test_directory_code) or "—" }}</a>
+          {% if depth %}↳ {% endif %}<a href="{{ request.script_root }}/order/{{ node.order.id }}">{{ (node.order.code|test_directory_code) or "—" }}</a>
         </td>
         <td>{{ node.order.status or "—" }}</td>
         <td>{{ node.order.intent or "—" }}</td>
@@ -100,7 +100,7 @@
   {% if reports %}
     {% for r in reports %}
       <div class="card">
-        <strong><a href="/report/{{ r.id }}">{{ (r.code|test_directory_code) or "—" }}</a></strong>
+        <strong><a href="{{ request.script_root }}/report/{{ r.id }}">{{ (r.code|test_directory_code) or "—" }}</a></strong>
         <span class="muted">— {{ r.status or "—" }}, {{ r.effectiveDateTime or r.issued or "no date" }}</span>
         <span class="muted">— Report ID: {{ (r|report_identifier) or "—" }}</span>
         <span class="muted">— Conclusion code: {{ r|conclusion_code_reference }}</span>
@@ -108,7 +108,7 @@
         {% if r.presentedForm %}
           <p>
             {% for pf in r.presentedForm %}
-              <a href="/report/{{ r.id }}/pdf?index={{ loop.index0 }}" target="_blank">
+              <a href="{{ request.script_root }}/report/{{ r.id }}/pdf?index={{ loop.index0 }}" target="_blank">
                 📄 {{ pf.title or "View report document" }}{% if pf.contentType %} ({{ pf.contentType }}){% endif %}
               </a>
               {% if not loop.last %} &nbsp;|&nbsp; {% endif %}

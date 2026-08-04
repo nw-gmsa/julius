@@ -35,7 +35,11 @@ def _load_client():
         return
     fhir_client = _session_clients.get(session.get("sid"))
     if fhir_client is None:
-        return redirect(url_for("login", next=request.path))
+        # request.path is prefix-free (PATH_INFO-based) even when the app is
+        # reverse-proxied under a URL prefix (see wsgi.py's PrefixMiddleware)
+        # — prepend request.script_root so the post-login redirect below
+        # lands back under the prefix instead of at the domain root.
+        return redirect(url_for("login", next=request.script_root + request.path))
     g.client = fhir_client
 
 
@@ -315,7 +319,7 @@ def search():
         if order_number:
             identifier_matches, single_patient_id = _find_by_order_or_report_number(order_number)
             if single_patient_id:
-                return redirect(f"/patient/{single_patient_id}")
+                return redirect(url_for("patient_detail", patient_id=single_patient_id))
         elif patient_id:
             patients = client.search_patients(patient_id=patient_id)
         elif nhs_number:

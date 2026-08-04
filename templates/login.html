@@ -7,7 +7,7 @@
     <div class="error"><strong>{{ error }}</strong></div>
   {% endif %}
 
-  <form action="/login" method="post">
+  <form action="{{ request.script_root }}/login" method="post">
     <input type="hidden" name="next" value="{{ next or '' }}">
     <p>
       <input type="text" name="username" placeholder="Username" autofocus required>

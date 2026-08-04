@@ -131,7 +131,7 @@
     {% endif %}
 
     {% if patient %}
-      <p><a href="/patient/{{ patient.id }}">&larr; Back to patient</a></p>
+      <p><a href="{{ request.script_root }}/patient/{{ patient.id }}">&larr; Back to patient</a></p>
     {% endif %}
   {% elif not error %}
     <p class="muted">Order not found.</p>

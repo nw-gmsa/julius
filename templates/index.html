@@ -3,7 +3,7 @@
   <h1>Search for a patient</h1>
   <p class="muted">Server: <code>{{ base_url or "not configured — set FHIR_BASE_URL" }}</code></p>
 
-  <form action="/search" method="get">
+  <form action="{{ request.script_root }}/search" method="get">
     <p>
       <input type="text" name="name" placeholder="Patient name" value="{{ searched_name or '' }}">
       or
@@ -14,7 +14,7 @@
     </p>
   </form>
 
-  <form action="/search" method="get">
+  <form action="{{ request.script_root }}/search" method="get">
     <p>
       <input type="text" name="order_number" placeholder="Order or test number" value="{{ searched_order_number or '' }}">
       <button type="submit">Search</button>
@@ -39,7 +39,7 @@
             <td>{{ m.patient_name }}</td>
             <td>
               {% if m.patient_id %}
-                <a href="/patient/{{ m.patient_id }}">View patient →</a>
+                <a href="{{ request.script_root }}/patient/{{ m.patient_id }}">View patient →</a>
               {% else %}
                 <span class="muted">Patient unresolved</span>
               {% endif %}
@@ -62,7 +62,7 @@
             <td>{{ p|human_name }}</td>
             <td>{{ p.id }}</td>
             <td>{{ p.birthDate or "—" }}</td>
-            <td><a href="/patient/{{ p.id }}">View lab data →</a></td>
+            <td><a href="{{ request.script_root }}/patient/{{ p.id }}">View lab data →</a></td>
           </tr>
         {% endfor %}
       </table>

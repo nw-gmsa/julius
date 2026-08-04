@@ -27,16 +27,16 @@
       {% endfor %}
     </table>
 
-    <form method="post" action="/admin/patients/clear-down">
+    <form method="post" action="{{ request.script_root }}/admin/patients/clear-down">
       {% for pid in patient_ids %}
         <input type="hidden" name="patient_id" value="{{ pid }}">
       {% endfor %}
       <button type="submit" class="danger">Yes, permanently delete these {{ rows|length }} patients and all their data</button>
       &nbsp;
-      <a href="/admin">Cancel</a>
+      <a href="{{ request.script_root }}/admin">Cancel</a>
     </form>
   {% else %}
     <p class="muted">No patients selected.</p>
-    <p><a href="/admin">&larr; Back to admin</a></p>
+    <p><a href="{{ request.script_root }}/admin">&larr; Back to admin</a></p>
   {% endif %}
 {% endblock %}

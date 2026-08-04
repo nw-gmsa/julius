@@ -14,7 +14,7 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
-  <form method="get" action="/work-orders">
+  <form method="get" action="{{ request.script_root }}/work-orders">
     <p>
       From <input type="date" name="start" value="{{ start }}">
       to <input type="date" name="end" value="{{ end }}">
@@ -43,7 +43,7 @@
         <td>
           {% set p = order_patient.get(node.order.id) %}
           {% if p and p.id %}
-            <a href="/patient/{{ p.id }}">{{ p.name }}</a>
+            <a href="{{ request.script_root }}/patient/{{ p.id }}">{{ p.name }}</a>
           {% else %}
             {{ p.name if p else "Unknown" }}
           {% endif %}

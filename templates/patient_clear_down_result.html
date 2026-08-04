@@ -26,5 +26,5 @@
     </div>
   {% endif %}
 
-  <p><a href="/patient/{{ patient_id }}">&larr; Back to patient {{ patient_id }}</a></p>
+  <p><a href="{{ request.script_root }}/patient/{{ patient_id }}">&larr; Back to patient {{ patient_id }}</a></p>
 {% endblock %}

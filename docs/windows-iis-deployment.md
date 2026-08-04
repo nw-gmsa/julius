@@ -56,6 +56,7 @@ variables → New*.
 | `SECRET_KEY`        | a long random string (`python -c "import secrets; print(secrets.token_hex(32))"`) |
 | `FLASK_DEBUG`       | `0` (disables the Werkzeug debugger — leave unset only for local dev) |
 | `PORT`              | `8000` (optional — matches `wsgi.py`'s default)       |
+| `URL_PREFIX`        | `/julius` — only set this if deploying under a URL sub-path (see "Deploying under a URL sub-path" below); leave unset for a site bound at its own root |
 
 There's no `FHIR_USER`/`FHIR_PASSWORD` to set any more — users authenticate
 via the app's own `/login` screen with their own FHIR server credentials
@@ -109,6 +110,35 @@ You should get the app's HTML back. Check `logs\service.log` if not.
    certificate to the HTTPS binding — IIS terminates TLS here; Waitress
    itself is only ever spoken to over plain HTTP on localhost.
 
+## 5a. Deploying under a URL sub-path (IIS Application)
+
+If instead of its own site/binding this app is deployed as an **IIS
+Application** under an existing site — e.g. an Application named `julius`
+so it's reachable at `https://host/julius/` rather than `https://host/` —
+one extra step is needed, or every link the app renders will point back at
+the site root instead of staying under `/julius`.
+
+- `web.config`'s rewrite rule needs no change: IIS Application routing
+  already evaluates URL Rewrite rules *relative to the Application's own
+  root*, so a request for `https://host/julius/patient/123` reaches
+  Waitress as plain `/patient/123` — routing works with zero app changes.
+- What breaks without the next step: this app renders a lot of literal
+  `href="/patient/..."`-style links (not exclusively `url_for()`), and
+  Flask itself has no way to know it's mounted under `/julius` unless
+  told. Every link/redirect/form action would come out pointing at the
+  domain root, taking you straight out of the Application the moment you
+  click anything.
+- **Set the `URL_PREFIX` System environment variable** (see the table in
+  step 3) to the Application's path, e.g. `/julius`, then restart the
+  `JuliusApp` service. `wsgi.py`'s `PrefixMiddleware` reads it and sets
+  the WSGI `SCRIPT_NAME` on every request; Flask's `url_for()` picks that
+  up automatically (via `request.script_root`), and the templates that use
+  literal paths read the same value as `{{ request.script_root }}` to
+  prepend it themselves.
+- Leave `URL_PREFIX` unset (the default) for a root-bound site — that's
+  the common case covered by steps 1-5 above, and needs no middleware
+  involvement at all.
+
 ## 6. Verify
 
 - Browse to the site's HTTPS URL from another machine — you should see the
@@ -136,8 +166,8 @@ You should get the app's HTML back. Check `logs\service.log` if not.
   or can't reach `FHIR_BASE_URL` over the network — Windows Services often
   run under `LocalSystem` or a dedicated service account with different
   network routing/firewall rules than your own login.
-- **First clinical-terms extraction request hangs for a long time**: normal
-  — it's downloading the ~1GB UMLS knowledge base on first use, cached
-  under the service account's profile afterwards. Confirm that account's
-  profile directory is writable and the server has outbound internet
-  access.
+- **Deployed under a sub-path (e.g. `/julius`) and links/redirects keep
+  landing you back at the domain root**: `URL_PREFIX` isn't set (or the
+  service wasn't restarted after setting it) — see "Deploying under a URL
+  sub-path" above. Confirm with `curl -I https://host/julius/` that the
+  login page's `Set-Cookie`/links reference `/julius/...`, not `/...`.

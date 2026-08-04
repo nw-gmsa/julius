@@ -46,24 +46,24 @@
     <!-- /admin is intentionally not linked from this nav (not hidden behind auth,
          just not surfaced) — reachable directly at /admin for whoever knows to look. -->
     <div class="nav">
-      <a href="/">&larr; Lab Explorer</a> &nbsp;|&nbsp;
+      <a href="{{ request.script_root }}/">&larr; Lab Explorer</a> &nbsp;|&nbsp;
       <details class="nav-dropdown">
         <summary>Management Reports</summary>
         <div class="dropdown-menu">
-          <a href="/stats">Daily stats</a>
-          <a href="/ctdna">ctDNA summary</a>
+          <a href="{{ request.script_root }}/stats">Daily stats</a>
+          <a href="{{ request.script_root }}/ctdna">ctDNA summary</a>
         </div>
       </details>
       &nbsp;|&nbsp;
       <details class="nav-dropdown">
         <summary>Orders and Reports</summary>
         <div class="dropdown-menu">
-          <a href="/work-orders">Work orders</a>
-          <a href="/test-orders">Test orders</a>
-          <a href="/cepheid-results">Cepheid Test Results</a>
+          <a href="{{ request.script_root }}/work-orders">Work orders</a>
+          <a href="{{ request.script_root }}/test-orders">Test orders</a>
+          <a href="{{ request.script_root }}/cepheid-results">Cepheid Test Results</a>
         </div>
       </details>
-      &nbsp;|&nbsp; <span class="muted">{{ session['username'] }}</span> &nbsp;<a href="/logout">Log out</a>
+      &nbsp;|&nbsp; <span class="muted">{{ session['username'] }}</span> &nbsp;<a href="{{ request.script_root }}/logout">Log out</a>
     </div>
   {% endif %}
   {% block content %}{% endblock %}

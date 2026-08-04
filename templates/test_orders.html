@@ -19,7 +19,7 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
-  <form method="get" action="/test-orders">
+  <form method="get" action="{{ request.script_root }}/test-orders">
     <p>
       From <input type="date" name="start" value="{{ start }}">
       to <input type="date" name="end" value="{{ end }}">
@@ -48,7 +48,7 @@
         <td>
           {% set p = order_patient.get(node.order.id) %}
           {% if p and p.id %}
-            <a href="/patient/{{ p.id }}">{{ p.name }}</a>
+            <a href="{{ request.script_root }}/patient/{{ p.id }}">{{ p.name }}</a>
           {% else %}
             {{ p.name if p else "Unknown" }}
           {% endif %}
@@ -86,7 +86,7 @@
     <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
 
     {% if unknown_patient_count %}
-      <form method="post" action="/test-orders/clear-down-unknown-patient">
+      <form method="post" action="{{ request.script_root }}/test-orders/clear-down-unknown-patient">
         <input type="hidden" name="start" value="{{ start }}">
         <input type="hidden" name="end" value="{{ end }}">
         <input type="hidden" name="org" value="{{ selected_org }}">
