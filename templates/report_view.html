@@ -48,6 +48,16 @@
     <table>
       <tr><th>Requesting organisation</th><td>{{ requester or "—" }}</td></tr>
       <tr><th>Performing organisation</th><td>{{ performer or "—" }}</td></tr>
+      <tr>
+        <th>Originating order</th>
+        <td>
+          {% if order %}
+            <a href="{{ request.script_root }}/order/{{ order.id }}">View order &rarr;</a>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+      </tr>
     </table>
 
     <h2>Samples</h2>
