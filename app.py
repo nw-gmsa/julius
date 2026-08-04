@@ -1356,14 +1356,53 @@ def ctdna_summary():
             for g in org_geo if g["lat"] is not None and g["lon"] is not None
         ]
         order_map_unmapped_count = sum(g["count"] for g in org_geo if g["lat"] is None)
+
+        # Orders by ICS, same choropleth /stats's "Orders by requesting
+        # organisation's ICS" uses (ics_choropleth_html() is shared,
+        # unmodified) — also built from mapped_orders, same reasoning as
+        # the NHS Trust map above (agree with what the tables show).
+        # organisation_ics() is a point-in-polygon lookup off each order's
+        # already-resolved Organization resource (cached from
+        # orders_by_organisation_geocoded() just above), not
+        # Patient.managingOrganization.
+        order_ics_rows = [
+            {"ics": client.organisation_ics(client.order_organisation_resource(o)) or "Unknown"}
+            for o in mapped_orders
+        ]
+        order_by_ics = group_count(order_ics_rows, "ics")
+        order_ics_map_html, order_ics_map_unmatched_count, order_ics_map_unmatched_names = ics_choropleth_html(order_by_ics)
+
+        # Reports by ICS — same idea, but counting the orders that
+        # actually have a linked report (reports_by_order), not every
+        # mapped order. ctDNA has no independent "reports" list the way
+        # /stats does (reports_by_order maps at most one — the most
+        # recently issued — report per order id), so "one order with a
+        # report" stands in for "one report" here.
+        report_backed_orders = [o for o in mapped_orders if reports_by_order.get(o.get("id"))]
+        report_ics_rows = [
+            {"ics": client.organisation_ics(client.order_organisation_resource(o)) or "Unknown"}
+            for o in report_backed_orders
+        ]
+        report_by_ics = group_count(report_ics_rows, "ics")
+        report_ics_map_html, report_ics_map_unmatched_count, report_ics_map_unmatched_names = ics_choropleth_html(report_by_ics)
     except Exception as e:
         error = str(e)
         rows_by_org = []
         order_map_points, order_map_unmapped_count = [], 0
+        order_by_ics = []
+        order_ics_map_html, order_ics_map_unmatched_count, order_ics_map_unmatched_names = None, 0, []
+        report_by_ics = []
+        report_ics_map_html, report_ics_map_unmatched_count, report_ics_map_unmatched_names = None, 0, []
 
     return render_template(
         "ctdna.html", rows_by_org=rows_by_org, error=error, start=start, end=end,
         order_map_points=order_map_points, order_map_unmapped_count=order_map_unmapped_count,
+        order_by_ics=order_by_ics, order_ics_map_html=order_ics_map_html,
+        order_ics_map_unmatched_count=order_ics_map_unmatched_count,
+        order_ics_map_unmatched_names=order_ics_map_unmatched_names,
+        report_by_ics=report_by_ics, report_ics_map_html=report_ics_map_html,
+        report_ics_map_unmatched_count=report_ics_map_unmatched_count,
+        report_ics_map_unmatched_names=report_ics_map_unmatched_names,
     )
 
 

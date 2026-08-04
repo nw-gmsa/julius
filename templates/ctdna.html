@@ -39,6 +39,74 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
+  <h2>Orders by ICS</h2>
+  <p class="muted">Integrated Care System the ordering provider's postcode falls within.</p>
+  {% if order_ics_map_html %}
+    <div>{{ order_ics_map_html|safe }}</div>
+    <p class="muted">
+      Shaded by NHS Integrated Care Board (ONS boundaries), located from
+      each ordering provider's geocoded postcode.
+      {% if order_ics_map_unmatched_count %}
+        {{ order_ics_map_unmatched_count }} order(s) whose ordering
+        provider's ICS couldn't be determined aren't shown on the map
+        (still counted in the table below): {{ order_ics_map_unmatched_names|join(", ") }}.
+      {% endif %}
+    </p>
+  {% elif order_by_ics %}
+    <p class="muted">
+      {% if order_ics_map_unmatched_count %}
+        No ICS names in this range matched a known NHS Integrated Care
+        Board, so no map is shown: {{ order_ics_map_unmatched_names|join(", ") }}.
+      {% else %}
+        ICB boundary data couldn't be fetched, so no map is shown.
+      {% endif %}
+    </p>
+  {% endif %}
+  {% if order_by_ics %}
+    <table>
+      <tr><th>ICS</th><th>Orders</th></tr>
+      {% for ics, count in order_by_ics %}
+        <tr><td>{{ ics }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders in this range.</p>
+  {% endif %}
+
+  <h2>Reports by ICS</h2>
+  <p class="muted">Integrated Care System the ordering provider's postcode falls within, for orders that have a linked report.</p>
+  {% if report_ics_map_html %}
+    <div>{{ report_ics_map_html|safe }}</div>
+    <p class="muted">
+      Shaded by NHS Integrated Care Board (ONS boundaries), located from
+      each ordering provider's geocoded postcode.
+      {% if report_ics_map_unmatched_count %}
+        {{ report_ics_map_unmatched_count }} report(s) whose ordering
+        provider's ICS couldn't be determined aren't shown on the map
+        (still counted in the table below): {{ report_ics_map_unmatched_names|join(", ") }}.
+      {% endif %}
+    </p>
+  {% elif report_by_ics %}
+    <p class="muted">
+      {% if report_ics_map_unmatched_count %}
+        No ICS names in this range matched a known NHS Integrated Care
+        Board, so no map is shown: {{ report_ics_map_unmatched_names|join(", ") }}.
+      {% else %}
+        ICB boundary data couldn't be fetched, so no map is shown.
+      {% endif %}
+    </p>
+  {% endif %}
+  {% if report_by_ics %}
+    <table>
+      <tr><th>ICS</th><th>Reports</th></tr>
+      {% for ics, count in report_by_ics %}
+        <tr><td>{{ ics }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No reports in this range.</p>
+  {% endif %}
+
   <h2>Orders by ordering provider (NHS Trust)</h2>
   {% if order_map_points %}
     <div id="ctdna-org-map" style="height: 480px; border: 1px solid #ddd; border-radius: 4px; margin: .5rem 0 .5rem;"></div>
