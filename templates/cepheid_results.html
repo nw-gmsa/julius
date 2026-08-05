@@ -53,7 +53,13 @@
             <th>Specimen type</th><th>Sample collected</th><th>Sample received</th><th>Specimen ID</th>
           </tr>
           <tr>
-            <td class="muted">{{ row.order_id }}</td>
+            <td class="muted">
+              {% if row.order_id and row.order_id != "—" %}
+                <a href="{{ request.script_root }}/order/{{ row.order_id }}">{{ row.order_id }}</a>
+              {% else %}
+                {{ row.order_id }}
+              {% endif %}
+            </td>
             <td>{{ row.order_date }}</td>
             <td>{{ row.order_status }}</td>
             <td>{{ row.specimen_type }}</td>

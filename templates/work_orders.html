@@ -56,8 +56,22 @@
         <td>{{ node.order.authoredOn or "—" }}</td>
         <td>{{ order_requester.get(node.order.id, "—") }}</td>
         <td>{{ order_performer.get(node.order.id, "—") }}</td>
-        <td>{{ (node.order|placer_identifier) or "—" }}</td>
-        <td>{{ (node.order|filler_identifier) or "—" }}</td>
+        <td>
+          {% set placer_id = (node.order|placer_identifier) or "—" %}
+          {% if placer_id.startswith('T') and '-' in placer_id %}
+            <a href="{{ request.script_root }}/order/{{ node.order.id }}">{{ placer_id }}</a>
+          {% else %}
+            {{ placer_id }}
+          {% endif %}
+        </td>
+        <td>
+          {% set filler_id = (node.order|filler_identifier) or "—" %}
+          {% if filler_id != "—" %}
+            <a href="{{ request.script_root }}/order/{{ node.order.id }}">{{ filler_id }}</a>
+          {% else %}
+            {{ filler_id }}
+          {% endif %}
+        </td>
         <td>{{ node.order|reason_code_reference }}</td>
         <td class="muted">{{ node.order.id }}</td>
       </tr>

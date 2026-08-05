@@ -382,6 +382,7 @@ def patient_detail(patient_id):
     orders, reports, report_obs, order_requester = [], [], {}, {}
     order_performer = {}
     report_interpreters = {}
+    report_order = {}
     specimens_by_id = {}
     medical_record_numbers = []
     try:
@@ -397,6 +398,11 @@ def patient_detail(patient_id):
         for r in reports:
             report_obs[r["id"]] = client.observations_for_report(r)
             report_interpreters[r["id"]] = client.results_interpreter_display(r)
+            # Originating order (via basedOn) for each report card's "View
+            # order" link — usually a cache hit, since this patient's own
+            # orders were just resolved/cached above via
+            # lab_orders_for_patient()'s _include.
+            report_order[r["id"]] = client.order_for_report(r)
             for spec in client.resolve_specimens(r):
                 specimens_by_id[spec["id"]] = spec
     except Exception as e:
@@ -413,6 +419,7 @@ def patient_detail(patient_id):
         patient_ics=client.patient_ics_display(patient),
         orders=orders, order_chains=order_chains,
         reports=reports, report_obs=report_obs, report_interpreters=report_interpreters,
+        report_order=report_order,
         order_requester=order_requester, order_performer=order_performer,
         specimens=specimens, error=error, is_production=client.is_production(),
     )
@@ -1178,6 +1185,7 @@ def _order_report_row(order, report):
 
     return {
         "order_id": order.get("id"),
+        "report_id": report.get("id") if report else None,
         "patient_id": patient.get("id") if patient else None,
         "patient_name": human_name(patient) if patient else "Unknown",
         "test": FhirClient.test_directory_code(order.get("code")) or "—",
@@ -1377,6 +1385,7 @@ def stats_organisation():
             patient = client.patient_for(r)
             row = {
                 "order_id": ordering_order.get("id") if ordering_order else None,
+                "report_id": r.get("id"),
                 "patient_id": patient.get("id") if patient else None,
                 "patient_name": human_name(patient) if patient else "Unknown",
                 "test": FhirClient.test_directory_code(r.get("code")) or "—",
@@ -1417,36 +1426,83 @@ def stats_ics():
     different "ICS" concept used elsewhere on /stats (the country/ICS
     breakdown further down the page, off the patient rather than the
     organisation).
+
+    Same two views as stats_organisation(): "by test directory code"
+    counts, and a detailed row list (_order_report_row() shape) with
+    linked iGene report ID / Placer number columns — see stats_ics.html
+    for why those two specifically are clickable here.
     """
     ics = request.args.get("ics", "")
     end = request.args.get("end") or date.today().isoformat()
     start = request.args.get("start") or (date.today() - timedelta(days=6)).isoformat()
 
     error = None
-    order_rows, report_rows = [], []
+    rows = []
+    order_by_test, report_by_test = [], []
     try:
         orders = client.orders_in_range(start, end)
-        order_rows = [
-            {"test": FhirClient.test_directory_code(o.get("code")) or "—"}
-            for o in orders
-            if (client.organisation_ics(client.order_organisation_resource(o)) or "Unknown") == ics
-        ]
-
         reports = client.reports_in_range(start, end)
+
+        report_by_order_id = {}
+        for r in reports:
+            ordering_order = client.order_for_report(r)
+            if not ordering_order:
+                continue
+            oid = ordering_order.get("id")
+            existing = report_by_order_id.get(oid)
+            issued = r.get("issued") or r.get("effectiveDateTime") or ""
+            existing_issued = (existing.get("issued") or existing.get("effectiveDateTime") or "") if existing else ""
+            if existing is None or issued > existing_issued:
+                report_by_order_id[oid] = r
+
+        matched_order_ids = set()
+        order_test_rows, report_test_rows = [], []
+        for o in orders:
+            order_ics = client.organisation_ics(client.order_organisation_resource(o)) or "Unknown"
+            if order_ics != ics:
+                continue
+            matched_order_ids.add(o.get("id"))
+            order_test_rows.append({"test": FhirClient.test_directory_code(o.get("code")) or "—"})
+            rows.append(_order_report_row(o, report_by_order_id.get(o.get("id"))))
+
+        # Reports whose ordering provider's ICS matches but whose order
+        # either didn't resolve, or wasn't itself in orders_in_range()'s
+        # result for this range — still shown, order-only fields "—",
+        # same reasoning as stats_organisation().
         for r in reports:
             ordering_order = client.order_for_report(r)
             ordering_org_resource = client.order_organisation_resource(ordering_order) if ordering_order else None
             report_ics = client.organisation_ics(ordering_org_resource) or "Unknown"
-            if report_ics == ics:
-                report_rows.append({"test": FhirClient.test_directory_code(r.get("code")) or "—"})
+            if report_ics != ics:
+                continue
+            report_test_rows.append({"test": FhirClient.test_directory_code(r.get("code")) or "—"})
+            if ordering_order and ordering_order.get("id") in matched_order_ids:
+                continue  # already emitted above, via its order
+            patient = client.patient_for(r)
+            rows.append({
+                "order_id": ordering_order.get("id") if ordering_order else None,
+                "report_id": r.get("id"),
+                "patient_id": patient.get("id") if patient else None,
+                "patient_name": human_name(patient) if patient else "Unknown",
+                "test": FhirClient.test_directory_code(r.get("code")) or "—",
+                "status": r.get("status") or "—",
+                "order_date": (ordering_order.get("authoredOn") if ordering_order else None) or "—",
+                "collected_date": "—",
+                "received_date": "—",
+                "reported_date": (r.get("issued") or r.get("effectiveDateTime") or "")[:10] or "—",
+                "placer_id": (FhirClient.placer_identifier(ordering_order) if ordering_order else None) or "—",
+                "igene_id": client.igene_report_identifier(ordering_order or {}, r) or "—",
+                "conclusion": "; ".join(code_text(cc) for cc in (r.get("conclusionCode") or [])) or "—",
+            })
+
+        order_by_test = group_count(order_test_rows, "test")
+        report_by_test = group_count(report_test_rows, "test")
     except Exception as e:
         error = str(e)
 
     return render_template(
         "stats_ics.html", ics=ics, start=start, end=end, error=error,
-        order_count=len(order_rows), report_count=len(report_rows),
-        order_by_test=group_count(order_rows, "test"),
-        report_by_test=group_count(report_rows, "test"),
+        rows=rows, order_by_test=order_by_test, report_by_test=report_by_test,
     )
 
 

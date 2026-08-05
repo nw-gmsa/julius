@@ -185,8 +185,20 @@
             <td>{{ row.collected_date }}</td>
             <td>{{ row.received_date }}</td>
             <td>{{ row.reported_date }}</td>
-            <td>{{ row.igene_id }}</td>
-            <td>{{ row.placer_id }}</td>
+            <td>
+              {% if row.report_id %}
+                <a href="{{ request.script_root }}/report/{{ row.report_id }}">{{ row.igene_id }}</a>
+              {% else %}
+                {{ row.igene_id }}
+              {% endif %}
+            </td>
+            <td>
+              {% if row.order_id and row.placer_id and row.placer_id.startswith('T') and '-' in row.placer_id %}
+                <a href="{{ request.script_root }}/order/{{ row.order_id }}">{{ row.placer_id }}</a>
+              {% else %}
+                {{ row.placer_id }}
+              {% endif %}
+            </td>
           </tr>
         {% endfor %}
       </table>

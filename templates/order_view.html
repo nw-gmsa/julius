@@ -15,6 +15,10 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
+  {% if patient %}
+    <p><a href="{{ request.script_root }}/patient/{{ patient.id }}">&larr; {{ patient|human_name }} — patient summary</a></p>
+  {% endif %}
+
   {% if order %}
     <h2>Patient details</h2>
     {% if patient %}
