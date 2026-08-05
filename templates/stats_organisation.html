@@ -62,6 +62,7 @@
     <table>
       <tr>
         <th>Patient</th>
+        <th>Requesting clinician</th>
         <th>Status</th>
         <th>Test code</th>
         <th>Conclusion code</th>
@@ -83,6 +84,7 @@
               {{ row.patient_name }}
             {% endif %}
           </td>
+          <td>{{ row.requester }}</td>
           <td>{{ row.status }}</td>
           <td>{{ row.test }}</td>
           <td>{{ row.conclusion }}</td>

@@ -287,6 +287,33 @@ class FhirClient:
         """The patient's NHS number (see NHS_NUMBER_SYSTEM)."""
         return cls._identifier_value(patient, cls.NHS_NUMBER_SYSTEM)
 
+    #: CHI (Community Health Index) number identifier system — Scotland's
+    #: equivalent of an NHS number. Not IG-specific; a patient registered
+    #: in Scotland but seen by an NW England genomics service could carry
+    #: this instead of (or as well as) an NHS number. System URI not
+    #: confirmed against a real server.
+    CHI_NUMBER_SYSTEM = "https://fhir.hl7.org.uk/Id/chi-number"
+
+    @classmethod
+    def chi_number(cls, patient):
+        """The patient's CHI number (see CHI_NUMBER_SYSTEM)."""
+        return cls._identifier_value(patient, cls.CHI_NUMBER_SYSTEM)
+
+    @classmethod
+    def nhs_or_chi_number(cls, patient):
+        """(label, value) for whichever of NHS number / CHI number is
+        present on `patient` — NHS number preferred, CHI number as a
+        fallback for patients who don't carry one (e.g. Scottish
+        patients). Returns ("NHS number", None) if neither is present, so
+        callers always get a consistent label to show even with no value."""
+        nhs = cls.nhs_number(patient)
+        if nhs:
+            return "NHS number", nhs
+        chi = cls.chi_number(patient)
+        if chi:
+            return "CHI number", chi
+        return "NHS number", None
+
     #: UK Core extension on the NHS number identifier itself, carrying its
     #: trace/verification status. "01" ("Number present and verified") is
     #: the only fully-trusted value in the NHS Data Dictionary's NHS
@@ -1429,6 +1456,17 @@ class FhirClient:
     PLACER_IDENTIFIER_TYPE = "PLAC"
     FILLER_IDENTIFIER_TYPE = "FILL"
 
+    #: UK Core identifier systems for a requesting clinician's professional
+    #: registration number, carried on the Practitioner resource behind a
+    #: ServiceRequest.requester PractitionerRole. GMC (General Medical
+    #: Council) is checked first; GMP (General Medical Practitioner code)
+    #: is a fallback for requesters who carry that instead. Not confirmed
+    #: against a real server — if the code never appears in brackets next
+    #: to a requesting clinician's name, sample a real Practitioner.identifier
+    #: array and check the system URI actually used.
+    GMC_NUMBER_SYSTEM = "https://fhir.hl7.org.uk/Id/gmc-number"
+    GMP_NUMBER_SYSTEM = "https://fhir.hl7.org.uk/Id/gmp-number"
+
     @staticmethod
     def _identifier_value(resource, system):
         """First identifier value on `resource` whose `system` matches, or
@@ -2257,10 +2295,28 @@ class FhirClient:
         full = " ".join(p for p in [prefix, given, family] if p)
         return full or None
 
+    @classmethod
+    def _practitioner_registration_code(cls, practitioner):
+        """A requesting clinician's GMC or GMP registration number,
+        formatted as "GMC 1234567" / "GMP 1234567", or None if the
+        Practitioner resource carries neither identifier. GMC is checked
+        first (see GMC_NUMBER_SYSTEM/GMP_NUMBER_SYSTEM above)."""
+        gmc = cls._identifier_value(practitioner, cls.GMC_NUMBER_SYSTEM)
+        if gmc:
+            return f"GMC {gmc}"
+        gmp = cls._identifier_value(practitioner, cls.GMP_NUMBER_SYSTEM)
+        if gmp:
+            return f"GMP {gmp}"
+        return None
+
     def requester_display(self, order):
         """
         Resolve ServiceRequest.requester (PractitionerRole | Organization per
-        the IG) into a human-readable "Dr X (Org Y)" style string.
+        the IG) into a human-readable "Dr X (GMC 1234567) (Org Y)" style
+        string — the GMC/GMP registration number (see
+        _practitioner_registration_code()) is appended in brackets right
+        after the clinician's name, before the organisation, only when the
+        underlying Practitioner resource actually carries one.
         """
         requester_ref = order.get("requester")
         if not requester_ref:
@@ -2284,6 +2340,9 @@ class FhirClient:
                 practitioner = self.resolve_reference(practitioner_ref)
                 if practitioner:
                     practitioner_name = self._practitioner_name(practitioner)
+                    registration_code = self._practitioner_registration_code(practitioner)
+                    if practitioner_name and registration_code:
+                        practitioner_name = f"{practitioner_name} ({registration_code})"
 
             org_name = None
             org_ref = resource.get("organization")
@@ -2298,6 +2357,43 @@ class FhirClient:
 
         # Unexpected resource type — show what we can.
         return requester_ref.get("display") or resource.get("id", "—")
+
+    def requesting_clinician_display(self, order):
+        """
+        The named individual clinician who requested this order — the
+        Practitioner behind a ServiceRequest.requester PractitionerRole,
+        with their GMC/GMP registration number in brackets where present
+        (see _practitioner_registration_code()). Returns "—" whenever no
+        individual clinician is actually named: requester references an
+        Organization directly, a PractitionerRole with no linked
+        Practitioner, or a Practitioner with no name. Distinct from
+        requester_display() (used for the "Requested by"/"Requesting
+        organisation" columns/fields elsewhere), which deliberately falls
+        back to showing the requesting *organisation* name in those same
+        cases — this method is specifically for a "requesting clinician"
+        column, where an organisation name would be a wrong answer, not
+        just a less specific one.
+        """
+        requester_ref = order.get("requester")
+        if not requester_ref:
+            return "—"
+
+        resource = self.resolve_reference(requester_ref)
+        if resource is None or resource.get("resourceType") != "PractitionerRole":
+            return "—"
+
+        practitioner_ref = resource.get("practitioner")
+        if not practitioner_ref:
+            return "—"
+        practitioner = self.resolve_reference(practitioner_ref)
+        if not practitioner:
+            return "—"
+
+        name = self._practitioner_name(practitioner)
+        if not name:
+            return "—"
+        registration_code = self._practitioner_registration_code(practitioner)
+        return f"{name} ({registration_code})" if registration_code else name
 
     def performer_display(self, order):
         """

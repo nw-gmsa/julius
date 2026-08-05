@@ -107,6 +107,18 @@ Patients are matched via **NHS number** (`identifier` search param) first,
 since the IG's `Patient` resources carry an `NHSIdentifier` — more reliable
 than name matching, which is available as a fallback.
 
+**The search results table (`/search`) shows each matched patient's NHS
+number**, falling back to their **CHI number** (`FhirClient.CHI_NUMBER_SYSTEM`
+= `https://fhir.hl7.org.uk/Id/chi-number`, Scotland's equivalent — system URI
+unconfirmed against a real server, same caveat as everything else keyed off an
+assumed identifier system) when no NHS number is present, via
+`FhirClient.nhs_or_chi_number(patient)` (returns `(label, value)`, `label`
+switching to `"CHI number"` only when that's the one actually shown, so the
+column stays labelled "NHS number" in the common case but a CHI-only patient
+is clearly marked rather than silently shown under the wrong label).
+`app.search()` builds this once per result as `patient_numbers` (keyed by
+patient id) rather than resolving it in the template.
+
 ### Search by order/report number
 
 The index page's second search box (`order_number`) looks a value up
@@ -159,6 +171,35 @@ per resource. Falls back gracefully to per-resource GETs if a server doesn't
 support `_include` (untested: whether this server supports the `:iterate`
 modifier used to reach the Practitioner/Organization behind a
 PractitionerRole requester).
+
+`requester_display()` renders as "Dr X (GMC 1234567) (Org Y)" —
+`FhirClient._practitioner_registration_code()` appends the requesting
+clinician's GMC or GMP registration number (see item 12 under "Things
+that are unverified" below) in brackets right after their name, before
+the organisation, whenever the underlying Practitioner resource carries
+one. This is the shared implementation behind the pre-existing
+"Requested by" column (patient page, work orders, test orders) and the
+`order_view`/`report_view` "Requesting organisation" field — it
+deliberately falls back to the *organisation* name when the requester
+references an Organization directly (no individual clinician involved)
+or a PractitionerRole has no linked Practitioner, since those fields
+are about "who/what to attribute this order to" generally.
+
+`requesting_clinician_display(order)` is a separate, narrower method for
+the "Requesting clinician" columns/fields added to `/ctdna`, the
+`/stats` organisation/ICS drill-downs, `/order/<id>` (a new row above
+"Requesting organisation"), and the patient page's "Genomic test
+orders" table (a new column, `order_clinician` in `app.patient_detail()`,
+between "Ordered" and "Requested by") — it returns "—" in exactly the
+cases `requester_display()` falls back to an organisation name, rather
+than showing that organisation name, since a clinician-specific
+column/field showing an organisation name would be a wrong answer, not
+just a less specific one. Both share `_practitioner_registration_code()`
+for the GMC/GMP suffix, so it appears consistently wherever a
+clinician's name is shown either way. Work orders/test orders
+(`/work-orders`, `/test-orders`) still only have the combined
+"Requested by" column — not extended to a separate clinician column,
+since that wasn't asked for there.
 
 ### Daily stats (`/stats`)
 
@@ -788,6 +829,18 @@ haven't been exercised against a live NHS North West Genomics IG server:
     match doesn't already handle (like the "&" vs "and" and dropped-"the"
     cases it was fixed for), extend `_normalize_icb_name()` or tune
     `ICB_FUZZY_MATCH_THRESHOLD`.
+12. **GMC/GMP identifier system URIs** (`GMC_NUMBER_SYSTEM` =
+    `https://fhir.hl7.org.uk/Id/gmc-number`, `GMP_NUMBER_SYSTEM` =
+    `https://fhir.hl7.org.uk/Id/gmp-number`, used by
+    `FhirClient._practitioner_registration_code()` to append a
+    requesting clinician's registration number in brackets after their
+    name — see Requester resolution below) — standard UK Core system
+    URIs, not confirmed against a real server's Practitioner resources.
+    If a requesting clinician's registration number never appears in
+    brackets on `/patient/<id>`, `/work-orders`, `/test-orders`,
+    `/ctdna`, or the `/stats` organisation/ICS drill-downs, sample a
+    real Practitioner resource's `identifier` array and adjust the
+    system URI(s).
 
 ## Maintenance scripts (`scripts/`)
 

@@ -56,10 +56,12 @@
     <h2>Results ({{ patients|length }})</h2>
     {% if patients %}
       <table>
-        <tr><th>Name</th><th>ID</th><th>DOB</th><th></th></tr>
+        <tr><th>Name</th><th>NHS number</th><th>ID</th><th>DOB</th><th></th></tr>
         {% for p in patients %}
+          {% set label, value = patient_numbers.get(p.id, ("NHS number", None)) %}
           <tr>
             <td>{{ p|human_name }}</td>
+            <td>{{ value or "—" }}{% if value and label != "NHS number" %} ({{ label }}){% endif %}</td>
             <td>{{ p.id }}</td>
             <td>{{ p.birthDate or "—" }}</td>
             <td><a href="{{ request.script_root }}/patient/{{ p.id }}">View lab data →</a></td>

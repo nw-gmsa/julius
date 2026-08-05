@@ -24,7 +24,10 @@
     <code>fhir_client.py</code> if this needs tightening for your server.
     "iGene report ID" is the identifier carried under the
     <code>https://fhir.nwgenomics.nhs.uk/iGene/ReportIdentifier</code>
-    system, checked on the order first and then the report.
+    system, checked on the order first and then the report. "Requesting
+    clinician" is the same PractitionerRole requester resolved down to its
+    named practitioner, with a GMC or GMP registration number (if the
+    Practitioner resource carries one) shown in brackets after the name.
   </p>
 
   <form action="{{ request.script_root }}/ctdna" method="get">
@@ -159,6 +162,7 @@
       <table>
         <tr>
           <th>Patient</th>
+          <th>Requesting clinician</th>
           <th>Status</th>
           <th>Test code</th>
           <th>Conclusion code</th>
@@ -179,6 +183,7 @@
                 {{ row.patient_name }}
               {% endif %}
             </td>
+            <td>{{ row.requester }}</td>
             <td>{{ row.status }}</td>
             <td>{{ row.test }}</td>
             <td>{{ row.conclusion }}</td>

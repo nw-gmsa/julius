@@ -341,11 +341,13 @@ def search():
             patients = client.search_patients(name=name)
     except Exception as e:
         error = str(e)
+    patient_numbers = {p["id"]: FhirClient.nhs_or_chi_number(p) for p in patients}
     return render_template("index.html", base_url=client.base_url,
                             patients=patients, error=error,
                             searched_name=name, searched_id=patient_id,
                             searched_nhs=nhs_number, searched_order_number=order_number,
-                            identifier_matches=identifier_matches)
+                            identifier_matches=identifier_matches,
+                            patient_numbers=patient_numbers)
 
 
 def _find_by_order_or_report_number(value):
@@ -393,6 +395,7 @@ def patient_detail(patient_id):
     error = None
     patient = None
     orders, reports, report_obs, order_requester = [], [], {}, {}
+    order_clinician = {}
     order_performer = {}
     report_interpreters = {}
     report_order = {}
@@ -404,6 +407,7 @@ def patient_detail(patient_id):
         orders = client.lab_orders_for_patient(patient_id)
         for o in orders:
             order_requester[o["id"]] = client.requester_display(o)
+            order_clinician[o["id"]] = client.requesting_clinician_display(o)
             order_performer[o["id"]] = client.performer_display(o)
             for spec in client.resolve_specimens(o):
                 specimens_by_id[spec["id"]] = spec
@@ -446,7 +450,8 @@ def patient_detail(patient_id):
         orders=orders, order_chains=order_chains,
         reports=reports, report_obs=report_obs, report_interpreters=report_interpreters,
         report_order=report_order,
-        order_requester=order_requester, order_performer=order_performer,
+        order_requester=order_requester, order_clinician=order_clinician,
+        order_performer=order_performer,
         specimens=specimens, error=error, is_production=client.is_production(),
     )
 
@@ -546,6 +551,7 @@ def order_view(order_id):
         postcode=_patient_postcode(patient),
         medical_record_numbers=client.medical_record_numbers(patient) if patient else [],
         requester=client.requester_display(order) if order else None,
+        requesting_clinician=client.requesting_clinician_display(order) if order else None,
         performer=client.performer_display(order) if order else None,
         placer_assigner=client.placer_identifier_assigner(order) if order else None,
     )
@@ -1214,6 +1220,7 @@ def _order_report_row(order, report):
         "report_id": report.get("id") if report else None,
         "patient_id": patient.get("id") if patient else None,
         "patient_name": human_name(patient) if patient else "Unknown",
+        "requester": client.requesting_clinician_display(order),
         "test": FhirClient.test_directory_code(order.get("code")) or "—",
         "status": "Completed" if is_completed else "Outstanding",
         "order_date_raw": order.get("authoredOn") or "",
@@ -1415,6 +1422,7 @@ def stats_organisation():
                 "report_id": r.get("id"),
                 "patient_id": patient.get("id") if patient else None,
                 "patient_name": human_name(patient) if patient else "Unknown",
+                "requester": client.requesting_clinician_display(ordering_order) if ordering_order else "—",
                 "test": FhirClient.test_directory_code(r.get("code")) or "—",
                 "status": r.get("status") or "—",
                 "order_date": (ordering_order.get("authoredOn") if ordering_order else None) or "—",
@@ -1512,6 +1520,7 @@ def stats_ics():
                 "report_id": r.get("id"),
                 "patient_id": patient.get("id") if patient else None,
                 "patient_name": human_name(patient) if patient else "Unknown",
+                "requester": client.requesting_clinician_display(ordering_order) if ordering_order else "—",
                 "test": FhirClient.test_directory_code(r.get("code")) or "—",
                 "status": r.get("status") or "—",
                 "order_date": (ordering_order.get("authoredOn") if ordering_order else None) or "—",
