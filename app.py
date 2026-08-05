@@ -394,7 +394,7 @@ def _find_by_order_or_report_number(value):
 def patient_detail(patient_id):
     error = None
     patient = None
-    orders, reports, report_obs, order_requester = [], [], {}, {}
+    orders, reports, report_obs, order_organisation = [], [], {}, {}
     order_clinician = {}
     order_performer = {}
     report_interpreters = {}
@@ -406,7 +406,8 @@ def patient_detail(patient_id):
         medical_record_numbers = client.medical_record_numbers(patient)
         orders = client.lab_orders_for_patient(patient_id)
         for o in orders:
-            order_requester[o["id"]] = client.requester_display(o)
+            org_name = client.order_organisation(o)
+            order_organisation[o["id"]] = _org_display_name(org_name, client.order_organisation_ods(o)) if org_name else "—"
             order_clinician[o["id"]] = client.requesting_clinician_display(o)
             order_performer[o["id"]] = client.performer_display(o)
             for spec in client.resolve_specimens(o):
@@ -450,7 +451,7 @@ def patient_detail(patient_id):
         orders=orders, order_chains=order_chains,
         reports=reports, report_obs=report_obs, report_interpreters=report_interpreters,
         report_order=report_order,
-        order_requester=order_requester, order_clinician=order_clinician,
+        order_organisation=order_organisation, order_clinician=order_clinician,
         order_performer=order_performer,
         specimens=specimens, error=error, is_production=client.is_production(),
     )

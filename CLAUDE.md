@@ -172,34 +172,82 @@ support `_include` (untested: whether this server supports the `:iterate`
 modifier used to reach the Practitioner/Organization behind a
 PractitionerRole requester).
 
+**`ServiceRequest.requester` isn't always a PractitionerRole on this
+server, and a PractitionerRole's `.practitioner` isn't always a
+resolvable reference either** — two real cases hit on the same server:
+
+- `ServiceRequest/25137`'s `requester` references a `Practitioner`
+  directly (FHIR R4 allows this; the IG's own examples just happen to
+  use PractitionerRole). Before the fix, this fell into
+  `requester_display()`'s "unexpected resource type" branch (raw display
+  text/id, not the resolved name) and into
+  `requesting_clinician_display()`'s "not a PractitionerRole" branch
+  (silently "—"). Both methods now check `resourceType == "Practitioner"`
+  explicitly before falling through to the PractitionerRole branch.
+- A different order's requester PractitionerRole has a `.practitioner`
+  that's a **logical reference** — `display` + `identifier` (a GMC
+  number), but no `.reference` to actually fetch. `resolve_reference()`
+  only works off `.reference`, so this silently resolved to nothing
+  before the fix. `FhirClient._resolve_practitioner_display()` now tries
+  `resolve_reference()` first and, when that comes back empty, falls
+  back to the practitioner reference's own inline `display` +
+  `_reference_identifier_code()` (a GMC/GMP check against
+  `Reference.identifier`, the logical-reference equivalent of
+  `_practitioner_registration_code()`'s check against a resolved
+  resource's `identifier[]`).
+
+`_practitioner_display_name()` (resolved-resource case) and
+`_resolve_practitioner_display()` (adds the logical-reference fallback)
+are the shared formatters both `requester_display()` and
+`requesting_clinician_display()` go through for a PractitionerRole's
+practitioner — extend those, not either caller, if another requester
+shape turns up.
+
 `requester_display()` renders as "Dr X (GMC 1234567) (Org Y)" —
 `FhirClient._practitioner_registration_code()` appends the requesting
 clinician's GMC or GMP registration number (see item 12 under "Things
 that are unverified" below) in brackets right after their name, before
 the organisation, whenever the underlying Practitioner resource carries
-one. This is the shared implementation behind the pre-existing
-"Requested by" column (patient page, work orders, test orders) and the
-`order_view`/`report_view` "Requesting organisation" field — it
-deliberately falls back to the *organisation* name when the requester
-references an Organization directly (no individual clinician involved)
-or a PractitionerRole has no linked Practitioner, since those fields
-are about "who/what to attribute this order to" generally.
+one. This is still the shared implementation behind work orders/test
+orders' "Requested by" column and the `order_view`/`report_view`
+"Requesting organisation" field — it deliberately falls back to the
+*organisation* name when the requester references an Organization
+directly (no individual clinician involved) or a PractitionerRole has
+no linked Practitioner, since those fields are about "who/what to
+attribute this order to" generally.
 
 `requesting_clinician_display(order)` is a separate, narrower method for
 the "Requesting clinician" columns/fields added to `/ctdna`, the
 `/stats` organisation/ICS drill-downs, `/order/<id>` (a new row above
 "Requesting organisation"), and the patient page's "Genomic test
 orders" table (a new column, `order_clinician` in `app.patient_detail()`,
-between "Ordered" and "Requested by") — it returns "—" in exactly the
-cases `requester_display()` falls back to an organisation name, rather
-than showing that organisation name, since a clinician-specific
-column/field showing an organisation name would be a wrong answer, not
-just a less specific one. Both share `_practitioner_registration_code()`
-for the GMC/GMP suffix, so it appears consistently wherever a
-clinician's name is shown either way. Work orders/test orders
-(`/work-orders`, `/test-orders`) still only have the combined
-"Requested by" column — not extended to a separate clinician column,
-since that wasn't asked for there.
+between "Ordered" and "Requesting organisation") — it returns "—" in
+exactly the cases `requester_display()` falls back to an organisation
+name, rather than showing that organisation name, since a
+clinician-specific column/field showing an organisation name would be a
+wrong answer, not just a less specific one. Both share
+`_practitioner_registration_code()` for the GMC/GMP suffix, so it
+appears consistently wherever a clinician's name is shown either way.
+Work orders/test orders (`/work-orders`, `/test-orders`) still only have
+the combined "Requested by" column — not extended to a separate
+clinician column, since that wasn't asked for there.
+
+**The patient page's orders table went further still**: its old
+"Requested by" column (`requester_display()`, mixing clinician + org)
+was replaced with a **"Requesting organisation"** column showing just
+the organisation name and its NHS ODS code in brackets — `"Name (ODS)"`,
+the same `_org_display_name()` format (and same underlying
+`order_organisation()`/`order_organisation_ods()` lookups) `/ctdna`
+already used for its per-organisation section headings — now that
+"Requesting clinician" is its own column, "Requesting organisation"
+doesn't need to also carry the clinician's name. `app.patient_detail()`
+builds this as `order_organisation` (renamed from the old
+`order_requester` dict — do not confuse with the *function*
+`client.order_organisation()` it calls per order, or the
+same-named-but-unrelated `order_organisation` dict `_order_worklist()`
+builds in `app.py` for the org filter dropdown on work/test orders).
+Shows "—" when the order has no resolvable requesting organisation at
+all (not just no ODS code).
 
 ### Daily stats (`/stats`)
 

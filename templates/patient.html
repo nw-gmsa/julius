@@ -109,7 +109,7 @@
         <td>{{ node.order.intent or "—" }}</td>
         <td>{{ node.order.authoredOn or "—" }}</td>
         <td>{{ order_clinician.get(node.order.id, "—") }}</td>
-        <td>{{ order_requester.get(node.order.id, "—") }}</td>
+        <td>{{ order_organisation.get(node.order.id, "—") }}</td>
         <td>{{ order_performer.get(node.order.id, "—") }}</td>
         <td>
           {% set placer_id = (node.order|placer_identifier) or "—" %}
@@ -138,7 +138,7 @@
   <h2>Genomic test orders ({{ orders|length }})</h2>
   {% if orders %}
     <table>
-      <tr><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th><th>Requesting clinician</th><th>Requested by</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>Hospital Spell ID</th><th>ID</th></tr>
+      <tr><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th><th>Requesting clinician</th><th>Requesting organisation</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>Hospital Spell ID</th><th>ID</th></tr>
       {{ render_order_chain(order_chains) }}
     </table>
     <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>

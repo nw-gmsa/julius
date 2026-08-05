@@ -2309,11 +2309,73 @@ class FhirClient:
             return f"GMP {gmp}"
         return None
 
+    @classmethod
+    def _practitioner_display_name(cls, practitioner):
+        """A practitioner's name with their GMC/GMP registration number
+        (if any) appended in brackets — the shared formatting
+        requester_display() and requesting_clinician_display() both use
+        once they've resolved a Practitioner resource, whether reached
+        directly or via a PractitionerRole. Returns None if the
+        Practitioner resource has no name."""
+        name = cls._practitioner_name(practitioner)
+        if not name:
+            return None
+        registration_code = cls._practitioner_registration_code(practitioner)
+        return f"{name} ({registration_code})" if registration_code else name
+
+    @classmethod
+    def _reference_identifier_code(cls, ref):
+        """A logical reference's own inline `Reference.identifier`,
+        formatted as "GMC 1234567" / "GMP 1234567" if its system matches
+        one of the registration-number systems — the same GMC/GMP check
+        _practitioner_registration_code() does against a resolved
+        Practitioner resource's own identifier *list*, just read off a
+        single inline `Identifier` on the Reference itself instead. Used
+        when a PractitionerRole.practitioner is a logical reference
+        (display + identifier, no resolvable `.reference`) rather than a
+        normal reference to a fetchable Practitioner resource."""
+        if not ref:
+            return None
+        identifier = ref.get("identifier") or {}
+        value = identifier.get("value")
+        if not value:
+            return None
+        system = identifier.get("system")
+        if system == cls.GMC_NUMBER_SYSTEM:
+            return f"GMC {value}"
+        if system == cls.GMP_NUMBER_SYSTEM:
+            return f"GMP {value}"
+        return None
+
+    def _resolve_practitioner_display(self, practitioner_ref):
+        """Display name (+ GMC/GMP code) for a PractitionerRole.practitioner
+        reference. Tries resolving it to a full Practitioner resource first
+        (_practitioner_display_name()); when that fails — confirmed to
+        happen on a real server (see requester_display()'s docstring): a
+        PractitionerRole whose `.practitioner` is a *logical* reference
+        (`display` + `identifier`, no `.reference` to actually fetch) —
+        falls back to the reference's own inline `display`, with a GMC/GMP
+        code from its inline `identifier` (_reference_identifier_code())
+        appended the same way a resolved Practitioner's would be. Returns
+        None if neither yields a name."""
+        if not practitioner_ref:
+            return None
+        practitioner = self.resolve_reference(practitioner_ref)
+        if practitioner:
+            return self._practitioner_display_name(practitioner)
+        display = practitioner_ref.get("display")
+        if not display:
+            return None
+        registration_code = self._reference_identifier_code(practitioner_ref)
+        return f"{display} ({registration_code})" if registration_code else display
+
     def requester_display(self, order):
         """
-        Resolve ServiceRequest.requester (PractitionerRole | Organization per
-        the IG) into a human-readable "Dr X (GMC 1234567) (Org Y)" style
-        string — the GMC/GMP registration number (see
+        Resolve ServiceRequest.requester (PractitionerRole | Practitioner |
+        Organization — the IG's own examples use PractitionerRole, but FHIR
+        R4 allows a direct Practitioner reference too, and at least one real
+        server's data uses it) into a human-readable "Dr X (GMC 1234567)
+        (Org Y)" style string — the GMC/GMP registration number (see
         _practitioner_registration_code()) is appended in brackets right
         after the clinician's name, before the organisation, only when the
         underlying Practitioner resource actually carries one.
@@ -2333,16 +2395,11 @@ class FhirClient:
         if rtype == "Organization":
             return resource.get("name") or requester_ref.get("display") or "—"
 
+        if rtype == "Practitioner":
+            return self._practitioner_display_name(resource) or requester_ref.get("display") or "—"
+
         if rtype == "PractitionerRole":
-            practitioner_name = None
-            practitioner_ref = resource.get("practitioner")
-            if practitioner_ref:
-                practitioner = self.resolve_reference(practitioner_ref)
-                if practitioner:
-                    practitioner_name = self._practitioner_name(practitioner)
-                    registration_code = self._practitioner_registration_code(practitioner)
-                    if practitioner_name and registration_code:
-                        practitioner_name = f"{practitioner_name} ({registration_code})"
+            practitioner_name = self._resolve_practitioner_display(resource.get("practitioner"))
 
             org_name = None
             org_ref = resource.get("organization")
@@ -2360,40 +2417,42 @@ class FhirClient:
 
     def requesting_clinician_display(self, order):
         """
-        The named individual clinician who requested this order — the
-        Practitioner behind a ServiceRequest.requester PractitionerRole,
-        with their GMC/GMP registration number in brackets where present
-        (see _practitioner_registration_code()). Returns "—" whenever no
-        individual clinician is actually named: requester references an
-        Organization directly, a PractitionerRole with no linked
-        Practitioner, or a Practitioner with no name. Distinct from
-        requester_display() (used for the "Requested by"/"Requesting
-        organisation" columns/fields elsewhere), which deliberately falls
-        back to showing the requesting *organisation* name in those same
-        cases — this method is specifically for a "requesting clinician"
-        column, where an organisation name would be a wrong answer, not
-        just a less specific one.
+        The named individual clinician who requested this order — a
+        Practitioner referenced directly by ServiceRequest.requester, or
+        the Practitioner behind a requester PractitionerRole (see
+        requester_display()'s docstring for why both shapes are handled),
+        with their GMC/GMP registration number in brackets where present.
+        A PractitionerRole.practitioner that's a *logical* reference
+        (display + identifier, no resolvable Practitioner resource) still
+        yields a name here too — see _resolve_practitioner_display().
+        Returns "—" whenever no individual clinician is actually named:
+        requester references an Organization directly, a PractitionerRole
+        with no linked Practitioner at all, or a Practitioner/logical
+        reference with no name/display. Distinct from requester_display()
+        (used for the "Requested by"/"Requesting organisation"
+        columns/fields elsewhere), which deliberately falls back to
+        showing the requesting *organisation* name in those same cases —
+        this method is specifically for a "requesting clinician" column,
+        where an organisation name would be a wrong answer, not just a
+        less specific one.
         """
         requester_ref = order.get("requester")
         if not requester_ref:
             return "—"
 
         resource = self.resolve_reference(requester_ref)
-        if resource is None or resource.get("resourceType") != "PractitionerRole":
+        if resource is None:
             return "—"
 
-        practitioner_ref = resource.get("practitioner")
-        if not practitioner_ref:
-            return "—"
-        practitioner = self.resolve_reference(practitioner_ref)
-        if not practitioner:
+        rtype = resource.get("resourceType")
+
+        if rtype == "Practitioner":
+            return self._practitioner_display_name(resource) or "—"
+
+        if rtype != "PractitionerRole":
             return "—"
 
-        name = self._practitioner_name(practitioner)
-        if not name:
-            return "—"
-        registration_code = self._practitioner_registration_code(practitioner)
-        return f"{name} ({registration_code})" if registration_code else name
+        return self._resolve_practitioner_display(resource.get("practitioner")) or "—"
 
     def performer_display(self, order):
         """
