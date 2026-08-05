@@ -47,6 +47,40 @@
     <p class="muted">Patient demographics unavailable.</p>
   {% endif %}
 
+  <h2>Hospital Spells ({{ encounters|length }})</h2>
+  <p class="muted">
+    Distinct <code>Encounter</code> resources referenced by this
+    patient's orders/reports via <code>.encounter</code>.
+    <strong>Hospital Spell ID</strong> here lists <em>every</em>
+    identifier the Encounter itself carries (mostly Visit Number/Account
+    Number in practice, annotated with type and assigning organisation
+    where known) — the same-named column on the orders/reports tables
+    below instead picks just one value for that specific order/report.
+  </p>
+  {% if encounters %}
+    <table>
+      <tr>
+        <th>Start</th><th>End</th><th>Status</th><th>Class</th>
+        <th>Type</th><th>Service type</th><th>Hospital Spell ID</th>
+        <th class="muted">ID</th>
+      </tr>
+      {% for e in encounters %}
+        <tr>
+          <td>{{ (e.period.start if e.period else None) or "—" }}</td>
+          <td>{{ (e.period.end if e.period else None) or "—" }}</td>
+          <td>{{ e.status or "—" }}</td>
+          <td>{{ e.class|coding_text if e.class else "—" }}</td>
+          <td>{{ e.type|map('code_text')|join(", ") if e.type else "—" }}</td>
+          <td>{{ e.serviceType|code_text if e.serviceType else "—" }}</td>
+          <td>{{ (e|hospital_spell_identifiers)|join(", ") or "—" }}</td>
+          <td class="muted">{{ e.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No encounters found for this patient's orders/reports.</p>
+  {% endif %}
+
   <h2>Specimens ({{ specimens|length }})</h2>
   {% if specimens %}
     <table>
@@ -93,6 +127,7 @@
           {% endif %}
         </td>
         <td>{{ node.order|reason_code_reference }}</td>
+        <td>{{ (node.order|encounter_identifier) or "—" }}</td>
         <td class="muted">{{ node.order.id }}</td>
       </tr>
       {{ render_order_chain(node.children, depth + 1) }}
@@ -102,7 +137,7 @@
   <h2>Genomic test orders ({{ orders|length }})</h2>
   {% if orders %}
     <table>
-      <tr><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th><th>Requested by</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>ID</th></tr>
+      <tr><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th><th>Requested by</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>Hospital Spell ID</th><th>ID</th></tr>
       {{ render_order_chain(order_chains) }}
     </table>
     <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
@@ -127,6 +162,7 @@
             Originating order: —
           {% endif %}
         </span>
+        <span class="muted">— Hospital Spell ID: {{ (r|encounter_identifier) or (origin_order|encounter_identifier if origin_order else None) or "—" }}</span>
         {% if r.presentedForm %}
           <p>
             {% for pf in r.presentedForm %}

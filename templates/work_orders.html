@@ -73,6 +73,7 @@
           {% endif %}
         </td>
         <td>{{ node.order|reason_code_reference }}</td>
+        <td>{{ (node.order|encounter_identifier) or "—" }}</td>
         <td class="muted">{{ node.order.id }}</td>
       </tr>
       {{ render_order_chain(node.children, depth + 1) }}
@@ -86,7 +87,7 @@
       <tr>
         <th>Patient</th><th>Test</th><th>Status</th><th>Intent</th>
         <th><a href="{{ url_for('work_orders', start=start, end=end, org=selected_org, test=selected_test, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
-        <th>Requested by</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>ID</th>
+        <th>Requested by</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>Hospital Spell ID</th><th>ID</th>
       </tr>
       {{ render_order_chain(order_chains) }}
     </table>

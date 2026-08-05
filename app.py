@@ -113,6 +113,16 @@ def code_text(codeable_concept):
     return "—"
 
 
+def coding_text(coding):
+    """Best-effort human-readable text from a bare FHIR Coding (as opposed
+    to code_text()'s CodeableConcept, which wraps a coding list plus its
+    own `.text`) — used for Encounter.class, which R4 types as a single
+    Coding, not a CodeableConcept."""
+    if not coding:
+        return "—"
+    return coding.get("display") or coding.get("code") or "—"
+
+
 def code_value(codeable_concept):
     """First coding's raw `.code` from a FHIR CodeableConcept — ignores
     `.text`/`.display`, for when the code itself (not a human-readable
@@ -287,6 +297,7 @@ def slugify(text):
 
 app.jinja_env.filters["human_name"] = human_name
 app.jinja_env.filters["code_text"] = code_text
+app.jinja_env.filters["coding_text"] = coding_text
 app.jinja_env.filters["code_value"] = code_value
 app.jinja_env.filters["test_directory_code"] = FhirClient.test_directory_code
 app.jinja_env.filters["obs_value"] = obs_value
@@ -295,6 +306,8 @@ app.jinja_env.filters["specimen_received"] = specimen_received
 app.jinja_env.filters["specimen_identifier"] = FhirClient.specimen_identifier
 app.jinja_env.filters["placer_identifier"] = FhirClient.placer_identifier
 app.jinja_env.filters["filler_identifier"] = FhirClient.filler_identifier
+app.jinja_env.filters["encounter_identifier"] = lambda resource: client.hospital_spell_identifier(resource)
+app.jinja_env.filters["hospital_spell_identifiers"] = lambda encounter: client.hospital_spell_identifiers(encounter)
 app.jinja_env.filters["report_identifier"] = FhirClient.report_identifier
 app.jinja_env.filters["reason_code_reference"] = reason_code_reference
 app.jinja_env.filters["conclusion_code_reference"] = conclusion_code_reference
@@ -409,8 +422,21 @@ def patient_detail(patient_id):
         error = str(e)
     specimens = list(specimens_by_id.values())
     order_chains = client.build_order_chains(orders)
+    # Hospital Spell section: distinct Encounters referenced by this
+    # patient's orders/reports (encounters_for() dedupes by Encounter id).
+    # Resolving them here also warms the reference cache for the orders/
+    # reports tables' own "Hospital Spell ID" column below (rendered via
+    # the encounter_identifier Jinja filter), so those don't each trigger
+    # their own GET. Most recent spell first; an Encounter with no
+    # period.start sorts last.
+    encounters = sorted(
+        client.encounters_for(orders + reports),
+        key=lambda e: (e.get("period") or {}).get("start") or "",
+        reverse=True,
+    )
     return render_template(
         "patient.html", patient_id=patient_id, patient=patient,
+        encounters=encounters,
         nhs_number=FhirClient.nhs_number(patient),
         nhs_number_verification_status=FhirClient.nhs_number_verification_status(patient),
         igene_patient_id=FhirClient.igene_patient_identifier(patient),
@@ -1198,6 +1224,7 @@ def _order_report_row(order, report):
         "placer_id": FhirClient.placer_identifier(order) or "—",
         "igene_id": client.igene_report_identifier(order, report) or "—",
         "conclusion": conclusion or "—",
+        "spell_id": client.hospital_spell_identifier(order) or (client.hospital_spell_identifier(report) if report else None) or "—",
     }
 
 
@@ -1397,6 +1424,7 @@ def stats_organisation():
                 "placer_id": (FhirClient.placer_identifier(ordering_order) if ordering_order else None) or "—",
                 "igene_id": client.igene_report_identifier(ordering_order or {}, r) or "—",
                 "conclusion": "; ".join(code_text(cc) for cc in (r.get("conclusionCode") or [])) or "—",
+                "spell_id": (client.hospital_spell_identifier(ordering_order) if ordering_order else None) or client.hospital_spell_identifier(r) or "—",
             }
             if org == "Unknown":
                 row["requester_code"] = _requester_code(ordering_order)
@@ -1493,6 +1521,7 @@ def stats_ics():
                 "placer_id": (FhirClient.placer_identifier(ordering_order) if ordering_order else None) or "—",
                 "igene_id": client.igene_report_identifier(ordering_order or {}, r) or "—",
                 "conclusion": "; ".join(code_text(cc) for cc in (r.get("conclusionCode") or [])) or "—",
+                "spell_id": (client.hospital_spell_identifier(ordering_order) if ordering_order else None) or client.hospital_spell_identifier(r) or "—",
             })
 
         order_by_test = group_count(order_test_rows, "test")
@@ -1675,6 +1704,7 @@ def cepheid_results():
                 "collected_date": specimen_collected(specimen) if specimen else "—",
                 "received_date": specimen_received(specimen) if specimen else "—",
                 "specimen_id": (FhirClient.specimen_identifier(specimen) if specimen else None) or "—",
+                "spell_id": (client.hospital_spell_identifier(order) if order else None) or client.hospital_spell_identifier(report) or "—",
                 "observations": observation_rows(observations),
                 "components": component_rows(observations),
             })

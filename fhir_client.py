@@ -1521,6 +1521,116 @@ class FhirClient:
         assigned by the fulfilling/lab system."""
         return cls._identifier_by_type(order, cls.FILLER_IDENTIFIER_TYPE)
 
+    #: HL7 v2-0203 identifier-type codes for the two Hospital Spell
+    #: Identifier flavours NHS England's guidance describes — "AN"
+    #: (Account Number) and "VN" (Visit Number). A real example
+    #: (ServiceRequest/5743) carries system
+    #: http://terminology.hl7.org/CodeSystem/v2-0203, code "VN".
+    HOSPITAL_SPELL_IDENTIFIER_TYPES = {"AN": "Account number", "VN": "Visit number"}
+
+    @classmethod
+    def _identifier_type_label(cls, identifier):
+        """Human-readable label for an Identifier's `.type` — "Account
+        number"/"Visit number" for the AN/VN codes above, else that
+        type's own `.text`/coding `.display` if it has one, else None."""
+        type_cc = identifier.get("type") or {}
+        for coding in type_cc.get("coding", []):
+            label = cls.HOSPITAL_SPELL_IDENTIFIER_TYPES.get(coding.get("code"))
+            if label:
+                return label
+        return type_cc.get("text") or next(
+            (c.get("display") for c in type_cc.get("coding", []) if c.get("display")), None)
+
+    def _format_spell_identifier(self, identifier):
+        """"value (label — assigner)" for a Hospital Spell identifier —
+        label from _identifier_type_label() (e.g. "Visit number"),
+        assigner from _resolve_assigner_display() on the identifier's own
+        `.assigner` (same Reference-or-logical-reference resolution
+        placer_identifier_assigner()/medical_record_numbers() use).
+        Either half can be missing independently; falls all the way back
+        to the bare value if neither resolved. None if there's no value
+        at all."""
+        value = identifier.get("value")
+        if not value:
+            return None
+        label = self._identifier_type_label(identifier)
+        assigner = self._resolve_assigner_display(identifier.get("assigner"))
+        if label and assigner:
+            return f"{value} ({label} — {assigner})"
+        if label or assigner:
+            return f"{value} ({label or assigner})"
+        return value
+
+    def hospital_spell_identifier(self, resource):
+        """The Hospital Spell Identifier (NHS England's term for a hospital
+        provider spell / visit number — some trusts, e.g. Liverpool
+        Women's and Alder Hey, populate this as an account number),
+        annotated with which kind it is where known (e.g. "1001166717
+        (Visit number)").
+
+        Prefers the *inline* identifier on ServiceRequest.encounter /
+        DiagnosticReport.encounter — a FHIR *logical* reference
+        (Reference.identifier, a value inlined on the reference itself),
+        so no follow-up GET needed. Falls back to resolving the
+        referenced Encounter resource itself (`.encounter.reference`,
+        via the same resolve_reference() cache every other reference in
+        this file uses) when there's no inline identifier, and reading
+        *its* `.identifier` list — preferring one typed AN or VN if the
+        Encounter has more than one identifier, else its first one.
+        Multiple orders/reports from the same hospital stay share this
+        same value, so it's how they'd be traced back to one spell.
+
+        Returns None if there's no `encounter` at all, no inline
+        identifier, and either no `.reference` to fall back to or the
+        referenced Encounter doesn't resolve/has no identifier of its
+        own."""
+        if not resource:
+            return None
+        encounter_ref = resource.get("encounter") or {}
+
+        inline_identifier = encounter_ref.get("identifier")
+        if inline_identifier:
+            formatted = self._format_spell_identifier(inline_identifier)
+            if formatted:
+                return formatted
+
+        if not encounter_ref.get("reference"):
+            return None
+        encounter = self.resolve_reference(encounter_ref)
+        if not encounter:
+            return None
+
+        preferred, fallback = None, None
+        for ident in encounter.get("identifier", []):
+            if not ident.get("value"):
+                continue
+            type_codes = [c.get("code") for c in (ident.get("type") or {}).get("coding", [])]
+            if any(code in self.HOSPITAL_SPELL_IDENTIFIER_TYPES for code in type_codes):
+                preferred = ident
+                break
+            if fallback is None:
+                fallback = ident
+        chosen = preferred or fallback
+        return self._format_spell_identifier(chosen) if chosen else None
+
+    def hospital_spell_identifiers(self, encounter):
+        """Every identifier on an Encounter resource itself (as opposed to
+        hospital_spell_identifier()'s single "best" value resolved from a
+        ServiceRequest/DiagnosticReport) — in practice mostly Visit
+        Number/Account Number (HL7 v2-0203 codes VN/AN), each annotated
+        with its type label and assigning organisation the same way (see
+        _format_spell_identifier()), but shown as the full list since an
+        Encounter can carry more than one. Used by the patient page's
+        Hospital Spells table. Returns [] if there's no Encounter or it
+        has no identifiers with a value."""
+        if not encounter:
+            return []
+        return [
+            text for text in (
+                self._format_spell_identifier(ident) for ident in encounter.get("identifier", [])
+            ) if text
+        ]
+
     def placer_identifier_assigner(self, order):
         """Assigning-authority display (name and/or ODS code — see
         _name_with_ods()) for the placer order number's `Identifier.assigner`
@@ -1787,6 +1897,24 @@ class FhirClient:
             if spec:
                 specimens.append(spec)
         return specimens
+
+    def encounters_for(self, resources):
+        """Distinct Encounter resources referenced by `resources`' (a
+        patient's orders and reports) `.encounter.reference`, resolved
+        via resolve_reference()'s cache and deduplicated by Encounter id
+        — used by the patient page's Hospital Spell section. A resource
+        with no `.encounter`, or one whose reference doesn't resolve
+        (deleted/cross-server/etc.), just contributes nothing rather than
+        raising."""
+        encounters_by_id = {}
+        for resource in resources:
+            encounter_ref = (resource or {}).get("encounter") or {}
+            if not encounter_ref.get("reference"):
+                continue
+            encounter = self.resolve_reference(encounter_ref)
+            if encounter and encounter.get("id"):
+                encounters_by_id[encounter["id"]] = encounter
+        return list(encounters_by_id.values())
 
     # ---- Patient data clear-down (destructive) -------------------------
 

@@ -92,6 +92,7 @@
         </td>
       </tr>
       <tr><th>Filler number</th><td>{{ (order|filler_identifier) or "—" }}</td></tr>
+      <tr><th>Hospital Spell ID</th><td>{{ (order|encounter_identifier) or "—" }}</td></tr>
       <tr><th class="muted">ID</th><td class="muted">{{ order.id }}</td></tr>
     </table>
 

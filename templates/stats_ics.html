@@ -65,6 +65,7 @@
         <th>Date reported</th>
         <th>iGene report ID</th>
         <th>Placer number</th>
+        <th>Hospital Spell ID</th>
       </tr>
       {% for row in rows %}
         <tr>
@@ -96,6 +97,7 @@
               {{ row.placer_id }}
             {% endif %}
           </td>
+          <td>{{ row.spell_id }}</td>
         </tr>
       {% endfor %}
     </table>
