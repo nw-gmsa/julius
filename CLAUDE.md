@@ -90,6 +90,88 @@ directly-constructed clients like `scripts/fix_organization_names.py`.
   `SECRET_KEY` isn't set — works fine single-process, but invalidates every
   session on restart. Set `SECRET_KEY` for production deployments.
 
+### 413s on unfiltered system-wide searches (`fhir_client.py`)
+
+`import_econcur()`'s `Practitioner` preload, and separately
+`patients_in_nhs_number_ranges()`'s `Patient` search (the admin screen's
+test-patient finder), both 413 against a real server — this
+deployment's FHIR server is a **HealthConnect CDR** (Clinical Data
+Repository, per `FHIR_BASE_URL`'s `/healthconnect/cdr/fhir/r4` path) in
+front of an **InterSystems IRIS** database (see `iris_client.py`/
+`/data-quality` for the separate IRIS *SQL* connection this app also
+has). Two theories were tried and ruled out by testing against the real
+server before the actual cause was confirmed:
+
+1. ~~The result page itself (`_count=100`) is too large to
+   materialize.~~ Ruled out: `_get_with_count_backoff()`'s `_count`
+   halving (down to `FhirClient.MIN_SEARCH_COUNT` = 5) made no
+   difference.
+2. ~~The server rejects a search with no real filter parameter, only
+   `_count`.~~ Ruled out: `_search_all_split()`'s
+   `UNFILTERED_SEARCH_FALLBACK_PARAMS` fallback (a dummy always-true
+   `_lastUpdated` filter) still 413'd even with the parameter genuinely
+   present in the request.
+3. **Confirmed, via `_raise_for_status_with_detail()`'s surfaced error
+   text** ("The page was not displayed because the request entity is
+   too large") **and directly from someone who knows this deployment**:
+   a CDR aggregates data federated from multiple source
+   systems/organisations, and a query with no organisation scope at all
+   is too expensive for it to fan out — regardless of `_count` or an
+   unrelated dummy parameter, since neither actually narrows which
+   source systems need to be queried. The fix is **organisation-scoped
+   batching**, not a smaller page or an arbitrary extra parameter.
+
+Both ruled-out mechanisms (`_get_with_count_backoff()`,
+`UNFILTERED_SEARCH_FALLBACK_PARAMS`) are left in place regardless —
+harmless no-ops here, and each is still a plausible real fix for some
+*other* FHIR server's 413 behaviour, just not this one.
+`_raise_for_status_with_detail()` (surfacing a FHIR error response's
+`OperationOutcome` detail instead of just the bare HTTP status line —
+see `_get()`/`_put()`/`_post()`) is what actually found the real cause
+here and stays for the same reason: any future 413 (or other FHIR
+error) shows *why* in this app's error banners instead of an opaque
+status code.
+
+**The actual fix — `FhirClient._search_all_by_organization()`** — scopes
+a search to each Organization on the server one at a time (via the
+standard `organization` search param: `Patient.managingOrganization` /
+`PractitionerRole.organization`), pooling the results, instead of one
+unfiltered system-wide search:
+
+- `import_econcur()` preloads its `practitioners_by_gmc`/`roles_by_key`
+  matching dicts via one `PractitionerRole?organization=...&_include=
+  PractitionerRole:practitioner` search per Organization (replacing the
+  old `all_practitioners_by_gmc()`/`all_practitioner_roles_by_practitioner_org()`,
+  both now deleted — no other callers). This can't *fully* replace a
+  global by-GMC lookup on its own, though: a Practitioner who already
+  exists but whose only role is at an organisation this preload can't
+  see (e.g. no ODS-code identifier on that Organization, so it's not in
+  `all_organizations_by_ods()`'s dict at all) wouldn't be found by it.
+  `_import_econcur_row()` covers that gap with `_find_practitioner_by_gmc()`
+  — a single targeted `Practitioner?identifier=<gmc-system>|<gmc>`
+  search (matches at most one resource, so stays well inside whatever
+  makes an unscoped query too expensive) whenever the org-batched
+  preload comes up empty for a GMC number, before concluding "create
+  new". Found-via-fallback practitioners are cached into
+  `practitioners_by_gmc` too, so a later row for the same GMC number
+  (very common — one consultant can hold roles at several trusts)
+  doesn't repeat the search.
+- `patients_in_nhs_number_ranges()` fetches `Patient` the same way, one
+  Organization at a time, plus one best-effort extra
+  `Patient?organization:missing=true` search afterwards to catch
+  patients with no `managingOrganization` at all (same fallback-modifier
+  pattern `orphaned_service_requests()` uses for `subject:missing`;
+  swallowed on failure rather than losing what the per-organisation
+  searches already found).
+- **`all_organizations_by_ods()` itself is still one unfiltered
+  `Organization?_count=100` search** — the one remaining "fetch
+  everything" query in this app, kept because there's no smaller unit to
+  batch it by, and because Organization is presumably a much smaller
+  table than Practitioner/Patient on this CDR (hasn't been seen to 413).
+  **If it ever does**, it needs its own partition key (an ODS region
+  code, alphabetical range, ...) — there's no way to batch "fetch every
+  organisation" *by* organisation.
+
 ### Category codes come from the IG, not guesses
 
 - `ServiceRequest.category:GenomicProcedure` → SNOMED `116148004`
@@ -870,23 +952,55 @@ Dry-run vs apply follows `scripts/fix_organization_names.py`'s
 `--apply` convention: dry run computes and shows the exact counts apply
 would produce without calling `_post()`/`_put()`.
 
-Matching, so a re-run only writes what actually changed:
-- `Practitioner`, by GMC-number identifier (`GMC_NUMBER_SYSTEM`) — name
-  updated if it differs, created if the GMC number is unseen.
+Matching, so a re-run doesn't duplicate — but **`Practitioner` and
+`Organization` are create-only**: once matched, neither is ever
+rewritten, even if `econcur.csv`'s data for it has since changed (this
+replaced an earlier "update if it differs" design for `Practitioner`,
+which — combined with the full-table preloads below — was a plausible
+contributor to a `413` on a live server, since a re-run against a
+~75,000-row export could mean thousands of `PUT`s every single time
+regardless of whether anything real had changed):
+- `Practitioner`, by GMC-number identifier (`GMC_NUMBER_SYSTEM`) —
+  created if the GMC number is unseen, left untouched
+  (`practitioners_matched`) if it already exists.
 - `Organization` (the row's location organisation code, an ODS trust
   code), by ODS-code identifier (`ODS_ORGANIZATION_CODE_SYSTEM`) — an
   unmatched code gets a minimal stub `Organization` created (ODS code
-  only, no name) rather than the row being skipped;
-  `scripts/fix_organization_names.py` can backfill the name later.
+  only, no name) rather than the row being skipped; an existing one is
+  left untouched (`organizations_matched`). `scripts/fix_organization_names.py`
+  is still how a stub's name gets backfilled, not this import.
 - `PractitionerRole`, by the `(practitioner, organization)` pair, since
   one consultant can hold more than one active membership (separate
-  `econcur.csv` rows, same GMC, different org code) — specialty updated
-  if it differs, created if the pair is unseen.
+  `econcur.csv` rows, same GMC, different org code). A new role is
+  created with **three identifiers**: a composite GMC+ODS identifier on
+  the role itself (`PRACTITIONER_ROLE_GMC_ODS_SYSTEM` =
+  `https://fhir.nwgenomics.nhs.uk/Identifier/PractitionerRole-GMC-ODS`,
+  value `"<gmc>-<ods>"`), plus an `identifier` (not just a bare
+  `.reference`) on each of the role's own `practitioner`/`organization`
+  references, carrying that target's GMC number / ODS code respectively
+  — so a `PractitionerRole` resource is self-describing about who/where
+  it's for without needing to dereference either link. **A role that
+  already carries all three identifiers is "settled" and is never
+  updated again** (`roles_unchanged`,
+  `FhirClient._econcur_role_has_identifiers()`) — same create-only
+  reasoning as `Practitioner`/`Organization` above, and for the same
+  reason (this was the other half of the write-volume-per-rerun problem:
+  a specialty-diff check on every one of tens of thousands of roles,
+  every run). A role that predates this identifier scheme (missing one
+  or more) gets them backfilled **once** — refreshing `specialty` to
+  match `econcur.csv` at the same time, since it's already being written
+  (`roles_updated`) — which is what makes it settled from then on.
 
-All three lookups are preloaded once per run (`all_practitioners_by_gmc()`
-/ `all_organizations_by_ods()` / `all_practitioner_roles_by_practitioner_org()`)
-rather than searched per row — the file is too large for a search-per-row
-approach to be practical. `MAIN_SPECIALTY_CODE_SYSTEM` (UK Core's
+The Practitioner/PractitionerRole matching dicts are preloaded once per
+run, **organisation by organisation** (`_search_all_by_organization()`),
+rather than searched per row or via one unfiltered system-wide dump —
+the latter is what actually 413'd on a live server; see "413s on
+unfiltered system-wide searches" above for the full story, including the
+per-GMC fallback search (`_find_practitioner_by_gmc()`) that covers the
+one gap organisation-batching alone can't. `Organization` itself
+(`all_organizations_by_ods()`) is still one unfiltered search — the org
+list this batching is built *from* obviously can't itself be batched by
+organisation. `MAIN_SPECIALTY_CODE_SYSTEM` (UK Core's
 `https://fhir.hl7.org.uk/CodeSystem/UKCore-PracticeSettingCode`) is used
 for `PractitionerRole.specialty.coding.system`; the bare specialty code
 (e.g. `"300"`) is stored regardless of whether that URI is the one this

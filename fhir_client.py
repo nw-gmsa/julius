@@ -109,13 +109,45 @@ class FhirClient:
     def _headers(self):
         return {"Accept": "application/fhir+json"}
 
+    @staticmethod
+    def _raise_for_status_with_detail(resp):
+        """Like resp.raise_for_status(), but folds the response body's
+        own detail into the exception message when there is one. A FHIR
+        error response is normally an OperationOutcome with a
+        human-readable issue[].diagnostics/.details.text explaining
+        *why* — requests.HTTPError's default str() is just "<code>
+        <reason> for url: <url>" (e.g. the unhelpful "413 Client Error:
+        OK for url: ..." this app's error banners were showing, with no
+        way to tell from the UI what the server actually objected to).
+        Falls back to raw response text (truncated) if the body isn't a
+        parseable OperationOutcome, and to plain raise_for_status()'s
+        behaviour if there's no body at all."""
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            detail = None
+            try:
+                body = resp.json()
+                if body.get("resourceType") == "OperationOutcome":
+                    texts = []
+                    for issue in body.get("issue", []):
+                        text = issue.get("diagnostics") or (issue.get("details") or {}).get("text") or issue.get("code")
+                        if text:
+                            texts.append(text)
+                    detail = "; ".join(texts) or None
+            except ValueError:
+                detail = (resp.text or "").strip()[:500] or None
+            if detail:
+                raise requests.HTTPError(f"{e} — {detail}", response=resp) from e
+            raise
+
     def _get(self, path, params=None):
         url = f"{self.base_url}/{path.lstrip('/')}"
         resp = requests.get(
             url, headers=self._headers(), params=params or {},
             auth=self._auth(), verify=self.verify_ssl, timeout=15,
         )
-        resp.raise_for_status()
+        self._raise_for_status_with_detail(resp)
         return resp.json()
 
     def _delete(self, path):
@@ -156,7 +188,7 @@ class FhirClient:
             headers={**self._headers(), "Content-Type": "application/fhir+json"},
             auth=self._auth(), verify=self.verify_ssl, timeout=15,
         )
-        resp.raise_for_status()
+        self._raise_for_status_with_detail(resp)
         if not resp.content:
             return None
         try:
@@ -183,7 +215,7 @@ class FhirClient:
             headers={**self._headers(), "Content-Type": "application/fhir+json"},
             auth=self._auth(), verify=self.verify_ssl, timeout=15,
         )
-        resp.raise_for_status()
+        self._raise_for_status_with_detail(resp)
         if resp.content:
             try:
                 body = resp.json()
@@ -229,13 +261,72 @@ class FhirClient:
             if rtype and rid:
                 self._ref_cache[f"{rtype}/{rid}"] = resource
 
+    #: Floor for _get_with_count_backoff()'s halving retry below — if even
+    #: this small a page still 413s, something other than result-set size
+    #: is wrong, so it's left to raise rather than retrying forever.
+    MIN_SEARCH_COUNT = 5
+
+    #: This FHIR server (InterSystems IRIS) rejects a search whose only
+    #: parameter is `_count` — a genuinely unfiltered "give me every X
+    #: system-wide" query 413s regardless of `_count`'s value, which is
+    #: why _get_with_count_backoff()'s halving retry alone doesn't fix
+    #: this specific failure (confirmed: shrinking `_count` made no
+    #: difference — the request needs an actual search parameter, not a
+    #: smaller page). `_search_all_split()` below adds this trivially-
+    #: true `_lastUpdated` filter automatically whenever `params` would
+    #: otherwise be `_count`-only, rather than every "fetch every X
+    #: system-wide" caller needing to remember to add a throwaway filter
+    #: itself. `gt1900-01-01` matches every real resource (a valid
+    #: `meta.lastUpdated` can't predate the FHIR server's own existence),
+    #: so this doesn't drop any data — it's a filter in form only.
+    UNFILTERED_SEARCH_FALLBACK_PARAMS = {"_lastUpdated": "gt1900-01-01"}
+
+    def _get_with_count_backoff(self, resource_type, params):
+        """GET `resource_type` with `params`, halving `_count` and
+        retrying on a 413 rather than failing outright — seen on a real
+        server for both Practitioner (import_econcur()'s preloads) and
+        Patient (patients_in_nhs_number_ranges()) searches, even at a
+        fairly modest _count=100. Same "server chokes on materializing a
+        result set, not on anything about the query itself" failure mode
+        verify_credentials()'s _summary=count workaround exists for (see
+        its docstring) — that workaround only proves credentials are
+        accepted without materializing any resources, so it doesn't help
+        here, where the caller actually needs the resources back. Only
+        retries when `params` has a `_count` to shrink, and only on 413;
+        re-raises immediately once `_count` is down to MIN_SEARCH_COUNT,
+        or for any other status."""
+        request_params = dict(params)
+        while True:
+            try:
+                return self._get(resource_type, request_params)
+            except requests.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                count = request_params.get("_count")
+                if status != 413 or not count or count <= self.MIN_SEARCH_COUNT:
+                    raise
+                request_params["_count"] = max(count // 2, self.MIN_SEARCH_COUNT)
+
     def _search_all_split(self, resource_type, params, max_pages=10):
         """Like _search_all(), but keeps _include/_revinclude'd resources
         separate from primary matches (see _split_bundle), across however
         many pages are followed. Used for system-wide queries that aren't
-        scoped to one patient and can span many results."""
+        scoped to one patient and can span many results.
+
+        If `params` has no real filter beyond `_count` (a genuine
+        "fetch every X system-wide" query), UNFILTERED_SEARCH_FALLBACK_PARAMS
+        is added first — this server rejects a `_count`-only search
+        outright (see that constant's docstring). The first page is then
+        fetched via _get_with_count_backoff() (see its docstring) so a
+        413 from an oversized page *also* shrinks `_count` and retries,
+        independently of the fallback-filter fix above — subsequent
+        pages are followed via Bundle.link[rel=next] URLs, which already
+        bake in whatever params the first page's request succeeded with.
+        """
+        request_params = dict(params)
+        if set(request_params) <= {"_count"}:
+            request_params.update(self.UNFILTERED_SEARCH_FALLBACK_PARAMS)
         all_matches, all_included = [], []
-        bundle = self._get(resource_type, params)
+        bundle = self._get_with_count_backoff(resource_type, request_params)
         matches, included = self._split_bundle(bundle)
         all_matches.extend(matches)
         all_included.extend(included)
@@ -246,7 +337,7 @@ class FhirClient:
                 break
             resp = requests.get(next_url, headers=self._headers(), auth=self._auth(),
                                  verify=self.verify_ssl, timeout=15)
-            resp.raise_for_status()
+            self._raise_for_status_with_detail(resp)
             bundle = resp.json()
             matches, included = self._split_bundle(bundle)
             all_matches.extend(matches)
@@ -2090,11 +2181,35 @@ class FhirClient:
         any of `ranges` (see nhs_number_in_ranges()) — used by the admin
         screen to find test/synthetic patients to purge. FHIR identifier
         search is exact-match only (no numeric range support), so this
-        fetches every Patient system-wide (paginated via _search_all, same
-        1,000-record cap as other system-wide queries in this file) and
-        filters client-side.
+        needs every Patient and filters client-side — but not via one
+        unfiltered system-wide search: a real HealthConnect CDR (this
+        app's FHIR_BASE_URL) 413s on that regardless of `_count` or an
+        unrelated filter parameter (see "413s on unfiltered system-wide
+        searches" in CLAUDE.md). Instead, fetched one organisation at a
+        time (`_search_all_by_organization()`, via
+        `Patient.managingOrganization`) — organisation-scoped batching
+        was the fix confirmed to actually work against this server.
+
+        A Patient with no `managingOrganization` at all wouldn't be
+        found by any of those organisation-scoped searches — best-effort
+        caught via one extra `organization:missing=true` search
+        afterwards (same fallback-modifier pattern
+        orphaned_service_requests() uses for `subject:missing`; not
+        confirmed this server supports the `:missing` modifier, so a
+        failure there is swallowed rather than losing the results
+        already gathered per-organisation).
         """
-        patients = self._search_all("Patient", {"_count": 100})
+        organizations = self.all_organizations_by_ods().values()
+        patients, _ = self._search_all_by_organization("Patient", organizations)
+        seen_ids = {p["id"] for p in patients if p.get("id")}
+        try:
+            unassigned = self._search_all("Patient", {"organization:missing": "true", "_count": 20})
+            for p in unassigned:
+                if p.get("id") not in seen_ids:
+                    patients.append(p)
+                    seen_ids.add(p.get("id"))
+        except requests.HTTPError:
+            pass
         return [p for p in patients if self.nhs_number_in_ranges(p, ranges)]
 
     def orphaned_service_requests(self):
@@ -2549,6 +2664,18 @@ class FhirClient:
     #: coding as belonging to a recognised system.
     MAIN_SPECIALTY_CODE_SYSTEM = "https://fhir.hl7.org.uk/CodeSystem/UKCore-PracticeSettingCode"
 
+    #: Composite identifier system for the PractitionerRole itself,
+    #: uniquely identifying a (practitioner, organization) membership by
+    #: GMC number + ODS code — import_econcur()'s own business key for
+    #: this specific role, distinct from GMC_NUMBER_SYSTEM/
+    #: ODS_ORGANIZATION_CODE_SYSTEM (which identify the Practitioner/
+    #: Organization resources, not the role). A PractitionerRole carrying
+    #: this identifier (plus an identifier on each of its `practitioner`/
+    #: `organization` references — see _import_econcur_row()) is treated
+    #: as "settled": import_econcur() never updates it again once all
+    #: three are present (see _econcur_role_has_identifiers()).
+    PRACTITIONER_ROLE_GMC_ODS_SYSTEM = "https://fhir.nwgenomics.nhs.uk/Identifier/PractitionerRole-GMC-ODS"
+
     #: econcur.csv column indexes (0-based), per the ODS Reference Data
     #: Catalogue's "Hospital Consultants" spec — 13 columns, no header:
     #:   0 GMC code, 1 ODS practitioner code (GMC code prefixed "C"),
@@ -2612,24 +2739,17 @@ class FhirClient:
             return name, []
         return " ".join(parts[:-1]), [parts[-1]]
 
-    def all_practitioners_by_gmc(self, max_pages=100):
-        """Every Practitioner on this server with a GMC-number identifier,
-        keyed by that number. Used to preload import_econcur()'s matching
-        step as one paginated query up front, rather than one Practitioner
-        search per econcur.csv row (tens of thousands of rows)."""
-        practitioners = self._search_all("Practitioner", {"_count": 100}, max_pages=max_pages)
-        by_gmc = {}
-        for p in practitioners:
-            gmc = self._identifier_value(p, self.GMC_NUMBER_SYSTEM)
-            if gmc:
-                by_gmc[gmc] = p
-        return by_gmc
-
     def all_organizations_by_ods(self, max_pages=100):
         """Every Organization on this server with an ODS-code identifier,
-        keyed by that code — the same preload idea as
-        all_practitioners_by_gmc(), reusing organisation_ods_code()'s
-        existing system/fallback lookup."""
+        keyed by that code. Still one unfiltered system-wide search —
+        unlike Practitioner/PractitionerRole/Patient below, Organization
+        hasn't (yet) been seen to 413 on a real server, presumably
+        because there are far fewer organisations than practitioners or
+        patients on this CDR. If this one starts 413ing too, it needs
+        the same organisation-batching treatment as the others — though
+        that's circular for Organization itself, so it would need a
+        different partition key (ODS region code, alphabetical range,
+        etc.)."""
         orgs = self._search_all("Organization", {"_count": 100}, max_pages=max_pages)
         by_ods = {}
         for o in orgs:
@@ -2638,58 +2758,100 @@ class FhirClient:
                 by_ods[ods] = o
         return by_ods
 
-    def all_practitioner_roles_by_practitioner_org(self, max_pages=100):
-        """Every PractitionerRole on this server, keyed by (practitioner
-        reference, organization reference) — the third preload
-        import_econcur() needs, since a consultant's role at a specific
-        trust is what's actually being created/updated per econcur.csv
-        row (one consultant can hold more than one, at different
-        trusts)."""
-        roles = self._search_all("PractitionerRole", {"_count": 100}, max_pages=max_pages)
-        by_key = {}
-        for r in roles:
-            practitioner_ref = (r.get("practitioner") or {}).get("reference")
-            organization_ref = (r.get("organization") or {}).get("reference")
-            if practitioner_ref and organization_ref:
-                by_key[(practitioner_ref, organization_ref)] = r
-        return by_key
+    def _find_practitioner_by_gmc(self, gmc):
+        """Single, targeted Practitioner lookup by GMC-number identifier
+        — matches at most one resource, so unlike an unfiltered
+        `Practitioner` search this stays well inside whatever makes this
+        CDR (HealthConnect, per FHIR_BASE_URL) reject a genuinely
+        unscoped query (see "413s on unfiltered system-wide searches" in
+        CLAUDE.md — confirmed on a real server that neither a smaller
+        `_count` nor an unrelated dummy filter parameter avoids this;
+        the fix that actually worked was scoping the *search itself* to
+        something narrow, per the CDR's suggested fix of batching by
+        organisation — this is the same idea applied per-identifier
+        instead, for the one case org-batching alone can't cover, see
+        _import_econcur_row()). Returns the first match, or None."""
+        bundle = self._get("Practitioner", {"identifier": f"{self.GMC_NUMBER_SYSTEM}|{gmc}", "_count": 1})
+        entries = self._entries(bundle)
+        return entries[0] if entries else None
 
-    @staticmethod
-    def _econcur_name_matches(existing_name, family, given):
-        """Whether an existing Practitioner.name[0] already has this
-        family/given — compared field-by-field rather than as a whole
-        dict, since a server may round-trip extra fields (an `id`, `use`,
-        `period`, ...) on what it stores that a naive equality check would
-        see as "changed" forever and rewrite every re-import."""
-        if not existing_name:
-            return False
-        return existing_name.get("family") == family and (existing_name.get("given") or []) == given
+    def _search_all_by_organization(self, resource_type, organizations, extra_params=None, count=50, max_pages_per_org=20):
+        """Fetches `resource_type` resources scoped to each Organization
+        in `organizations` — one org at a time, via the standard
+        `organization` search param (Patient.managingOrganization /
+        PractitionerRole.organization) — instead of one unfiltered
+        system-wide search. This CDR 413s on the latter regardless of
+        `_count` or an unrelated extra parameter (see "413s on
+        unfiltered system-wide searches" in CLAUDE.md); scoping each
+        individual query to one real organisation is what actually
+        avoids it, matching the fix suggested against the real server.
+        `organizations` is any iterable of Organization resources with
+        an `id` (e.g. `all_organizations_by_ods().values()`); one
+        without an `id` is skipped. Returns (matches, included) pooled
+        across every organisation's own paginated search — a resource
+        this server has attributed to more than one organisation isn't
+        expected, but would just appear once per org here (harmless:
+        every caller of this method keys its own result by the
+        resource's own id/identifier, which naturally de-dupes)."""
+        all_matches, all_included = [], []
+        for organization in organizations:
+            org_id = organization.get("id")
+            if not org_id:
+                continue
+            params = {"organization": f"Organization/{org_id}", "_count": count}
+            if extra_params:
+                params.update(extra_params)
+            matches, included = self._search_all_split(resource_type, params, max_pages=max_pages_per_org)
+            all_matches.extend(matches)
+            all_included.extend(included)
+        return all_matches, all_included
 
-    @staticmethod
-    def _econcur_specialty_codes(role):
-        """The flat list of specialty codes on an existing PractitionerRole
-        — just the `.code` values, ignoring `system`/extra coding fields a
-        server might add — so import_econcur()'s change-detection compares
-        like-for-like against econcur.csv's own bare codes."""
-        codes = []
-        for concept in role.get("specialty") or []:
-            for coding in concept.get("coding") or []:
-                if coding.get("code"):
-                    codes.append(coding["code"])
-        return codes
+    @classmethod
+    def _econcur_role_has_identifiers(cls, role):
+        """Whether an existing PractitionerRole already carries all three
+        identifiers import_econcur() writes on create — the composite
+        GMC+ODS identifier (PRACTITIONER_ROLE_GMC_ODS_SYSTEM) on the role
+        itself, plus an `identifier` on each of its `practitioner`/
+        `organization` references. Once all three are present, the role
+        is treated as "settled" and import_econcur() never updates it
+        again (see _import_econcur_row()) — a role missing one or more
+        (i.e. created before this identifier scheme existed) gets them
+        backfilled instead, one time, which is what makes it settled
+        from then on."""
+        has_role_identifier = any(
+            ident.get("system") == cls.PRACTITIONER_ROLE_GMC_ODS_SYSTEM
+            for ident in role.get("identifier", [])
+        )
+        has_practitioner_identifier = bool((role.get("practitioner") or {}).get("identifier"))
+        has_organization_identifier = bool((role.get("organization") or {}).get("identifier"))
+        return has_role_identifier and has_practitioner_identifier and has_organization_identifier
 
     def _import_econcur_row(self, parsed, apply, practitioners_by_gmc, organizations_by_ods, roles_by_key, result):
-        """One econcur.csv row's worth of create-or-update work, shared by
+        """One econcur.csv row's worth of create-or-match work, shared by
         import_econcur()'s per-row loop. Mutates the three preloaded dicts
         in place so a later row referencing the same GMC number or ODS
         code (very common — see the column map above) reuses what this
         row just created instead of creating a second copy, whether or
         not `apply` is actually writing anything (see the "pending-"
-        placeholder ids below for the dry-run case)."""
+        placeholder ids below for the dry-run case).
+
+        Practitioner and Organization are create-only: once a GMC number
+        or ODS code has a matching resource, it's left alone forever,
+        even if econcur.csv's name for it has since changed — see
+        import_econcur()'s docstring for why."""
         gmc = parsed["gmc"]
         family, given = self._split_econcur_name(parsed["name"])
 
         practitioner = practitioners_by_gmc.get(gmc)
+        if practitioner is None:
+            # Not seen via the organisation-batched preload — could
+            # genuinely be new, or could already exist with a role only
+            # at an organisation not yet reached in this run (or with no
+            # role at all yet). A single targeted identifier search is
+            # cheap enough for this CDR even though an unfiltered
+            # Practitioner dump isn't (see _find_practitioner_by_gmc()),
+            # so it's worth checking before concluding "create new".
+            practitioner = self._find_practitioner_by_gmc(gmc)
         if practitioner is None:
             new_practitioner = {
                 "resourceType": "Practitioner",
@@ -2708,16 +2870,13 @@ class FhirClient:
                 practitioner = {**new_practitioner, "id": f"pending-{gmc}"}
             practitioners_by_gmc[gmc] = practitioner
             result["practitioners_created"] += 1
-        elif not self._econcur_name_matches((practitioner.get("name") or [None])[0], family, given):
-            if apply:
-                updated = dict(practitioner)
-                updated["name"] = [{"text": parsed["name"], "family": family, "given": given}]
-                self._put(f"Practitioner/{practitioner['id']}", updated)
-                practitioner = updated
-                practitioners_by_gmc[gmc] = practitioner
-            result["practitioners_updated"] += 1
         else:
-            result["practitioners_unchanged"] += 1
+            # Cache it (whether it came from the preload dict already, or
+            # from the fallback identifier search just above) so a later
+            # row for the same GMC number — very common, see the column
+            # map above — doesn't repeat that search.
+            practitioners_by_gmc[gmc] = practitioner
+            result["practitioners_matched"] += 1
 
         org_code = parsed["org_code"]
         organization = organizations_by_ods.get(org_code)
@@ -2739,6 +2898,8 @@ class FhirClient:
                 organization = {**new_org, "id": f"pending-org-{org_code}"}
             organizations_by_ods[org_code] = organization
             result["organizations_created"] += 1
+        else:
+            result["organizations_matched"] += 1
 
         practitioner_ref = f"Practitioner/{practitioner['id']}"
         organization_ref = f"Organization/{organization['id']}"
@@ -2747,13 +2908,27 @@ class FhirClient:
             {"coding": [{"system": self.MAIN_SPECIALTY_CODE_SYSTEM, "code": code}]}
             for code in parsed["specialties"]
         ]
+        # Both references carry their target's own business identifier
+        # alongside the internal .reference, and the role itself carries
+        # a composite GMC+ODS identifier — see PRACTITIONER_ROLE_GMC_ODS_SYSTEM
+        # and _econcur_role_has_identifiers() for what these are for.
+        practitioner_ref_obj = {
+            "reference": practitioner_ref,
+            "identifier": {"system": self.GMC_NUMBER_SYSTEM, "value": gmc},
+        }
+        organization_ref_obj = {
+            "reference": organization_ref,
+            "identifier": {"system": self.ODS_ORGANIZATION_CODE_SYSTEM, "value": org_code},
+        }
+        role_identifier = {"system": self.PRACTITIONER_ROLE_GMC_ODS_SYSTEM, "value": f"{gmc}-{org_code}"}
 
         role = roles_by_key.get(role_key)
         if role is None:
             new_role = {
                 "resourceType": "PractitionerRole",
-                "practitioner": {"reference": practitioner_ref},
-                "organization": {"reference": organization_ref},
+                "identifier": [role_identifier],
+                "practitioner": practitioner_ref_obj,
+                "organization": organization_ref_obj,
                 "specialty": specialty,
             }
             if apply:
@@ -2766,36 +2941,64 @@ class FhirClient:
                 role = {**new_role, "id": f"pending-role-{gmc}-{org_code}"}
             roles_by_key[role_key] = role
             result["roles_created"] += 1
-        elif sorted(self._econcur_specialty_codes(role)) != sorted(parsed["specialties"]):
+        elif self._econcur_role_has_identifiers(role):
+            # Settled — carries all three identifiers already, so never
+            # updated again, even if its specialty no longer matches
+            # econcur.csv (same "create-only once identified" reasoning
+            # as Practitioner/Organization above).
+            result["roles_unchanged"] += 1
+        else:
+            # A legacy role predating this identifier scheme — backfilled
+            # once (identifiers plus a specialty refresh while already
+            # writing), which is what makes it settled for next time.
             if apply:
                 updated_role = dict(role)
+                updated_role["identifier"] = [role_identifier]
+                updated_role["practitioner"] = practitioner_ref_obj
+                updated_role["organization"] = organization_ref_obj
                 updated_role["specialty"] = specialty
                 self._put(f"PractitionerRole/{role['id']}", updated_role)
                 roles_by_key[role_key] = updated_role
             result["roles_updated"] += 1
-        else:
-            result["roles_unchanged"] += 1
 
     def import_econcur(self, csv_text, apply=False, progress=None):
         """
         Imports an econcur.csv export (see fetch_econcur_csv()) as
         Practitioner + PractitionerRole resources on this FHIR server.
 
-        Matching, so re-running this updates rather than duplicates:
+        Matching, so re-running this doesn't duplicate — but Practitioner
+        and Organization are **create-only**: once one exists, it's never
+        rewritten, even if econcur.csv's data for it has since changed.
           - Practitioner, by GMC-number identifier (GMC_NUMBER_SYSTEM) —
-            an existing one gets its name updated if it differs; an
-            unseen GMC number gets a new Practitioner.
+            an unseen GMC number gets a new Practitioner; an existing one
+            is left alone (`practitioners_matched`).
           - Organization (the row's location organisation code, an ODS
             trust code), by ODS-code identifier
             (ODS_ORGANIZATION_CODE_SYSTEM) — an unmatched code gets a
-            minimal stub Organization created (see _import_econcur_row).
+            minimal stub Organization created (see _import_econcur_row);
+            an existing one is left alone (`organizations_matched`).
+            `fix_organization_names.py` is still how a stub's name gets
+            backfilled, not this import.
           - PractitionerRole, by the (practitioner, organization) pair —
             one consultant can hold more than one active membership
-            (separate rows, same GMC, different org code); an existing
-            role gets its specialty updated if it differs, an unseen pair
-            gets a new PractitionerRole.
+            (separate rows, same GMC, different org code). A new role
+            gets created with three identifiers: a composite GMC+ODS
+            identifier on the role itself
+            (PRACTITIONER_ROLE_GMC_ODS_SYSTEM), plus the target
+            Practitioner's GMC number / Organization's ODS code as an
+            `identifier` on the role's own `practitioner`/`organization`
+            references (not just a bare `.reference`). **A role that
+            already carries all three is "settled" and never updated
+            again** (`roles_unchanged` — see
+            `_econcur_role_has_identifiers()`), same create-only
+            reasoning as Practitioner/Organization. A role from before
+            this identifier scheme existed (missing one or more) gets
+            them backfilled once, refreshing `specialty` to match
+            econcur.csv at the same time since it's already being
+            written (`roles_updated`) — after that one backfill it's
+            settled too.
 
-        apply=False (the default) runs the full matching/diff logic and
+        apply=False (the default) runs the full matching logic and
         returns exactly the counts apply=True would produce, without
         calling _post()/_put() — same dry-run convention as
         scripts/fix_organization_names.py's --apply flag.
@@ -2807,19 +3010,56 @@ class FhirClient:
         when apply=True). A row that raises requests.RequestException (a
         create/update that failed) is recorded in result["errors"] and
         the import continues rather than aborting.
+
+        The Practitioner/PractitionerRole matching dicts are preloaded
+        by *organisation* (`_search_all_by_organization()`, one
+        `PractitionerRole?organization=...&_include=...:practitioner`
+        search per Organization on the server) rather than one
+        unfiltered system-wide search — a real HealthConnect CDR (this
+        app's FHIR_BASE_URL) 413s on the latter regardless of `_count`
+        or an unrelated filter parameter (see "413s on unfiltered
+        system-wide searches" in CLAUDE.md), and organisation-scoped
+        batching was the fix confirmed to actually work against it. This
+        can't fully replace a global-by-GMC lookup on its own, though: a
+        Practitioner who already exists but only has a role at an
+        organisation this preload hasn't reached yet wouldn't be found
+        by it — _import_econcur_row() covers that gap with a single
+        targeted per-GMC search (_find_practitioner_by_gmc()) whenever
+        the org-batched preload comes up empty, rather than risking a
+        duplicate Practitioner.
         """
         rows = list(csv.reader(io.StringIO(csv_text)))
         total = len(rows)
 
-        practitioners_by_gmc = self.all_practitioners_by_gmc()
         organizations_by_ods = self.all_organizations_by_ods()
-        roles_by_key = self.all_practitioner_roles_by_practitioner_org()
+
+        practitioners_by_gmc = {}
+        roles_by_key = {}
+        role_matches, role_included = self._search_all_by_organization(
+            "PractitionerRole", organizations_by_ods.values(),
+            extra_params={"_include": "PractitionerRole:practitioner"},
+        )
+        practitioners_by_id = {
+            r["id"]: r for r in role_included
+            if r.get("resourceType") == "Practitioner" and r.get("id")
+        }
+        for role in role_matches:
+            practitioner_ref = (role.get("practitioner") or {}).get("reference")
+            organization_ref = (role.get("organization") or {}).get("reference")
+            if practitioner_ref and organization_ref:
+                roles_by_key[(practitioner_ref, organization_ref)] = role
+            if practitioner_ref and practitioner_ref.startswith("Practitioner/"):
+                practitioner = practitioners_by_id.get(practitioner_ref.split("/", 1)[1])
+                if practitioner:
+                    gmc = self._identifier_value(practitioner, self.GMC_NUMBER_SYSTEM)
+                    if gmc:
+                        practitioners_by_gmc[gmc] = practitioner
 
         result = {
             "total_rows": total,
             "invalid_rows": 0,
-            "practitioners_created": 0, "practitioners_updated": 0, "practitioners_unchanged": 0,
-            "organizations_created": 0,
+            "practitioners_created": 0, "practitioners_matched": 0,
+            "organizations_created": 0, "organizations_matched": 0,
             "roles_created": 0, "roles_updated": 0, "roles_unchanged": 0,
             "errors": [],
         }

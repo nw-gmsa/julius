@@ -12,11 +12,17 @@
     <a href="https://digital.nhs.uk/services/organisation-data-service/data-search-and-export/csv-downloads/miscellaneous">NHS Digital: ODS CSV downloads</a>)
     as <code>Practitioner</code> + <code>PractitionerRole</code> resources
     on this FHIR server. Matches existing entries by GMC number, so
-    re-running this <strong>updates</strong> them rather than creating
-    duplicates — see <code>FhirClient.import_econcur()</code> for the exact
-    matching rules. A location organisation code with no matching
+    re-running this doesn't create duplicates — but <code>Practitioner</code>
+    and <code>Organization</code> are <strong>create-only</strong>: once one
+    exists it's never rewritten, even if econcur.csv's data for it has
+    since changed. A location organisation code with no matching
     <code>Organization</code> on this server gets a minimal stub one
     created (ODS code only, no name) rather than the row being skipped.
+    <code>PractitionerRole</code> is created with a composite GMC+ODS
+    identifier plus an identifier on each of its
+    <code>practitioner</code>/<code>organization</code> references; once a
+    role carries all three it's likewise never updated again — see
+    <code>FhirClient.import_econcur()</code> for the exact rules.
   </p>
 
   {% if job.state == "running" %}
@@ -39,12 +45,12 @@
         <tr><th>Total rows</th><td>{{ job.result.total_rows }}</td></tr>
         <tr><th>Invalid rows (missing GMC/name/org code)</th><td>{{ job.result.invalid_rows }}</td></tr>
         <tr><th>Practitioners created</th><td>{{ job.result.practitioners_created }}</td></tr>
-        <tr><th>Practitioners updated</th><td>{{ job.result.practitioners_updated }}</td></tr>
-        <tr><th>Practitioners unchanged</th><td>{{ job.result.practitioners_unchanged }}</td></tr>
+        <tr><th>Practitioners matched (existing, left unchanged)</th><td>{{ job.result.practitioners_matched }}</td></tr>
         <tr><th>Organizations created (stub)</th><td>{{ job.result.organizations_created }}</td></tr>
+        <tr><th>Organizations matched (existing, left unchanged)</th><td>{{ job.result.organizations_matched }}</td></tr>
         <tr><th>PractitionerRoles created</th><td>{{ job.result.roles_created }}</td></tr>
-        <tr><th>PractitionerRoles updated</th><td>{{ job.result.roles_updated }}</td></tr>
-        <tr><th>PractitionerRoles unchanged</th><td>{{ job.result.roles_unchanged }}</td></tr>
+        <tr><th>PractitionerRoles updated (identifiers backfilled)</th><td>{{ job.result.roles_updated }}</td></tr>
+        <tr><th>PractitionerRoles unchanged (settled)</th><td>{{ job.result.roles_unchanged }}</td></tr>
         <tr><th>Errors</th><td>{{ job.result.errors|length }}</td></tr>
       </table>
       {% if job.result.errors %}
