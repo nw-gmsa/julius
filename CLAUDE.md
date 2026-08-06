@@ -492,6 +492,133 @@ date, date reported, and conclusion code, one row per order.
   which resource this server actually populates it on, so both are checked
   rather than assuming one.
 
+### Data quality report (`/data-quality`)
+
+The one screen in this app that isn't FHIR at all — it queries
+`RIE.PatientDemographics`, a table in the InterSystems IRIS database
+behind `ENTERPRISESERVICEBUS` (the FHIR server's own source data,
+upstream of the `Patient` resources everything else in this app reads),
+directly over SQL via `iris_client.py`'s `IrisClient`, not through
+`FhirClient`/`client`. Reuses the logged-in user's own FHIR credentials
+(`client.user`/`client.password`) rather than a second login — confirmed
+to work against both the FHIR API and this IRIS database on this
+deployment.
+
+- **Connection config is env-var-only, no hardcoded deployment
+  defaults** — `IRIS_HOST`/`IRIS_NAMESPACE` have no fallback and
+  `IrisClient.__init__` raises a clear `ValueError` if either is unset
+  (same pattern `FhirClient` uses for `FHIR_BASE_URL`); `IRIS_PORT`
+  defaults to `1972` (IRIS's standard superserver port) since that's not
+  deployment-specific. The driver import itself
+  (`intersystems_iris.dbapi`) also has a fallback: the module path this
+  was originally built against
+  (`intersystems_iris.dbapi._DBAPI`) only exists on older driver
+  releases — on the current `intersystems-irispython` package (pulled in
+  via the `intersystems-iris` compatibility shim), `dbapi` is a plain
+  *attribute* `intersystems_iris`'s `__init__.py` sets, not a real
+  importable submodule, so `import intersystems_iris.dbapi` (as a
+  statement) raises `ModuleNotFoundError` even though
+  `intersystems_iris.dbapi` (attribute access) works fine. `iris_client.py`
+  tries the old submodule path first, then falls back to plain `import
+  intersystems_iris` + `getattr(..., "dbapi", None)`.
+- **This table's actual columns aren't confirmed against a real
+  server.** Most identifying columns (NHS number, MRN, surname,
+  forename, DOB, postcode, source, score, last-updated) are located by
+  best-effort case-insensitive name matching (`_find_column()` against
+  pattern lists like `NHS_NUMBER_PATTERNS`/`SOURCE_PATTERNS`/
+  `SCORE_PATTERNS`/`LAST_UPDATED_PATTERNS` etc. in `iris_client.py`) —
+  same "detect, don't assume, degrade gracefully" convention
+  `fhir_client.py` uses throughout. The seven columns behind *why* a
+  score is low (see "Quality" below) were given exact names rather than
+  guessed, so those are located by case-insensitive **exact** match
+  instead (`_find_exact_column()` against `QUALITY_FLAG_COLUMNS`/
+  `QUALITY_MATCH_COLUMNS`) — IRIS SQL commonly upper-cases unquoted
+  identifiers, so this still doesn't assume one particular case. The
+  whole quality section is wrapped by `_safe_check()`, so a wrong
+  assumption about a column's type/contents shows as an error on that
+  one section rather than blanking the whole report.
+- **No column completeness table and no generic checks (NHS number
+  checksum, duplicate patients, DOB sanity, postcode format) any
+  more** — the report used to lead with those, but they were replaced
+  entirely by the "Quality" section below, which is both more specific
+  (grounded in this table's actual PDS trace outcome columns, not a
+  generic regex/checksum guess) and more directly useful (organised
+  around *why* a score is low, the actual question this report exists to
+  answer) than a generic completeness/checksum pass ever was.
+- **Date range, defaulting to the last 30 days** (`?start=&end=`, same
+  convention as `/stats`/`/ctdna`) — `app.data_quality()` passes these
+  straight to `IrisClient.build_report(start, end, ...)`, which detects a
+  last-updated-like column by name (`LAST_UPDATED_PATTERNS`) and, if
+  found, threads a `WHERE "<col>" >= ? AND "<col>" <= ?` condition
+  through **every** query in the report (row count, and everything the
+  quality section queries) via `_with_filter()` — not just a post-fetch
+  filter. `end` is treated as inclusive of the whole day (` 23:59:59`
+  appended) unless the column's `DATA_TYPE` is bare `DATE`. If no such
+  column is found, the report runs unfiltered over the whole table and
+  says so (`date_filtered: False` — `data_quality.html` shows a note
+  rather than silently ignoring the picker). The filter state
+  (`self._date_filter_conditions`/`self._date_filter_params`) is
+  instance state set fresh at the start of each `build_report()` call —
+  safe only because `app.py` constructs a brand new `IrisClient` per
+  request rather than caching one per user the way `FhirClient` is.
+- **"Quality"** (`IrisClient._check_quality()`) — the section this
+  screen was actually built for: rows with a **low or null** score,
+  broken down by source (an NHS ODS code) and by *why*. "Low or null" is
+  deliberately `score_col <= threshold OR score_col IS NULL`
+  (`?score_threshold=`, default `app.DEFAULT_SCORE_THRESHOLD` = 8), not
+  just the threshold check alone — a record PDS (Personal Demographics
+  Service) can't trace at all likely never gets a score computed for it,
+  and `NULL <= threshold` is false in plain SQL, so without the explicit
+  `OR ... IS NULL` branch exactly the records missing the identifier this
+  app relies on most for patient matching (see "Patient matching" above)
+  would silently vanish from the one report meant to surface them. Only
+  runs at all if a source-like and score-like column are both found
+  (`report["quality"]` is `None` otherwise).
+  - **Reasons** — up to eight, each independently detected and
+    independently checked per row (`reason_columns` in
+    `_check_quality()`): "NHS number absent" (derived from whichever
+    NHS-number-like column was found — bad when null/empty, not one of
+    the exact-named columns below), `NHSNumberNotFoundPDS` (a flag
+    column — bad when *true*, via `_flag_true()`), and
+    `birthDateMatch`/`familyMatch`/`genderMatch`/`givenMatch`/
+    `postalCodeMatch` (match columns — bad when *not* true, including
+    `NULL`, since a match that was never evaluated isn't a confirmed
+    match). `_flag_true()`'s bit/boolean parsing (`1`/`0`, `'Y'`/`'N'`,
+    `True`/`False`, ...) is a best-effort guess, unconfirmed against a
+    real server. A reason column not found on this table is simply
+    skipped rather than erroring — `reason_columns_detected` in the
+    result lists which ones actually were, so the page can say so.
+  - **De-duplicated, and last-updated is deliberately not one of the
+    displayed/compared columns** — this table can carry more than one
+    row per patient (e.g. re-traced against PDS on a different day) that
+    would otherwise be identical; with a last-updated timestamp in the
+    mix those read as distinct rows, which showed up as duplicate-
+    looking entries in the per-source listing. `display_columns` (built
+    from whichever of NHS number/**MRN**/surname/forename/DOB/postcode/
+    source/score were detected as columns — deliberately *not*
+    last-updated, unlike an earlier version of this report) is combined
+    with each row's computed `reasons` list into a dedup key
+    (`(display column values..., reasons...)`); only the first row per
+    distinct key, per source, survives. **Every count in the result is
+    derived from this de-duplicated set** — `total_low_or_null`,
+    `reason_totals` (overall), each source's own `reason_totals`, and
+    each `entries_by_source` group's `count` — there's no separate
+    "before de-dup" number shown anywhere, since a raw row count wasn't
+    the thing this report needed to answer. This *did* mean giving up
+    the previous design's separate uncapped `GROUP BY` count query (kept
+    specifically so per-source totals stayed exact even when the
+    row-level listing was capped) — de-duplication can only happen after
+    fetching actual rows, so there's no way to get an exact count
+    cheaply anymore; the whole result now shares one cap,
+    `IrisClient.MAX_LOW_SCORE_ENTRIES` (2,000) rows fetched before
+    de-duplication, and `truncated` says when that cap was hit.
+  - **Two views of the same de-duplicated rows**: `reason_totals`
+    (overall count per reason, across every source, for "why is our data
+    bad" at a glance) and `entries_by_source` (one heading per source —
+    same "one `<h2>`/table per group" pattern `/ctdna` uses for
+    organisations — each with its own `reason_totals` sub-breakdown and
+    its actual unique rows).
+
 ### Work orders (`/work-orders`) & Test orders (`/test-orders`)
 
 Two cross-patient worklists sharing everything except the `intent` filter:

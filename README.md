@@ -21,6 +21,15 @@ export FHIR_BASE_URL="https://192.168.1.62/healthconnect/cdr/fhir/r4"
 # If the server has a real (non-self-signed) TLS cert, turn verification on:
 # export FHIR_VERIFY_SSL=true
 
+# Required only for the Data quality report (/data-quality), which reads
+# RIE.PatientDemographics directly over IRIS SQL rather than FHIR — see
+# iris_client.py. IRIS_PORT defaults to 1972 (IRIS's standard superserver
+# port) if unset; IRIS_HOST/IRIS_NAMESPACE have no default and the report
+# page shows a clear error if either is missing.
+export IRIS_HOST="192.168.1.62"
+export IRIS_NAMESPACE="ENTERPRISESERVICEBUS"
+# export IRIS_PORT=1972
+
 python3 app.py
 ```
 

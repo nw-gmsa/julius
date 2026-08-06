@@ -3,3 +3,13 @@ waitress==3.0.2
 requests==2.32.3
 plotly==6.9.0
 pandas==2.3.3
+# InterSystems' own IRIS Python driver, used only by iris_client.py
+# (/data-quality). intersystems-iris is a compatibility shim that makes
+# `import intersystems_iris` (what iris_client.py actually imports)
+# resolve to the real driver package, intersystems-irispython — pip
+# installs the latter automatically as the shim's own dependency, but
+# it's pinned here explicitly too since it's the one that actually does
+# the work. If a plain `pip install -r requirements.txt` can't find
+# either, install straight from InterSystems' own package index instead.
+intersystems-irispython
+intersystems-iris

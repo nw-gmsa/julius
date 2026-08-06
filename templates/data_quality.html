@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Data quality report</h1>
+  <p class="muted">
+    <code>{{ report.table if report else "RIE.PatientDemographics" }}</code>
+    on the IRIS database at <code>{{ iris_host }}</code>, namespace
+    <code>{{ iris_namespace }}</code> — the source demographics table this
+    FHIR server's <code>Patient</code> resources are downstream of, queried
+    directly over SQL rather than FHIR. Signed in with your own FHIR
+    credentials, which are also used for this connection.
+  </p>
+
+  <form action="{{ request.script_root }}/data-quality" method="get">
+    <p>
+      Last updated between <input type="date" name="start" value="{{ start }}">
+      and <input type="date" name="end" value="{{ end }}">
+      &nbsp;|&nbsp;
+      Low score threshold &le; <input type="number" name="score_threshold" value="{{ score_threshold }}" style="width:4em">
+      <button type="submit">Update</button>
+    </p>
+  </form>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  {% if report %}
+    {% if report.date_filtered %}
+      <p class="muted">
+        Filtered to rows where <code>{{ report.last_updated_column }}</code>
+        falls between <strong>{{ start }}</strong> and <strong>{{ end }}</strong>.
+      </p>
+    {% else %}
+      <p class="muted">
+        No last-updated-like column was recognised by name on this table,
+        so the date range above has no effect — the quality section below
+        covers the whole table.
+      </p>
+    {% endif %}
+    <p><strong>{{ report.total_rows }}</strong> row(s) in range.</p>
+
+    <h2>Quality</h2>
+    {% if report.quality %}
+      {% set quality = report.quality %}
+      {% if quality.ok %}
+        <p class="muted">
+          Rows scoring <code>{{ quality.score_column }}</code> &le;
+          {{ quality.threshold }}, or with a <code>NULL</code> score
+          (a row PDS couldn't trace at all typically never gets a score
+          computed, so this is included as "low" too — otherwise it
+          would silently disappear from this report), broken down by
+          <code>{{ quality.source_column }}</code> and by why. Rows that
+          are otherwise identical (e.g. the same patient re-traced on a
+          different date) are only shown once — a last-updated timestamp
+          isn't part of what makes two rows count as different here.
+          {% if quality.reason_columns_detected %}
+            Reasons recognised on this table:
+            {{ quality.reason_columns_detected|join(", ") }}.
+          {% endif %}
+        </p>
+        <p>{{ quality.summary }}</p>
+
+        {% if quality.reason_totals %}
+          <h3>Why, overall</h3>
+          <table>
+            <tr><th>Reason</th><th>Rows</th></tr>
+            {% for r in quality.reason_totals %}
+              <tr><td>{{ r.reason }}</td><td>{{ r.count }}</td></tr>
+            {% endfor %}
+          </table>
+        {% endif %}
+
+        {% if quality.entries_by_source %}
+          <h3>By source</h3>
+          <table>
+            <tr><th>Source (ODS code)</th><th>Unique low/null-score rows</th></tr>
+            {% for group in quality.entries_by_source %}
+              <tr><td>{{ group.source }}</td><td>{{ group.count }}</td></tr>
+            {% endfor %}
+          </table>
+        {% endif %}
+
+        {% if quality.truncated %}
+          <p class="muted">
+            The underlying fetch this report is built from is capped —
+            some sources may have more unique rows than shown above and
+            in the listings below.
+          </p>
+        {% endif %}
+
+        {% for group in quality.entries_by_source %}
+          <h3>{{ group.source }} ({{ group.count }})</h3>
+          {% if group.reason_totals %}
+            <p class="muted">
+              {% for r in group.reason_totals %}{{ r.reason }}: {{ r.count }}{% if not loop.last %}; {% endif %}{% endfor %}
+            </p>
+          {% endif %}
+          <table>
+            <tr>
+              {% for c in quality.display_columns %}<th>{{ c }}</th>{% endfor %}
+              <th>Reasons</th>
+            </tr>
+            {% for entry in group.entries %}
+              <tr>
+                {% for c in quality.display_columns %}<td>{{ entry[c] if entry[c] is not none else "—" }}</td>{% endfor %}
+                <td>{{ entry.reasons|join(", ") if entry.reasons else "—" }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        {% endfor %}
+      {% else %}
+        <p class="error">{{ quality.error }}</p>
+      {% endif %}
+    {% else %}
+      <p class="muted">
+        No source-like and score-like column were both recognised by
+        name on this table, so the quality section couldn't run.
+      </p>
+    {% endif %}
+  {% endif %}
+{% endblock %}

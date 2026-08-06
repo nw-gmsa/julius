@@ -10,6 +10,7 @@ import requests
 import pandas as pd
 import plotly.express as px
 from fhir_client import FhirClient
+from iris_client import IrisClient
 
 app = Flask(__name__)
 # Falls back to a random key if SECRET_KEY isn't set, which works fine for
@@ -1641,6 +1642,61 @@ def stats_ics():
     return render_template(
         "stats_ics.html", ics=ics, start=start, end=end, error=error,
         rows=rows, order_by_test=order_by_test, report_by_test=report_by_test,
+    )
+
+
+#: Default "low data quality score" cutoff for the /data-quality report's
+#: "Low data quality scores by source" check — rows scoring this or
+#: below are flagged. Overridable per-request via ?score_threshold=.
+DEFAULT_SCORE_THRESHOLD = 8
+
+
+@app.route("/data-quality")
+def data_quality():
+    """
+    Data quality report for RIE.PatientDemographics — a table in the
+    InterSystems IRIS database behind ENTERPRISESERVICEBUS, not FHIR.
+    There's no FHIR-side equivalent of "how complete/consistent is the
+    source demographics table" (Patient resources are downstream of it),
+    so this queries IRIS SQL directly via IrisClient rather than going
+    through client (the FhirClient proxy every other route uses).
+
+    Reuses the logged-in user's own FHIR credentials
+    (client.user/client.password) instead of a second login screen —
+    confirmed to work against both the FHIR API and this IRIS database on
+    this deployment. If that ever stops being true, this route (and only
+    this route) would need its own login.
+
+    `start`/`end` (same `?start=&end=` query-param convention as
+    /stats/`/ctdna`) default to the last 30 days and scope the whole
+    report to rows whose LastUpdated-like column falls in that range
+    (IrisClient.build_report() detects the column by name — see
+    LAST_UPDATED_PATTERNS in iris_client.py). `score_threshold`
+    (?score_threshold=, default DEFAULT_SCORE_THRESHOLD) controls the
+    "Low data quality scores by source" check's cutoff; invalid input
+    falls back to the default rather than erroring the whole page.
+    """
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
+    try:
+        score_threshold = int(request.args.get("score_threshold", DEFAULT_SCORE_THRESHOLD))
+    except ValueError:
+        score_threshold = DEFAULT_SCORE_THRESHOLD
+
+    report = None
+    error = None
+    try:
+        iris = IrisClient(user=client.user, password=client.password)
+        report = iris.build_report(start=start, end=end, score_threshold=score_threshold)
+        if report and report.get("error"):
+            error = report["error"]
+            report = None
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "data_quality.html", report=report, error=error,
+        iris_host=IrisClient.HOST, iris_namespace=IrisClient.NAMESPACE,
+        start=start, end=end, score_threshold=score_threshold,
     )
 
 
