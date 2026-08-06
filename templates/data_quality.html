@@ -17,6 +17,8 @@
       &nbsp;|&nbsp;
       Low score threshold &le; <input type="number" name="score_threshold" value="{{ score_threshold }}" style="width:4em">
       <button type="submit">Update</button>
+      &nbsp;|&nbsp;
+      <a href="{{ request.script_root }}/data-quality/pdf?start={{ start }}&end={{ end }}&score_threshold={{ score_threshold }}">Download as PDF</a>
     </p>
   </form>
 

@@ -3,6 +3,12 @@ waitress==3.0.2
 requests==2.32.3
 plotly==6.9.0
 pandas==2.3.3
+# PDF generation for the /data-quality report's "Download as PDF" link
+# (pdf_report.py) — pure-Python-friendly (prebuilt wheels on Windows, no
+# C compiler/system libraries needed, unlike e.g. WeasyPrint), which
+# matters for the IIS/Windows Server deployment target (see
+# docs/windows-iis-deployment.md).
+reportlab==4.2.5
 # InterSystems' own IRIS Python driver, used only by iris_client.py
 # (/data-quality). intersystems-iris is a compatibility shim that makes
 # `import intersystems_iris` (what iris_client.py actually imports)

@@ -11,6 +11,7 @@ import pandas as pd
 import plotly.express as px
 from fhir_client import FhirClient
 from iris_client import IrisClient
+from pdf_report import quality_report_pdf_bytes
 
 app = Flask(__name__)
 # Falls back to a random key if SECRET_KEY isn't set, which works fine for
@@ -1651,6 +1652,43 @@ def stats_ics():
 DEFAULT_SCORE_THRESHOLD = 8
 
 
+def _data_quality_params():
+    """(start, end, score_threshold) from query params — shared by
+    data_quality() and data_quality_pdf() so the date-range defaulting
+    (last 30 days, same convention as /stats/`/ctdna`) and the lenient
+    int() fallback for a malformed ?score_threshold= live in one place,
+    not duplicated between the HTML and PDF routes."""
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
+    try:
+        score_threshold = int(request.args.get("score_threshold", DEFAULT_SCORE_THRESHOLD))
+    except ValueError:
+        score_threshold = DEFAULT_SCORE_THRESHOLD
+    return start, end, score_threshold
+
+
+def _build_data_quality_report(start, end, score_threshold):
+    """Builds the IrisClient report for the given range/threshold,
+    returning (report, error) with report=None whenever there's an
+    error to show instead — either an exception from IrisClient itself
+    (bad credentials, connection failure, missing env vars) or a report
+    dict that came back carrying its own top-level "error" (e.g. the
+    table wasn't found). Shared by data_quality() and data_quality_pdf()
+    so the HTML page and its PDF download can never show different data
+    for the same query params."""
+    report = None
+    error = None
+    try:
+        iris = IrisClient(user=client.user, password=client.password)
+        report = iris.build_report(start=start, end=end, score_threshold=score_threshold)
+        if report and report.get("error"):
+            error = report["error"]
+            report = None
+    except Exception as e:
+        error = str(e)
+    return report, error
+
+
 @app.route("/data-quality")
 def data_quality():
     """
@@ -1675,28 +1713,38 @@ def data_quality():
     (?score_threshold=, default DEFAULT_SCORE_THRESHOLD) controls the
     "Low data quality scores by source" check's cutoff; invalid input
     falls back to the default rather than erroring the whole page.
-    """
-    end = request.args.get("end") or date.today().isoformat()
-    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
-    try:
-        score_threshold = int(request.args.get("score_threshold", DEFAULT_SCORE_THRESHOLD))
-    except ValueError:
-        score_threshold = DEFAULT_SCORE_THRESHOLD
 
-    report = None
-    error = None
-    try:
-        iris = IrisClient(user=client.user, password=client.password)
-        report = iris.build_report(start=start, end=end, score_threshold=score_threshold)
-        if report and report.get("error"):
-            error = report["error"]
-            report = None
-    except Exception as e:
-        error = str(e)
+    See data_quality_pdf() for the "Download as PDF" version of this
+    same report.
+    """
+    start, end, score_threshold = _data_quality_params()
+    report, error = _build_data_quality_report(start, end, score_threshold)
     return render_template(
         "data_quality.html", report=report, error=error,
         iris_host=IrisClient.HOST, iris_namespace=IrisClient.NAMESPACE,
         start=start, end=end, score_threshold=score_threshold,
+    )
+
+
+@app.route("/data-quality/pdf")
+def data_quality_pdf():
+    """
+    The same report data_quality() renders, as a downloadable PDF
+    (pdf_report.quality_report_pdf_bytes()) — same query params
+    (`_data_quality_params()`/`_build_data_quality_report()` are shared
+    with the HTML route), so "Download as PDF" on the report page
+    (data_quality.html carries the current start/end/score_threshold
+    through as a query string on that link) produces a PDF matching
+    what's currently on screen.
+    """
+    start, end, score_threshold = _data_quality_params()
+    report, error = _build_data_quality_report(start, end, score_threshold)
+    pdf_bytes = quality_report_pdf_bytes(
+        report, start, end, score_threshold, IrisClient.HOST, IrisClient.NAMESPACE, error=error)
+    filename = f"data-quality-report-{start}-to-{end}.pdf"
+    return Response(
+        pdf_bytes, mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

@@ -618,6 +618,32 @@ deployment.
     same "one `<h2>`/table per group" pattern `/ctdna` uses for
     organisations — each with its own `reason_totals` sub-breakdown and
     its actual unique rows).
+- **"Download as PDF"** (`/data-quality/pdf`) — the same report as a
+  downloadable PDF, built by `pdf_report.py`'s
+  `quality_report_pdf_bytes()` via `reportlab` (landscape A4;
+  `reportlab` chosen specifically for having prebuilt Windows wheels —
+  no C compiler/system libraries needed at deploy time, unlike e.g.
+  WeasyPrint — see `docs/windows-iis-deployment.md`). `app.py` factors
+  the date-range/threshold parsing (`_data_quality_params()`) and the
+  actual `IrisClient.build_report()` call
+  (`_build_data_quality_report()`) out of `data_quality()` so both the
+  HTML route and this one call the exact same code for the exact same
+  query params — the HTML page's "Download as PDF" link just carries the
+  current `start`/`end`/`score_threshold` through as a query string, so
+  the PDF always matches what's on screen. `quality_report_pdf_bytes()`
+  mirrors every branch `data_quality.html` has (a caught exception, a
+  report-level `"error"`, a quality section that itself failed, no
+  quality section at all because no source/score column was found) —
+  each one stops the PDF after explaining why, same as the HTML page.
+  Patient data going into table cells is passed as **plain strings**,
+  never wrapped in a reportlab `Paragraph` — reportlab only interprets
+  its mini-XML markup (`<b>`, `&amp;`, ...) for `Paragraph`/similar
+  Flowable cell content, not plain strings, so a name or postcode
+  containing `&`/`<`/`>` can't corrupt or crash the PDF. The handful of
+  places that *do* build `Paragraph` text from data (a detected column
+  name, an error message) run it through `xml.sax.saxutils.escape()`
+  first for the same reason, since unescaped markup there could raise
+  partway through the build.
 
 ### Work orders (`/work-orders`) & Test orders (`/test-orders`)
 
