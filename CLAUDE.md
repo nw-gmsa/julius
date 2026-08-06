@@ -576,14 +576,24 @@ deployment.
   (`report["quality"]` is `None` otherwise).
   - **Reasons** — up to eight, each independently detected and
     independently checked per row (`reason_columns` in
-    `_check_quality()`): "NHS number absent" (derived from whichever
+    `_check_quality()`): "no NHS Number present" (derived from whichever
     NHS-number-like column was found — bad when null/empty, not one of
     the exact-named columns below), `NHSNumberNotFoundPDS` (a flag
     column — bad when *true*, via `_flag_true()`), and
     `birthDateMatch`/`familyMatch`/`genderMatch`/`givenMatch`/
     `postalCodeMatch` (match columns — bad when *not* true, including
     `NULL`, since a match that was never evaluated isn't a confirmed
-    match). `_flag_true()`'s bit/boolean parsing (`1`/`0`, `'Y'`/`'N'`,
+    match). **If `NHSNumberNotFoundPDS` applies, it's the *only* reason
+    shown for that row** — the individual match columns aren't
+    meaningful reasons in their own right when PDS never found a record
+    to match against in the first place, so listing them alongside "not
+    found in PDS" would just be noise; this collapse happens per row
+    right after `row_reasons` is built, before it feeds into either the
+    entry's `reasons` list or the `reason_totals`/`reason_totals_by_source`
+    tallies, so a "not found in PDS" row is counted once, under that one
+    reason, everywhere. "No NHS number present" is unaffected by this —
+    it can still appear alongside other reasons. `_flag_true()`'s
+    bit/boolean parsing (`1`/`0`, `'Y'`/`'N'`,
     `True`/`False`, ...) is a best-effort guess, unconfirmed against a
     real server. A reason column not found on this table is simply
     skipped rather than erroring — `reason_columns_detected` in the
@@ -644,6 +654,21 @@ deployment.
   name, an error message) run it through `xml.sax.saxutils.escape()`
   first for the same reason, since unescaped markup there could raise
   partway through the build.
+  - **The Reasons column is the one exception to "plain strings, no
+    wrapping"** — `_reasons_cell()` renders a row's reasons as a
+    `Paragraph` (one reason per line, via `<br/>`, escaped like the
+    other `Paragraph` text above) instead of a single comma-joined
+    plain string. A plain string doesn't wrap inside a `Table` cell at
+    all, so a row with several reasons produced one very long line that
+    ran past its column — and past the whole table, since the entries
+    table had no explicit column widths at that point, so reportlab
+    sized every column to fit its widest *unwrapped* content. Fixed
+    together with `_entries_table()`, which (unlike the plain `_table()`
+    helper used for the two-column summary tables) always passes
+    explicit `colWidths`: a fixed width per identifying column, with
+    whatever's left of `_CONTENT_WIDTH` (the landscape-A4 page width
+    minus both margins) going to Reasons — the one column that actually
+    needs room to wrap into.
 
 ### Work orders (`/work-orders`) & Test orders (`/test-orders`)
 

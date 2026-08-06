@@ -18,11 +18,18 @@ from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 _STYLES = getSampleStyleSheet()
+_CELL_STYLE = ParagraphStyle("TableCell", parent=_STYLES["Normal"], fontSize=8, leading=10)
+
+#: Page geometry, shared between the SimpleDocTemplate margins below and
+#: the entries table's column widths (which need to know how much
+#: horizontal space they actually have to work with).
+_PAGE_MARGIN = 15 * mm
+_CONTENT_WIDTH = landscape(A4)[0] - 2 * _PAGE_MARGIN
 
 #: One table look used throughout — a shaded, bold header row repeated
 #: on every page a table spans, light grid lines, small font so wider
@@ -47,12 +54,43 @@ def _para(text, style="Normal"):
 def _cell(value):
     """Plain-text table cell — never wrapped in a Paragraph, so this
     never needs escaping: reportlab's Table only interprets markup for
-    Flowable cell content (Paragraph, etc.), not plain strings."""
+    Flowable cell content (Paragraph, etc.), not plain strings. Only
+    safe for short, single-value content — see _reasons_cell() for
+    content that needs to wrap."""
     return "—" if value is None else str(value)
+
+
+def _reasons_cell(reasons):
+    """A row's reasons as a wrapping Paragraph, one reason per line
+    (`<br/>` between them) rather than a single comma-joined plain
+    string — a plain string doesn't wrap at all in a Table cell, so a
+    row with several reasons produced one very long line that ran past
+    the column (and, since the entries table had no explicit column
+    widths, could blow out the whole table's layout along with it).
+    Escaped since Paragraph text is interpreted as reportlab markup."""
+    if not reasons:
+        return _cell(None)
+    return Paragraph("<br/>".join(escape(r) for r in reasons), _CELL_STYLE)
 
 
 def _table(rows):
     t = Table(rows, repeatRows=1)
+    t.setStyle(_TABLE_STYLE)
+    return t
+
+
+def _entries_table(display_columns, rows):
+    """The per-source entries table — unlike _table(), this always gets
+    explicit column widths: a fixed width per identifying column
+    (NHS number/MRN/surname/etc. — short values), with whatever's left
+    of the page going to Reasons, which is the one column that actually
+    needs room to wrap (see _reasons_cell()). Without explicit widths,
+    reportlab sizes each column to fit its widest *unwrapped* content,
+    which is exactly what let a long reasons list distort the table."""
+    id_col_width = 65
+    reasons_width = max(_CONTENT_WIDTH - len(display_columns) * id_col_width, 120)
+    col_widths = [id_col_width] * len(display_columns) + [reasons_width]
+    t = Table(rows, colWidths=col_widths, repeatRows=1)
     t.setStyle(_TABLE_STYLE)
     return t
 
@@ -152,9 +190,9 @@ def quality_report_pdf_bytes(report, start, end, score_threshold, iris_host, iri
         rows = [display_columns + ["Reasons"]]
         for entry in group["entries"]:
             row = [_cell(entry.get(c)) for c in display_columns]
-            row.append(", ".join(entry.get("reasons") or []) or "—")
+            row.append(_reasons_cell(entry.get("reasons")))
             rows.append(row)
-        story.append(_table(rows))
+        story.append(_entries_table(display_columns, rows))
 
     doc.build(story)
     return buffer.getvalue()

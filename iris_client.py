@@ -77,7 +77,7 @@ LAST_UPDATED_PATTERNS = [r"last.?updated", r"last.?modified", r"updated.?date"]
 QUALITY_FLAG_COLUMNS = ["NHSNumberNotFoundPDS"]
 QUALITY_MATCH_COLUMNS = ["birthDateMatch", "familyMatch", "genderMatch", "givenMatch", "postalCodeMatch"]
 QUALITY_REASON_LABELS = {
-    "NHSNumber_absent": "NHS number absent",
+    "NHSNumber_absent": "no NHS Number present",
     "NHSNumberNotFoundPDS": "NHS number not found in PDS",
     "birthDateMatch": "Date of birth doesn't match PDS",
     "familyMatch": "Surname doesn't match PDS",
@@ -363,6 +363,15 @@ class IrisClient:
                     is_bad = not _flag_true(value)
                 if is_bad:
                     row_reasons.append((key, label))
+
+            # If PDS never found a matching record at all, the individual
+            # match columns (birthDateMatch/familyMatch/...) aren't
+            # meaningful reasons in their own right — there was nothing
+            # to match against — so they'd just be noise alongside the
+            # real cause. Collapse down to that one reason instead of
+            # listing all of them.
+            if any(key == "NHSNumberNotFoundPDS" for key, _ in row_reasons):
+                row_reasons = [(key, label) for key, label in row_reasons if key == "NHSNumberNotFoundPDS"]
 
             entry = {c: raw.get(c) for c in display_columns}
             entry["reasons"] = [label for _, label in row_reasons]
