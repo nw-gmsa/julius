@@ -43,8 +43,11 @@
 </head>
 <body>
   {% if session.get('username') %}
-    <!-- /admin is intentionally not linked from this nav (not hidden behind auth,
-         just not surfaced) — reachable directly at /admin for whoever knows to look. -->
+    <!-- /admin is only linked here for usernames in ADMIN_USERNAMES
+         (app.py) — is_admin_user is set by the is_admin_user context
+         processor. Actual access is enforced server-side in
+         _load_client() (a 403 for anyone else hitting /admin* directly),
+         this link just isn't shown to everyone else. -->
     <div class="nav">
       <a href="{{ request.script_root }}/">&larr; Lab Explorer</a> &nbsp;|&nbsp;
       <details class="nav-dropdown">
@@ -63,6 +66,10 @@
           <a href="{{ request.script_root }}/cepheid-results">Cepheid Test Results</a>
         </div>
       </details>
+      {% if is_admin_user %}
+        &nbsp;|&nbsp;
+        <a href="{{ request.script_root }}/admin">Admin</a>
+      {% endif %}
       &nbsp;|&nbsp; <span class="muted">{{ session['username'] }}</span> &nbsp;<a href="{{ request.script_root }}/logout">Log out</a>
     </div>
   {% endif %}

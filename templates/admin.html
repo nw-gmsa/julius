@@ -59,4 +59,13 @@
   {% else %}
     <p class="muted">No orphaned ServiceRequests found.</p>
   {% endif %}
+
+  <h2>econcur import — NHS ODS Hospital Consultants</h2>
+  <p class="muted">
+    Imports/updates <code>Practitioner</code> + <code>PractitionerRole</code>
+    resources from NHS Digital's <code>econcur.csv</code> export. Runs as a
+    background job (tens of thousands of rows) with its own dry-run/apply
+    screen.
+  </p>
+  <p><a href="{{ request.script_root }}/admin/econcur-import">Go to econcur import &rarr;</a></p>
 {% endblock %}

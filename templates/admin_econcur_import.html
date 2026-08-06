@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block head %}
+  {% if job.state == "running" %}
+    <meta http-equiv="refresh" content="5">
+  {% endif %}
+{% endblock %}
+{% block content %}
+  <h1>econcur import</h1>
+  <p class="muted">
+    Imports NHS ODS's <code>econcur.csv</code> export ("English Hospital
+    Consultants" —
+    <a href="https://digital.nhs.uk/services/organisation-data-service/data-search-and-export/csv-downloads/miscellaneous">NHS Digital: ODS CSV downloads</a>)
+    as <code>Practitioner</code> + <code>PractitionerRole</code> resources
+    on this FHIR server. Matches existing entries by GMC number, so
+    re-running this <strong>updates</strong> them rather than creating
+    duplicates — see <code>FhirClient.import_econcur()</code> for the exact
+    matching rules. A location organisation code with no matching
+    <code>Organization</code> on this server gets a minimal stub one
+    created (ODS code only, no name) rather than the row being skipped.
+  </p>
+
+  {% if job.state == "running" %}
+    <div class="card">
+      <strong>Import running&hellip;</strong> ({{ "apply" if job.apply else "dry run" }})<br>
+      <span class="muted">{{ job.stage }}</span>
+      {% if job.total %}
+        <br>{{ job.processed }} / {{ job.total }} rows
+      {% endif %}
+      <p class="muted">This page refreshes automatically every 5 seconds.</p>
+    </div>
+  {% elif job.state == "error" %}
+    <div class="error">
+      <strong>Last run failed:</strong> {{ job.error }}
+    </div>
+  {% elif job.state == "done" %}
+    <div class="card">
+      <strong>Last run result</strong> ({{ "apply — changes were written" if job.apply else "dry run — nothing was written" }})
+      <table>
+        <tr><th>Total rows</th><td>{{ job.result.total_rows }}</td></tr>
+        <tr><th>Invalid rows (missing GMC/name/org code)</th><td>{{ job.result.invalid_rows }}</td></tr>
+        <tr><th>Practitioners created</th><td>{{ job.result.practitioners_created }}</td></tr>
+        <tr><th>Practitioners updated</th><td>{{ job.result.practitioners_updated }}</td></tr>
+        <tr><th>Practitioners unchanged</th><td>{{ job.result.practitioners_unchanged }}</td></tr>
+        <tr><th>Organizations created (stub)</th><td>{{ job.result.organizations_created }}</td></tr>
+        <tr><th>PractitionerRoles created</th><td>{{ job.result.roles_created }}</td></tr>
+        <tr><th>PractitionerRoles updated</th><td>{{ job.result.roles_updated }}</td></tr>
+        <tr><th>PractitionerRoles unchanged</th><td>{{ job.result.roles_unchanged }}</td></tr>
+        <tr><th>Errors</th><td>{{ job.result.errors|length }}</td></tr>
+      </table>
+      {% if job.result.errors %}
+        <p class="muted">First {{ job.result.errors[:20]|length }} of {{ job.result.errors|length }} errors:</p>
+        <ul class="muted">
+          {% for e in job.result.errors[:20] %}
+            <li>{{ e }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if job.state != "running" %}
+    <form method="post" action="{{ request.script_root }}/admin/econcur-import/start" style="display:inline">
+      <input type="hidden" name="apply" value="0">
+      <button type="submit">Run dry run</button>
+    </form>
+    <form method="post" action="{{ request.script_root }}/admin/econcur-import/start" style="display:inline"
+          onsubmit="return confirm('This will create/update Practitioner and PractitionerRole resources on the FHIR server. Continue?');">
+      <input type="hidden" name="apply" value="1">
+      <button type="submit" class="danger">Run and apply changes</button>
+    </form>
+  {% endif %}
+
+  <p class="muted">
+    <a href="{{ request.script_root }}/admin">&larr; Back to admin</a>
+  </p>
+{% endblock %}

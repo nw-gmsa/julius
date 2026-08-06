@@ -629,10 +629,17 @@ run this app somewhere trusted if the clear-down feature is reachable.
 
 ### Admin screen (`/admin`) — bulk/system-wide, destructive
 
-Not linked from `base.html`'s nav (deliberately — see the comment there)
-but still reachable directly at `/admin`; there's no auth gate, so this is
-obscurity, not access control. Two independent clear-down actions, both
-system-wide rather than scoped to one patient:
+Gated by `app.ADMIN_USERNAMES` — a plain Python set of usernames
+(matched against `session["username"]` exactly as typed at `/login`, no
+re-casing) checked in `_load_client()`'s `before_request` hook: anyone
+whose username isn't in that set gets a 403 on `/admin` or any `/admin/*`
+sub-route, and the "Admin" nav link (`base.html`, behind
+`is_admin_user` — an `app.py` context processor reading the same set)
+isn't shown to them either. This is the first real authorization check
+in the app — previously `/admin` had none at all, reachable by anyone
+logged in who knew the URL. Two independent clear-down actions (plus the
+econcur import below), all system-wide rather than scoped to one
+patient:
 
 - **Test patients by NHS number range** — `FhirClient.
   patients_in_nhs_number_ranges(ranges=None)` (default
@@ -667,8 +674,45 @@ Both actions share `admin_clear_down_result.html` (parametrized by
 POST-mutates split as the per-patient clear-down — `admin()`'s GET and
 `admin_patients_confirm()`'s POST never call any `_delete()`-backed
 method; only `admin_patients_clear_down()` and `admin_orphaned_clear_down()`
-do. Same no-auth/no-CSRF caveat as above, more so given the larger blast
-radius (multiple patients, or every orphaned order, per click).
+do. Still no CSRF token/rate limiting, same as every route in this app —
+the `ADMIN_USERNAMES` gate above narrows *who* can reach these, not
+what protects the request itself.
+
+**econcur import (`/admin/econcur-import`)** — imports NHS ODS's
+`econcur.csv` export ("English Hospital Consultants" —
+https://digital.nhs.uk/services/organisation-data-service/data-search-and-export/csv-downloads/miscellaneous)
+as `Practitioner` + `PractitionerRole` resources, matching existing
+entries by GMC number so re-running it updates rather than duplicates
+(`FhirClient.import_econcur()`). Runs as a background thread
+(`app._run_econcur_import()`, a single in-memory job slot — same
+simplicity as `_session_clients`, not a real job queue) since the full
+export is tens of thousands of rows, far past what one request should
+block on; the page auto-refreshes every 5s while a job is running.
+Dry-run vs apply follows `scripts/fix_organization_names.py`'s
+`--apply` convention: dry run computes and shows the exact counts apply
+would produce without calling `_post()`/`_put()`.
+
+Matching, so a re-run only writes what actually changed:
+- `Practitioner`, by GMC-number identifier (`GMC_NUMBER_SYSTEM`) — name
+  updated if it differs, created if the GMC number is unseen.
+- `Organization` (the row's location organisation code, an ODS trust
+  code), by ODS-code identifier (`ODS_ORGANIZATION_CODE_SYSTEM`) — an
+  unmatched code gets a minimal stub `Organization` created (ODS code
+  only, no name) rather than the row being skipped;
+  `scripts/fix_organization_names.py` can backfill the name later.
+- `PractitionerRole`, by the `(practitioner, organization)` pair, since
+  one consultant can hold more than one active membership (separate
+  `econcur.csv` rows, same GMC, different org code) — specialty updated
+  if it differs, created if the pair is unseen.
+
+All three lookups are preloaded once per run (`all_practitioners_by_gmc()`
+/ `all_organizations_by_ods()` / `all_practitioner_roles_by_practitioner_org()`)
+rather than searched per row — the file is too large for a search-per-row
+approach to be practical. `MAIN_SPECIALTY_CODE_SYSTEM` (UK Core's
+`https://fhir.hl7.org.uk/CodeSystem/UKCore-PracticeSettingCode`) is used
+for `PractitionerRole.specialty.coding.system`; the bare specialty code
+(e.g. `"300"`) is stored regardless of whether that URI is the one this
+server expects.
 
 ### Cepheid Test Results (`/cepheid-results`)
 

@@ -2,6 +2,7 @@ import os
 import re
 import secrets
 import difflib
+import threading
 from datetime import date, timedelta
 from flask import Flask, render_template, request, Response, abort, redirect, session, g, url_for
 from werkzeug.local import LocalProxy
@@ -28,6 +29,15 @@ _session_clients = {}
 
 LOGIN_EXEMPT_ENDPOINTS = {"login", "static"}
 
+#: Usernames allowed to see/use the Admin screens (the bulk clear-downs,
+#: the econcur import) — checked against session["username"] exactly as
+#: typed at /login (no re-casing/normalising). Everyone else gets a 403
+#: on any /admin* route and doesn't see the nav link either (see
+#: is_admin_user below / base.html). This is the first real authorization
+#: check in the app — /admin previously had none at all ("reachable
+#: directly for whoever knows to look" was the whole gate).
+ADMIN_USERNAMES = {"xKevin.Mayfield"}
+
 
 @app.before_request
 def _load_client():
@@ -41,12 +51,26 @@ def _load_client():
         # lands back under the prefix instead of at the domain root.
         return redirect(url_for("login", next=request.script_root + request.path))
     g.client = fhir_client
+    # request.path (not script_root-prefixed — see above) covers /admin
+    # itself plus every /admin/* sub-route (patients confirm/clear-down,
+    # orphaned clear-down, econcur import) in one check.
+    if request.path.startswith("/admin") and session.get("username") not in ADMIN_USERNAMES:
+        abort(403)
 
 
 # Existing routes/helpers below were all written against a module-level
 # `client` — this proxy resolves to the logged-in user's FhirClient
 # (set on `g` by _load_client above) so none of them needed to change.
 client = LocalProxy(lambda: g.client)
+
+
+@app.context_processor
+def _inject_admin_flag():
+    """Exposes is_admin_user to every template (base.html's nav uses it to
+    show/hide the Admin link) — the actual enforcement is the 403 in
+    _load_client above, this is just what decides whether to show the
+    link at all."""
+    return {"is_admin_user": session.get("username") in ADMIN_USERNAMES}
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -781,6 +805,81 @@ def admin_orphaned_clear_down():
         "admin_clear_down_result.html", title="Orphaned ServiceRequest clear-down result",
         deleted=result["deleted"], failed=result["failed"], error=error,
     )
+
+
+# econcur import job state — a single in-memory slot, same simplicity as
+# _session_clients (no job queue in this app). Only one import can run at
+# a time; the background thread below is the only writer, the two routes
+# after it are readers/starters. Not persisted across a process restart,
+# same caveat as _session_clients.
+_econcur_import_job = {"state": "idle"}
+
+
+def _run_econcur_import(fhir_client, apply):
+    """Runs in a background thread (started by admin_econcur_import_start()
+    below) so the request that triggers it can return immediately instead
+    of blocking for however long a ~75,000-row econcur.csv import takes.
+    Takes `fhir_client` as a plain argument rather than reading app.client
+    — there's no request context in a background thread for the `g.client`
+    LocalProxy to resolve against, so the caller resolves the real
+    FhirClient object first (client._get_current_object()) and passes it
+    in directly."""
+    _econcur_import_job.update({
+        "state": "running", "stage": "downloading econcur.csv", "apply": apply,
+        "processed": 0, "total": None, "result": None, "error": None,
+    })
+
+    def progress(processed, total):
+        _econcur_import_job["stage"] = "importing"
+        _econcur_import_job["processed"] = processed
+        _econcur_import_job["total"] = total
+
+    try:
+        csv_text = fhir_client.fetch_econcur_csv()
+        result = fhir_client.import_econcur(csv_text, apply=apply, progress=progress)
+        _econcur_import_job["state"] = "done"
+        _econcur_import_job["result"] = result
+    except Exception as e:
+        _econcur_import_job["state"] = "error"
+        _econcur_import_job["error"] = str(e)
+
+
+@app.route("/admin/econcur-import")
+def admin_econcur_import():
+    """
+    Admin screen for importing NHS ODS's econcur.csv (the "English
+    Hospital Consultants" CSV export — see
+    https://digital.nhs.uk/services/organisation-data-service/data-search-and-export/csv-downloads/miscellaneous)
+    as Practitioner + PractitionerRole resources (FhirClient.import_econcur()).
+    GET only shows the form plus whatever the current/last job's status is
+    — the run itself always happens in the background thread started by
+    the POST route below, never inline in a request, since the full
+    export is tens of thousands of rows.
+
+    Dry run vs apply is the same convention as
+    scripts/fix_organization_names.py's --apply flag: dry run (the
+    default button) computes and shows exactly what apply would do
+    without writing anything, so the counts can be sanity-checked before
+    committing tens of thousands of creates/updates to real FHIR data.
+
+    The page auto-refreshes every few seconds while a job is running
+    (see the template) so progress is visible without needing any JS.
+    """
+    return render_template("admin_econcur_import.html", job=_econcur_import_job)
+
+
+@app.route("/admin/econcur-import/start", methods=["POST"])
+def admin_econcur_import_start():
+    """Starts a background econcur import (see _run_econcur_import above)
+    and redirects straight back to the status page. Refuses to start a
+    second job while one is already running - this app has only one
+    in-memory job slot, and two concurrent imports would race on the same
+    preloaded Practitioner/Organization/PractitionerRole lookup dicts."""
+    if _econcur_import_job.get("state") != "running":
+        apply = request.form.get("apply") == "1"
+        fhir_client = client._get_current_object()
+        threading.Thread(target=_run_econcur_import, args=(fhir_client, apply), daemon=True).start()
+    return redirect(url_for("admin_econcur_import"))
 
 
 def _order_worklist(fetch_orders):

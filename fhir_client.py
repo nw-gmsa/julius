@@ -20,6 +20,9 @@ not guesses:
     (https://nw-gmsa.github.io/en/StructureDefinition-DiagnosticReport.html)
 """
 import os
+import csv
+import io
+import re
 import base64
 import requests
 from urllib.parse import quote
@@ -160,6 +163,39 @@ class FhirClient:
             return resp.json()
         except ValueError:
             return None
+
+    def _post(self, path, resource):
+        """POST a new resource to a relative collection path (e.g.
+        "Practitioner") — used for creating a resource that doesn't exist
+        yet (see import_econcur() below), the create-side counterpart to
+        _put()'s update-in-place. Raises requests.HTTPError on failure,
+        same as _put(). Returns the created resource (with its
+        server-assigned `id`) when the server's response body has one;
+        some servers reply 201 with an empty body and only a `Location`
+        header pointing at the new resource instead (real behaviour seen
+        against this app's own configured server for _put(), so handled
+        the same way here) — in that case the id is parsed back out of the
+        Location header instead of being left unset, since every caller
+        needs it to link a just-created resource from later rows/writes."""
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        resp = requests.post(
+            url, json=resource,
+            headers={**self._headers(), "Content-Type": "application/fhir+json"},
+            auth=self._auth(), verify=self.verify_ssl, timeout=15,
+        )
+        resp.raise_for_status()
+        if resp.content:
+            try:
+                body = resp.json()
+                if body.get("id"):
+                    return body
+            except ValueError:
+                pass
+        location = resp.headers.get("Location") or resp.headers.get("Content-Location") or ""
+        match = re.search(rf"{resource['resourceType']}/([^/]+)", location)
+        if match:
+            return {**resource, "id": match.group(1)}
+        return None
 
     @staticmethod
     def _entries(bundle):
@@ -2489,3 +2525,319 @@ class FhirClient:
 
             entries.append(f"{name} ({rtype or 'Unknown'})")
         return "; ".join(entries) if entries else "—"
+
+    # ------------------------------------------------------------------
+    # econcur import — NHS ODS "English Hospital Consultants" CSV export
+    # https://digital.nhs.uk/services/organisation-data-service/data-search-and-export/csv-downloads/miscellaneous
+    #
+    # Imports it as Practitioner + PractitionerRole resources, matching on
+    # GMC number so re-running this updates existing entries rather than
+    # duplicating them. Driven by the admin screen at /admin/econcur-import
+    # (see app.py) via import_econcur() below.
+    # ------------------------------------------------------------------
+
+    #: The econcur.csv download itself — a plain CSV export, not a FHIR
+    #: endpoint, so fetch_econcur_csv() is a bare requests.get(), same as
+    #: ods_lookup_name()'s ODS_LOOKUP_API_URL above. ~75,000 rows, no
+    #: header row.
+    ECONCUR_CSV_URL = "https://www.odsdatasearchandexport.nhs.uk/api/getReport?report=econcur"
+
+    #: UK Core CodeSystem for NHS Data Dictionary "Main Specialty Code",
+    #: used for PractitionerRole.specialty.coding.system below. The bare
+    #: code (e.g. "300") is stored regardless, so a wrong system URI here
+    #: wouldn't lose data, it would just mean a consumer can't resolve the
+    #: coding as belonging to a recognised system.
+    MAIN_SPECIALTY_CODE_SYSTEM = "https://fhir.hl7.org.uk/CodeSystem/UKCore-PracticeSettingCode"
+
+    #: econcur.csv column indexes (0-based), per the ODS Reference Data
+    #: Catalogue's "Hospital Consultants" spec — 13 columns, no header:
+    #:   0 GMC code, 1 ODS practitioner code (GMC code prefixed "C"),
+    #:   2 name ("SURNAME INITIAL(S)"), 3 initials (unused, always blank),
+    #:   4 sex (unused, always blank), 5 main specialty code(s)
+    #:   (pipe-separated when a consultant holds more than one at this
+    #:   location), 6 practitioner type (unused, always blank), 7 location
+    #:   organisation code (the employing trust's ODS code), 8-12 unused.
+    #:   Consultants with more than one active membership appear as
+    #:   separate rows sharing the same GMC code, differing only in the
+    #:   location organisation code.
+    ECONCUR_COL_GMC = 0
+    ECONCUR_COL_NAME = 2
+    ECONCUR_COL_SPECIALTY = 5
+    ECONCUR_COL_ORG_CODE = 7
+
+    @classmethod
+    def fetch_econcur_csv(cls):
+        """Downloads the raw econcur.csv text from ECONCUR_CSV_URL. This
+        hits NHS Digital's public ODS export API directly, not the
+        configured FHIR server — no auth needed, but it does need outbound
+        internet from wherever the Flask app runs (same requirement as
+        ods_lookup_name()/geocode_postcode()/fetch_icb_boundaries()
+        elsewhere in this file). The file is a few MB, so the timeout is
+        generous accordingly."""
+        resp = requests.get(cls.ECONCUR_CSV_URL, timeout=120)
+        resp.raise_for_status()
+        resp.encoding = resp.encoding or "utf-8"
+        return resp.text
+
+    @classmethod
+    def parse_econcur_row(cls, row):
+        """Parses one econcur.csv row (see the column map above) into
+        {"gmc", "name", "specialties", "org_code"}, or None if it's
+        missing a field this import treats as mandatory (GMC code, name,
+        or location organisation code — the three fields a usable
+        Practitioner + PractitionerRole pair needs)."""
+        if len(row) <= cls.ECONCUR_COL_ORG_CODE:
+            return None
+        gmc = row[cls.ECONCUR_COL_GMC].strip()
+        name = row[cls.ECONCUR_COL_NAME].strip()
+        org_code = row[cls.ECONCUR_COL_ORG_CODE].strip()
+        if not gmc or not name or not org_code:
+            return None
+        specialty_raw = row[cls.ECONCUR_COL_SPECIALTY].strip()
+        specialties = [s for s in specialty_raw.split("|") if s] if specialty_raw else []
+        return {"gmc": gmc, "name": name, "specialties": specialties, "org_code": org_code}
+
+    @staticmethod
+    def _split_econcur_name(name):
+        """Best-effort family/given split of econcur's single
+        "SURNAME INITIAL(S)" field (e.g. "BLACKETT K") — the last
+        whitespace-separated token is treated as the given name/initials,
+        everything before it as the family name. Not validated against
+        anything beyond the sample rows seen in a real download; a
+        multi-word surname (e.g. "VAN DYK J") would misparse under this
+        heuristic. The original string is always kept as `.text` too, so
+        display doesn't depend on the split being right."""
+        parts = name.split()
+        if len(parts) < 2:
+            return name, []
+        return " ".join(parts[:-1]), [parts[-1]]
+
+    def all_practitioners_by_gmc(self, max_pages=100):
+        """Every Practitioner on this server with a GMC-number identifier,
+        keyed by that number. Used to preload import_econcur()'s matching
+        step as one paginated query up front, rather than one Practitioner
+        search per econcur.csv row (tens of thousands of rows)."""
+        practitioners = self._search_all("Practitioner", {"_count": 100}, max_pages=max_pages)
+        by_gmc = {}
+        for p in practitioners:
+            gmc = self._identifier_value(p, self.GMC_NUMBER_SYSTEM)
+            if gmc:
+                by_gmc[gmc] = p
+        return by_gmc
+
+    def all_organizations_by_ods(self, max_pages=100):
+        """Every Organization on this server with an ODS-code identifier,
+        keyed by that code — the same preload idea as
+        all_practitioners_by_gmc(), reusing organisation_ods_code()'s
+        existing system/fallback lookup."""
+        orgs = self._search_all("Organization", {"_count": 100}, max_pages=max_pages)
+        by_ods = {}
+        for o in orgs:
+            ods = self.organisation_ods_code(o)
+            if ods:
+                by_ods[ods] = o
+        return by_ods
+
+    def all_practitioner_roles_by_practitioner_org(self, max_pages=100):
+        """Every PractitionerRole on this server, keyed by (practitioner
+        reference, organization reference) — the third preload
+        import_econcur() needs, since a consultant's role at a specific
+        trust is what's actually being created/updated per econcur.csv
+        row (one consultant can hold more than one, at different
+        trusts)."""
+        roles = self._search_all("PractitionerRole", {"_count": 100}, max_pages=max_pages)
+        by_key = {}
+        for r in roles:
+            practitioner_ref = (r.get("practitioner") or {}).get("reference")
+            organization_ref = (r.get("organization") or {}).get("reference")
+            if practitioner_ref and organization_ref:
+                by_key[(practitioner_ref, organization_ref)] = r
+        return by_key
+
+    @staticmethod
+    def _econcur_name_matches(existing_name, family, given):
+        """Whether an existing Practitioner.name[0] already has this
+        family/given — compared field-by-field rather than as a whole
+        dict, since a server may round-trip extra fields (an `id`, `use`,
+        `period`, ...) on what it stores that a naive equality check would
+        see as "changed" forever and rewrite every re-import."""
+        if not existing_name:
+            return False
+        return existing_name.get("family") == family and (existing_name.get("given") or []) == given
+
+    @staticmethod
+    def _econcur_specialty_codes(role):
+        """The flat list of specialty codes on an existing PractitionerRole
+        — just the `.code` values, ignoring `system`/extra coding fields a
+        server might add — so import_econcur()'s change-detection compares
+        like-for-like against econcur.csv's own bare codes."""
+        codes = []
+        for concept in role.get("specialty") or []:
+            for coding in concept.get("coding") or []:
+                if coding.get("code"):
+                    codes.append(coding["code"])
+        return codes
+
+    def _import_econcur_row(self, parsed, apply, practitioners_by_gmc, organizations_by_ods, roles_by_key, result):
+        """One econcur.csv row's worth of create-or-update work, shared by
+        import_econcur()'s per-row loop. Mutates the three preloaded dicts
+        in place so a later row referencing the same GMC number or ODS
+        code (very common — see the column map above) reuses what this
+        row just created instead of creating a second copy, whether or
+        not `apply` is actually writing anything (see the "pending-"
+        placeholder ids below for the dry-run case)."""
+        gmc = parsed["gmc"]
+        family, given = self._split_econcur_name(parsed["name"])
+
+        practitioner = practitioners_by_gmc.get(gmc)
+        if practitioner is None:
+            new_practitioner = {
+                "resourceType": "Practitioner",
+                "identifier": [{"system": self.GMC_NUMBER_SYSTEM, "value": gmc}],
+                "name": [{"text": parsed["name"], "family": family, "given": given}],
+            }
+            if apply:
+                practitioner = self._post("Practitioner", new_practitioner)
+                if not practitioner or not practitioner.get("id"):
+                    raise requests.RequestException(f"Practitioner create for GMC {gmc} returned no id")
+            else:
+                # No real id yet in a dry run — a placeholder lets later
+                # rows for the same GMC number still dedupe against this
+                # one within the same preview, matching what apply=True
+                # would actually do.
+                practitioner = {**new_practitioner, "id": f"pending-{gmc}"}
+            practitioners_by_gmc[gmc] = practitioner
+            result["practitioners_created"] += 1
+        elif not self._econcur_name_matches((practitioner.get("name") or [None])[0], family, given):
+            if apply:
+                updated = dict(practitioner)
+                updated["name"] = [{"text": parsed["name"], "family": family, "given": given}]
+                self._put(f"Practitioner/{practitioner['id']}", updated)
+                practitioner = updated
+                practitioners_by_gmc[gmc] = practitioner
+            result["practitioners_updated"] += 1
+        else:
+            result["practitioners_unchanged"] += 1
+
+        org_code = parsed["org_code"]
+        organization = organizations_by_ods.get(org_code)
+        if organization is None:
+            # Per the "create a stub Organization" choice for this import:
+            # a location organisation code with no matching Organization
+            # gets a minimal one (ODS code only, no name) rather than the
+            # row being skipped — fix_organization_names.py can backfill
+            # the name from the same ODS code later.
+            new_org = {
+                "resourceType": "Organization",
+                "identifier": [{"system": self.ODS_ORGANIZATION_CODE_SYSTEM, "value": org_code}],
+            }
+            if apply:
+                organization = self._post("Organization", new_org)
+                if not organization or not organization.get("id"):
+                    raise requests.RequestException(f"Organization create for ODS {org_code} returned no id")
+            else:
+                organization = {**new_org, "id": f"pending-org-{org_code}"}
+            organizations_by_ods[org_code] = organization
+            result["organizations_created"] += 1
+
+        practitioner_ref = f"Practitioner/{practitioner['id']}"
+        organization_ref = f"Organization/{organization['id']}"
+        role_key = (practitioner_ref, organization_ref)
+        specialty = [
+            {"coding": [{"system": self.MAIN_SPECIALTY_CODE_SYSTEM, "code": code}]}
+            for code in parsed["specialties"]
+        ]
+
+        role = roles_by_key.get(role_key)
+        if role is None:
+            new_role = {
+                "resourceType": "PractitionerRole",
+                "practitioner": {"reference": practitioner_ref},
+                "organization": {"reference": organization_ref},
+                "specialty": specialty,
+            }
+            if apply:
+                role = self._post("PractitionerRole", new_role)
+                if not role or not role.get("id"):
+                    raise requests.RequestException(
+                        f"PractitionerRole create for GMC {gmc}/org {org_code} returned no id"
+                    )
+            else:
+                role = {**new_role, "id": f"pending-role-{gmc}-{org_code}"}
+            roles_by_key[role_key] = role
+            result["roles_created"] += 1
+        elif sorted(self._econcur_specialty_codes(role)) != sorted(parsed["specialties"]):
+            if apply:
+                updated_role = dict(role)
+                updated_role["specialty"] = specialty
+                self._put(f"PractitionerRole/{role['id']}", updated_role)
+                roles_by_key[role_key] = updated_role
+            result["roles_updated"] += 1
+        else:
+            result["roles_unchanged"] += 1
+
+    def import_econcur(self, csv_text, apply=False, progress=None):
+        """
+        Imports an econcur.csv export (see fetch_econcur_csv()) as
+        Practitioner + PractitionerRole resources on this FHIR server.
+
+        Matching, so re-running this updates rather than duplicates:
+          - Practitioner, by GMC-number identifier (GMC_NUMBER_SYSTEM) —
+            an existing one gets its name updated if it differs; an
+            unseen GMC number gets a new Practitioner.
+          - Organization (the row's location organisation code, an ODS
+            trust code), by ODS-code identifier
+            (ODS_ORGANIZATION_CODE_SYSTEM) — an unmatched code gets a
+            minimal stub Organization created (see _import_econcur_row).
+          - PractitionerRole, by the (practitioner, organization) pair —
+            one consultant can hold more than one active membership
+            (separate rows, same GMC, different org code); an existing
+            role gets its specialty updated if it differs, an unseen pair
+            gets a new PractitionerRole.
+
+        apply=False (the default) runs the full matching/diff logic and
+        returns exactly the counts apply=True would produce, without
+        calling _post()/_put() — same dry-run convention as
+        scripts/fix_organization_names.py's --apply flag.
+
+        `progress`, if given, is called as progress(processed, total)
+        every 500 rows (and once at the end) — a row count for a caller
+        to surface during what can be a long run (the full export is
+        tens of thousands of rows, one to several HTTP round trips each
+        when apply=True). A row that raises requests.RequestException (a
+        create/update that failed) is recorded in result["errors"] and
+        the import continues rather than aborting.
+        """
+        rows = list(csv.reader(io.StringIO(csv_text)))
+        total = len(rows)
+
+        practitioners_by_gmc = self.all_practitioners_by_gmc()
+        organizations_by_ods = self.all_organizations_by_ods()
+        roles_by_key = self.all_practitioner_roles_by_practitioner_org()
+
+        result = {
+            "total_rows": total,
+            "invalid_rows": 0,
+            "practitioners_created": 0, "practitioners_updated": 0, "practitioners_unchanged": 0,
+            "organizations_created": 0,
+            "roles_created": 0, "roles_updated": 0, "roles_unchanged": 0,
+            "errors": [],
+        }
+
+        for i, raw_row in enumerate(rows):
+            if progress and i % 500 == 0:
+                progress(i, total)
+            parsed = self.parse_econcur_row(raw_row)
+            if parsed is None:
+                result["invalid_rows"] += 1
+                continue
+            try:
+                self._import_econcur_row(
+                    parsed, apply, practitioners_by_gmc, organizations_by_ods, roles_by_key, result,
+                )
+            except requests.RequestException as e:
+                result["errors"].append(f"GMC {parsed['gmc']} / org {parsed['org_code']}: {e}")
+
+        if progress:
+            progress(total, total)
+        return result
