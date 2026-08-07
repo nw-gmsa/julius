@@ -231,6 +231,211 @@ order as a root rather than dropping it or looping forever. `patient.html`
 renders this recursively via a self-calling Jinja macro
 (`render_order_chain`), indenting children under their parent with `↳`.
 
+### Order creation (`/order/new`) — download only, never writes to the server
+
+Create-order screen that builds a genomic test order as a downloadable
+FHIR **message Bundle** (`.json`) — laid out after NW GLH's "Genomic
+Testing Request Form (Rare Disease)" (DOC4900 —
+https://mft.nhs.uk/nwglh/documents/test-request-forms/), this IG's own
+`ServiceRequest`/`Specimen` profiles, its `GenomicTestOrder` Questionnaire's
+"Ask At Order Entry" section, and its own worked message-bundle example
+(all at https://nw-gmsa.github.io/). **Nothing this screen builds is ever
+written to the FHIR server** — no `_post`/`_put` call anywhere in
+`FhirClient.build_order_message_bundle()`; submitting the form returns
+the Bundle as a file download instead of redirecting anywhere.
+
+**Patient and requesting organisation are never freely typed** — each is
+a small search-then-pick panel backed by this FHIR server:
+`FhirClient.search_patients()` (existing) and `search_organizations(name=None,
+ods_code=None)`. Both refuse to run an unfiltered query (return `[]` if
+neither argument is given) rather than risk the 413 an unscoped
+system-wide search causes on this CDR (see "413s on unfiltered
+system-wide searches" above).
+
+**Requesting clinician is not a free search at all** —
+`practitioners_for_organization(organization_id)` lists only
+Practitioners this FHIR server already links to the *picked* organisation
+via an existing `PractitionerRole` (`PractitionerRole.organization` —
+the same linkage `import_econcur()` populates for hospital consultants),
+via `_include=PractitionerRole:practitioner` (falling back to resolving
+each role's practitioner reference directly if a server doesn't tag
+`_include`d entries' `search.mode` reliably — the same quirk
+`ctdna_orders()` already works around). The clinician section on
+`order_new.html` doesn't even render until an organisation is picked.
+
+`app.order_new()` carries all three picks across requests as
+`patient_id`/`org_id`/`practitioner_id` — query params while picking,
+hidden form fields once POSTing the finished order — rather than any
+server-side wizard/session state; only once all three resolve
+(`resolve_reference()`, which already swallows a bad/stale id into
+`None`) does the rest of the order/specimen/AOE-questions form render.
+
+**The R-code field is a `<select>` sourced from the IG's own published
+GenomicTestCode CodeSystem**
+(`GENOMIC_TEST_DIRECTORY_CODESYSTEM_URL` =
+https://nw-gmsa.github.io/en/CodeSystem-GenomicTestCode.json, a
+~2,100-entry fragment of England's National Genomic Test Directory —
+same underlying codes as `GENOMIC_TEST_DIRECTORY_SYSTEM`, just where the
+IG actually publishes the code/display list). `genomic_test_directory_codes()`
+fetches and caches it at class level for the process lifetime — same
+"static reference data, not worth re-fetching per request, failed fetch
+not cached" pattern as `fetch_icb_boundaries()` (the `/stats` ICS
+choropleth's ONS boundary fetch). Every option the select offers is a
+real code; there's no separate free-typed test-name field any more —
+`genomic_test_directory_display()` looks the display text up from the
+same cached list so `ServiceRequest.code`'s text always matches what was
+actually offered.
+
+**"Ask at order entry" is a new section** rendering the IG's
+`GenomicTestOrder` Questionnaire's `linkId "AskAtOrderEntry"` group
+(consanguinity, pathology report confirmation, neonatal/prenatal/neither,
+pregnancy-related follow-ups, pregnancy loss, deceased infant) —
+hardcoded as `FhirClient.ASK_AT_ORDER_ENTRY_QUESTIONS` (a small, stable
+7-question set; not worth reproducing the Questionnaire's generic
+nested-item/`enableWhen` machinery for). The three pregnancy-only
+follow-up questions carry a `shown_when` condition that `order_new.html`
+enforces with a small bit of inline JS (show/hide, keyed off the trigger
+question's `<select>` value) rather than in Python. **Each answered
+question becomes its own `Observation`** (`_build_aoe_observation()`),
+referenced from `ServiceRequest.supportingInfo` — not a
+`QuestionnaireResponse` — matching the Observation-per-question shape the
+IG's own worked example
+(https://nw-gmsa.github.io/en/Bundle-GenomicsOrderMessageCodedEntries.html)
+uses for these exact questions (`OBX-Consanguinity`, `OBX-Pregnancy`,
+`OBX-PregnancyExpectedDeliveryDate`, ...). Each question's `value_type`
+(`codeable_concept`/`date_time`/`quantity`) comes from that Questionnaire
+item's own `definition` element, not guessed.
+
+`FhirClient.build_order_message_bundle()` assembles the whole thing —
+shaped after that same worked example:
+
+- **`Bundle.type = "message"`**, a `MessageHeader` first entry (event
+  `http://terminology.hl7.org/CodeSystem/v2-0003|O21`, "OML - Laboratory
+  order") plus every resource it `focus`es on, exactly the worked
+  example's shape.
+- **Self-contained, not server-referencing**: since a message bundle
+  travels to another system, nothing in it can reference our own
+  server's internal ids — a receiving system has no way to dereference
+  `"Patient/<our-id>"`. So the picked `Patient` resource is inlined in
+  full (a real copy, not a reference), and `PractitionerRole.practitioner`/
+  `.organization` (plus `MessageHeader.sender`) use **logical
+  references** — `identifier` (GMC number / ODS code) + `display`, no
+  `.reference` at all — via the new `_logical_reference()` helper,
+  exactly how the worked example's own `PractitionerRole` entry does it.
+  Every resource gets a fresh `urn:uuid:` `fullUrl`.
+- **`destination`/`ORDER_MESSAGE_DESTINATION_*`** are fixed — this app is
+  specifically for the North West GLH, so every order goes to the same
+  place — values taken directly from the worked example (ODS `699X0`,
+  "NORTH WEST GLH", endpoint `https://fhir.nwgenomics.nhs.uk/Endpoint/RIE`),
+  not guessed. `source.endpoint` (`ORDER_MESSAGE_SOURCE_ENDPOINT`) is a
+  placeholder — this app has no real registered `Endpoint` resource of
+  its own, unlike the worked example's sending system.
+- **`code` and `reasonCode`** are both populated from the one R-code the
+  select collects, under `GENOMIC_TEST_DIRECTORY_SYSTEM` — the paper
+  form has one R-code field, not the two separate FHIR concepts
+  `order_view.html` happens to read from separately (this bundle isn't
+  read by `order_view.html` at all, since it's never written to the
+  server, but the same one-code-two-places choice was kept for
+  consistency). One order = one test, one specimen (mandatory — see
+  below); the paper form's note that more than one Test Indication Code
+  can be requested
+  on one form isn't modelled — that would need multiple `ServiceRequest`
+  resources (optionally sharing one `Specimen`), so submit the form
+  again for a second test.
+- **Placer order number** — this app has no external order-numbering
+  system to draw one from, so `generate_order_placer_number()` mints its
+  own (`"LE" + today's date + a random 6-hex-digit suffix`) under a local
+  identifier system, `ORDER_PLACER_NUMBER_SYSTEM`
+  (`https://fhir.nwgenomics.nhs.uk/Id/lab-explorer-order-number`, same
+  local-system convention as `IGENE_PATIENT_IDENTIFIER_SYSTEM`/
+  `SPECIMEN_IDENTIFIER_SYSTEM`), stored as a v2-0203 `"PLAC"`-typed
+  identifier — the same shape `placer_identifier()` reads back elsewhere
+  in this app, even though nothing reads this particular one back since
+  it's never posted anywhere. `app.order_new()` finds the `ServiceRequest`
+  entry by `resourceType` (not a positional index) to pull this value
+  back out for the download's filename.
+- **Fields the paper form has that neither this IG's profiles nor the
+  AOE questions model structurally** (e.g. "taken by") fold into
+  `specimen_notes`/`clinical_details` free text instead, same
+  faithful-subset-only approach `order_view.html` documents for reading
+  real orders back.
+
+**Specimen is mandatory, and its fields follow the Specimen profile's own
+"Domain Archetype" table**
+(https://nw-gmsa.github.io/en/StructureDefinition-Specimen.html#domain-archetype),
+not just type/date/notes — `app.order_new()` rejects a submission with no
+`specimen_type` before calling `build_order_message_bundle()`, since the
+IG makes `Specimen.type` mandatory (1..1). The form's other specimen
+fields map onto that same table: **Specimen ID** →
+`Specimen.identifier[PlacerSpecimenNumber]` (`SPECIMEN_IDENTIFIER_SYSTEM`,
+the same system `specimen_identifier()` already reads elsewhere in this
+app), **Specimen accession number** → `Specimen.accessionIdentifier`,
+**Shipment tracking number** → `Specimen.identifier[ShipmentTrackingNumber]`
+(LOINC `97209-1`, confirmed by that table), **Specimen source site** →
+`Specimen.collection.bodySite` (free text), **Sample collection/received
+date** → `Specimen.collection.collectedDateTime`/`Specimen.receivedTime`.
+
+**Specimen type is a `<select>` sourced from the IG's own
+`specimen-type` ValueSet**
+(https://nw-gmsa.github.io/en/ValueSet-specimen-type.html) —
+`FhirClient.SPECIMEN_TYPE_CODES`, the 24 SNOMED-coded concepts (hardcoded,
+with `display` text — the ValueSet's own JSON only carries bare codes for
+most of them, the human-readable text only exists in the rendered HTML
+expansion, so a live per-request fetch wouldn't have saved anything here,
+unlike `genomic_test_directory_codes()`). The ValueSet also permits any
+code from a `https://fhir.nwgenomics.nhs.uk/CodeSystem/IGENE` local
+codesystem for backward compatibility, but that codesystem's contents
+aren't published anywhere this app can enumerate, and the ValueSet page's
+own text says "SNOMED codes are preferred" — so only the SNOMED half is
+offered. `Specimen.type` is built as a real coding (`{"system":
+"http://snomed.info/sct", "code": ..., "display": ...}`), not free text.
+
+**Requesting clinician is a searchable `<select>`, not a link-per-row
+table** — `order_new.html` renders every `practitioners_for_organization()`
+result as an `<option>` (name + GMC number, via the new `gmc_number`
+Jinja filter) inside one `<select size="8">`, with a plain text input
+above it that hides non-matching `<option>`s as you type (vanilla JS,
+substring match on name — no framework, same minimal-JS approach as the
+AOE show/hide logic above). Submitting still redirects with
+`practitioner_id` set, same picker pattern as patient/organisation.
+
+**GMC numbers are always `"C"`-prefixed**, both here and in
+`import_econcur()` (which originally stored the bare digits — a bug,
+fixed) — `FhirClient._format_gmc_number()` strips any existing `"C"`/`"c"`
+prefix and reapplies exactly one, per
+https://nw-gmsa.github.io/en/StructureDefinition-PractitionerIdentifier.html#professional-registration-entry-identifier
+("CONSULTANT_CODE", format `CNNNNNNN` — confirmed by that page's own
+worked example, `{"system": "https://fhir.hl7.org.uk/Id/gmc-number",
+"value": "C3456789"}`). Used in two places:
+
+- `build_order_message_bundle()` normalizes whatever GMC value is
+  already stored on the picked Practitioner before building the
+  `PractitionerRole.practitioner` logical reference — so the downloaded
+  bundle is spec-correct even for a Practitioner imported before this
+  fix existed.
+- `parse_econcur_row()` now formats econcur.csv's column 0 (the bare
+  digits) through `_format_gmc_number()` instead of using it as-is, so
+  every *newly created* Practitioner gets the correctly-formatted
+  identifier value going forward (column 1 already carries this same
+  "C"-prefixed value in the source file, but deriving it from column 0
+  keeps one source of truth for the format rather than trusting the two
+  columns to always agree).
+
+Since a server may already have Practitioners imported under the old,
+un-prefixed format, **matching is normalized on read too**, so re-running
+the import doesn't create duplicates for them: the org-batched preload
+(`import_econcur()`) runs each existing Practitioner's stored GMC value
+through `_format_gmc_number()` before using it as the `practitioners_by_gmc`
+dict key, and `_find_practitioner_by_gmc()`'s fallback search (used when
+the preload doesn't already cover a GMC number) tries the bare-digit form
+too if the "C"-prefixed search comes back empty. Verified directly: a
+Practitioner seeded with the old bare-digit identifier value is matched
+(not duplicated) by a re-import of the same GMC number.
+
+Reached from the nav ("Orders and Reports" → "New order"), or from a
+patient page's "Genomic test orders" section ("+ New order for this
+patient", pre-filling `patient_id` so that picker step is skipped).
+
 ### Reference resolution
 
 `resolve_reference()` fetches whatever resource a FHIR `Reference` points to

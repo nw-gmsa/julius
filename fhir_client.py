@@ -24,7 +24,10 @@ import csv
 import io
 import re
 import base64
+import secrets
+import uuid
 import requests
+from datetime import date, datetime, timezone
 from urllib.parse import quote
 from requests.auth import HTTPBasicAuth
 from urllib3.exceptions import InsecureRequestWarning
@@ -2678,15 +2681,24 @@ class FhirClient:
 
     #: econcur.csv column indexes (0-based), per the ODS Reference Data
     #: Catalogue's "Hospital Consultants" spec — 13 columns, no header:
-    #:   0 GMC code, 1 ODS practitioner code (GMC code prefixed "C"),
-    #:   2 name ("SURNAME INITIAL(S)"), 3 initials (unused, always blank),
-    #:   4 sex (unused, always blank), 5 main specialty code(s)
-    #:   (pipe-separated when a consultant holds more than one at this
-    #:   location), 6 practitioner type (unused, always blank), 7 location
-    #:   organisation code (the employing trust's ODS code), 8-12 unused.
-    #:   Consultants with more than one active membership appear as
-    #:   separate rows sharing the same GMC code, differing only in the
-    #:   location organisation code.
+    #:   0 GMC code (bare digits), 1 ODS practitioner code (same GMC code
+    #:   prefixed "C"), 2 name ("SURNAME INITIAL(S)"), 3 initials (unused,
+    #:   always blank), 4 sex (unused, always blank), 5 main specialty
+    #:   code(s) (pipe-separated when a consultant holds more than one at
+    #:   this location), 6 practitioner type (unused, always blank),
+    #:   7 location organisation code (the employing trust's ODS code),
+    #:   8-12 unused. Consultants with more than one active membership
+    #:   appear as separate rows sharing the same GMC code, differing
+    #:   only in the location organisation code.
+    #:
+    #:   parse_econcur_row() below reads column 0 but formats it through
+    #:   _format_gmc_number() (-> "C" + digits) rather than using it bare
+    #:   — this IG's gmc-number identifier *value* format is "C" + digits
+    #:   (see _format_gmc_number()'s docstring), not the bare number ODS
+    #:   itself calls the "GMC code". Column 1 already has this prefix in
+    #:   the source file, but deriving it from column 0 instead keeps a
+    #:   single source of truth for the format rather than trusting the
+    #:   file to always agree with itself.
     ECONCUR_COL_GMC = 0
     ECONCUR_COL_NAME = 2
     ECONCUR_COL_SPECIALTY = 5
@@ -2712,10 +2724,13 @@ class FhirClient:
         {"gmc", "name", "specialties", "org_code"}, or None if it's
         missing a field this import treats as mandatory (GMC code, name,
         or location organisation code — the three fields a usable
-        Practitioner + PractitionerRole pair needs)."""
+        Practitioner + PractitionerRole pair needs). `gmc` is always
+        "C"-prefixed (_format_gmc_number()) — this IG's required
+        gmc-number identifier value format — not the bare digits column 0
+        holds."""
         if len(row) <= cls.ECONCUR_COL_ORG_CODE:
             return None
-        gmc = row[cls.ECONCUR_COL_GMC].strip()
+        gmc = cls._format_gmc_number(row[cls.ECONCUR_COL_GMC].strip())
         name = row[cls.ECONCUR_COL_NAME].strip()
         org_code = row[cls.ECONCUR_COL_ORG_CODE].strip()
         if not gmc or not name or not org_code:
@@ -2770,9 +2785,21 @@ class FhirClient:
         something narrow, per the CDR's suggested fix of batching by
         organisation — this is the same idea applied per-identifier
         instead, for the one case org-batching alone can't cover, see
-        _import_econcur_row()). Returns the first match, or None."""
+        _import_econcur_row()). `gmc` is expected "C"-prefixed
+        (parse_econcur_row() always produces it that way now); if that
+        exact value doesn't match anything, also tries the bare digits —
+        a Practitioner created by an import run from before
+        _format_gmc_number() existed may still have the un-prefixed
+        value stored, and this avoids treating it as unseen and creating
+        a duplicate. Returns the first match, or None."""
         bundle = self._get("Practitioner", {"identifier": f"{self.GMC_NUMBER_SYSTEM}|{gmc}", "_count": 1})
         entries = self._entries(bundle)
+        if entries:
+            return entries[0]
+        bare_gmc = gmc.lstrip("Cc").strip() if gmc else None
+        if bare_gmc and bare_gmc != gmc:
+            bundle = self._get("Practitioner", {"identifier": f"{self.GMC_NUMBER_SYSTEM}|{bare_gmc}", "_count": 1})
+            entries = self._entries(bundle)
         return entries[0] if entries else None
 
     def _search_all_by_organization(self, resource_type, organizations, extra_params=None, count=50, max_pages_per_org=20):
@@ -3051,7 +3078,13 @@ class FhirClient:
             if practitioner_ref and practitioner_ref.startswith("Practitioner/"):
                 practitioner = practitioners_by_id.get(practitioner_ref.split("/", 1)[1])
                 if practitioner:
-                    gmc = self._identifier_value(practitioner, self.GMC_NUMBER_SYSTEM)
+                    # Normalized through _format_gmc_number() so a
+                    # Practitioner whose stored identifier still has the
+                    # pre-fix bare-digit value (created before
+                    # parse_econcur_row() started "C"-prefixing) is keyed
+                    # the same way an incoming CSV row's gmc is, and gets
+                    # matched instead of duplicated.
+                    gmc = self._format_gmc_number(self._identifier_value(practitioner, self.GMC_NUMBER_SYSTEM))
                     if gmc:
                         practitioners_by_gmc[gmc] = practitioner
 
@@ -3081,3 +3114,584 @@ class FhirClient:
         if progress:
             progress(total, total)
         return result
+
+    # ------------------------------------------------------------------
+    # Order creation — /order/new (app.py)
+    #
+    # Builds a genomic test order as a downloadable FHIR message Bundle,
+    # laid out after NW GLH's "Genomic Testing Request Form (Rare
+    # Disease)" (DOC4900 —
+    # https://mft.nhs.uk/nwglh/documents/test-request-forms/), this IG's
+    # own ServiceRequest/Specimen profiles, its GenomicTestOrder
+    # Questionnaire's "Ask At Order Entry" section, and the worked
+    # message-Bundle example (all at https://nw-gmsa.github.io/).
+    # Patient, requesting organisation, and requesting clinician are
+    # always resources already on this FHIR server — searched and
+    # picked, never freely typed — see search_organizations()/
+    # practitioners_for_organization() below and search_patients()
+    # above. NOTHING here is written back to the FHIR server — see
+    # build_order_message_bundle()'s docstring.
+    # ------------------------------------------------------------------
+
+    def search_organizations(self, name=None, ods_code=None):
+        """Organization search for the order-create screen's "requesting
+        organisation" picker — filtered by name or ODS code, never
+        unfiltered (an unfiltered system-wide Organization search 413s
+        on this CDR — see all_organizations_by_ods()/CLAUDE.md's "413s
+        on unfiltered system-wide searches"). Returns [] without
+        querying at all if neither is given, rather than risking an
+        accidentally-unfiltered search."""
+        if ods_code:
+            bundle = self._get("Organization", {"identifier": ods_code, "_count": 20})
+            return self._entries(bundle)
+        if name:
+            bundle = self._get("Organization", {"name": name, "_count": 20})
+            return self._entries(bundle)
+        return []
+
+    def practitioners_for_organization(self, organization_id, count=100):
+        """Practitioners associated with `organization_id` via an
+        existing PractitionerRole — PractitionerRole.organization is
+        this IG's actual clinician-to-organisation linkage (the same one
+        import_econcur() populates for hospital consultants), so the
+        order-create screen's "requesting clinician" picker is scoped to
+        it instead of an open name search across every Practitioner on
+        the server. `_include=PractitionerRole:practitioner` pulls the
+        Practitioner resources back in the same query; if a server
+        doesn't tag `search.mode` reliably on `_include`d entries (a
+        real quirk this app has hit before — see ctdna_orders() in
+        CLAUDE.md) and none come back that way, falls back to resolving
+        each role's practitioner reference directly."""
+        matches, included = self._search_all_split("PractitionerRole", {
+            "organization": f"Organization/{organization_id}",
+            "_include": "PractitionerRole:practitioner",
+            "_count": count,
+        })
+        practitioners = {
+            r["id"]: r for r in included
+            if r.get("resourceType") == "Practitioner" and r.get("id")
+        }
+        if not practitioners and matches:
+            for role in matches:
+                practitioner = self.resolve_reference(role.get("practitioner") or {})
+                if practitioner and practitioner.get("id"):
+                    practitioners[practitioner["id"]] = practitioner
+        return sorted(practitioners.values(), key=lambda p: self._practitioner_name(p) or "")
+
+    #: Local identifier system for placer order numbers minted by this
+    #: app's own order-create screen — there is no external
+    #: order-numbering system integrated, so this app issues its own
+    #: under the same "https://fhir.nwgenomics.nhs.uk/..." local-system
+    #: convention as IGENE_PATIENT_IDENTIFIER_SYSTEM/
+    #: SPECIMEN_IDENTIFIER_SYSTEM above.
+    ORDER_PLACER_NUMBER_SYSTEM = "https://fhir.nwgenomics.nhs.uk/Id/lab-explorer-order-number"
+
+    @classmethod
+    def generate_order_placer_number(cls):
+        """A short, human-typeable placer order number — "LE" (Lab
+        Explorer) + today's date + a random 6-hex-digit suffix, e.g.
+        "LE20260807-A1B2C3". Collisions are astronomically unlikely
+        (16.7M possible suffixes per day) and not checked for."""
+        return f"LE{date.today():%Y%m%d}-{secrets.token_hex(3).upper()}"
+
+    #: The IG's own published GenomicTestCode CodeSystem — a ~2,100-entry
+    #: fragment of England's National Genomic Test Directory (same
+    #: underlying codes as GENOMIC_TEST_DIRECTORY_SYSTEM above, this is
+    #: just where the IG publishes the actual code/display list rather
+    #: than only the system URI). Powers the order-create screen's R-code
+    #: <select> — every option offered there is a real code from this
+    #: CodeSystem, not free text.
+    GENOMIC_TEST_DIRECTORY_CODESYSTEM_URL = "https://nw-gmsa.github.io/en/CodeSystem-GenomicTestCode.json"
+
+    #: Class-level cache, same reasoning as _icb_boundary_cache above —
+    #: this is static reference data, not tied to any one FhirClient
+    #: instance/server.
+    _genomic_test_directory_cache = None
+
+    @classmethod
+    def genomic_test_directory_codes(cls):
+        """Every {"code", "display"} pair from GENOMIC_TEST_DIRECTORY_CODESYSTEM_URL,
+        sorted by code. Cached at class level for the process lifetime
+        (same pattern as fetch_icb_boundaries() — a similarly-sized
+        static reference dataset fetched from an external host); a
+        failed fetch is *not* cached, so the next call retries. Returns
+        [] if the fetch fails or the response has no `concept` array —
+        callers should degrade to "code list unavailable" rather than
+        raising, same as fetch_icb_boundaries()'s callers degrade to "no
+        map"."""
+        if cls._genomic_test_directory_cache is not None:
+            return cls._genomic_test_directory_cache
+        try:
+            resp = requests.get(cls.GENOMIC_TEST_DIRECTORY_CODESYSTEM_URL, timeout=30)
+            if resp.ok:
+                concepts = resp.json().get("concept", [])
+                codes = sorted(
+                    (
+                        {"code": c["code"], "display": c.get("display") or c["code"]}
+                        for c in concepts if c.get("code")
+                    ),
+                    key=lambda c: c["code"],
+                )
+                if codes:
+                    cls._genomic_test_directory_cache = codes
+        except requests.RequestException:
+            pass
+        return cls._genomic_test_directory_cache or []
+
+    @classmethod
+    def genomic_test_directory_display(cls, code):
+        """Display text for `code` from genomic_test_directory_codes(),
+        or the bare code itself if the lookup fails or doesn't contain
+        it (e.g. the cached fetch errored) — used by
+        build_order_message_bundle() so ServiceRequest.code's display/
+        `.text` always matches what the R-code select actually offered,
+        rather than trusting a second free-typed field."""
+        for entry in cls.genomic_test_directory_codes():
+            if entry["code"] == code:
+                return entry["display"]
+        return code
+
+    #: "Ask At Order Entry Questions" — the linkId "AskAtOrderEntry"
+    #: group from the IG's GenomicTestOrder Questionnaire
+    #: (https://nw-gmsa.github.io/en/Questionnaire-GenomicTestOrder.html,
+    #: canonical URL https://fhir.nwgenomics.nhs.uk/Questionnaire/GenomicTestOrder,
+    #: version 2.1.6). Hardcoded rather than fetched live — unlike the
+    #: 2,100-entry test-code CodeSystem above, this is a small, stable
+    #: set of 7 questions, and reproducing the Questionnaire's generic
+    #: nested-item/enableWhen structure just to render these specific
+    #: fields would be a lot of machinery for one fixed section.
+    #:
+    #: Each answered question becomes its own Observation, referenced
+    #: from ServiceRequest.supportingInfo — not a QuestionnaireResponse —
+    #: matching the Observation-per-question shape the IG's own worked
+    #: example uses for these exact questions (OBX-Consanguinity,
+    #: OBX-Pregnancy, OBX-PregnancyExpectedDeliveryDate, ... at
+    #: https://nw-gmsa.github.io/en/Bundle-GenomicsOrderMessageCodedEntries.html).
+    #: `value_type` says which Observation.value[x] to build (see
+    #: _build_aoe_observation()) — taken from each Questionnaire item's
+    #: own `definition` element, not guessed.
+    #:
+    #: The nested "pregnant" sub-group (only relevant when
+    #: "Neonatal/Prenatal/Neither?" = Pregnancy) is flattened into this
+    #: one list rather than reproducing the Questionnaire's `enableWhen`
+    #: logic in Python — `shown_when` records the same condition so
+    #: order_new.html can show/hide those three fields with a small bit
+    #: of inline JS instead.
+    ASK_AT_ORDER_ENTRY_QUESTIONS = [
+        {
+            "link_id": "SNM/842009",
+            "text": "Patient is from consanguineous union?",
+            "value_type": "codeable_concept",
+            "code": {"system": "http://snomed.info/sct", "code": "842009", "display": "Consanguinity"},
+            "options": [
+                {"system": "http://loinc.org", "code": "LA33-6", "display": "Yes"},
+                {"system": "http://loinc.org", "code": "LA32-8", "display": "No"},
+                {"system": "http://loinc.org", "code": "LA4489-6", "display": "Unknown"},
+            ],
+        },
+        {
+            "link_id": "SNM/74996004-pathology-report",
+            "text": "Confirm that a pathology report will be provided alongside the sample.",
+            "value_type": "codeable_concept",
+            "code": {"system": "http://snomed.info/sct", "code": "74996004", "display": "Confirmation of"},
+            "options": [
+                {"system": "http://loinc.org", "code": "LA33-6", "display": "Yes"},
+                {"system": "http://loinc.org", "code": "LA32-8", "display": "No"},
+                {"system": "http://loinc.org", "code": "LA4489-6", "display": "Unknown"},
+            ],
+        },
+        {
+            "link_id": "SNM/118185001",
+            "text": "Neonatal/Prenatal/Neither?",
+            "value_type": "codeable_concept",
+            "code": {"system": "http://snomed.info/sct", "code": "118185001", "display": "Finding related to pregnancy"},
+            "options": [
+                {"system": "http://snomed.info/sct", "code": "77386006", "display": "Pregnancy"},
+                {"system": "http://snomed.info/sct", "code": "255407002", "display": "Neonatal"},
+                {"system": "http://loinc.org", "code": "LA32-8", "display": "No"},
+            ],
+        },
+        {
+            "link_id": "SNM/370386005",
+            "text": "Does this test relate to a pregnancy with more than 1 fetus?",
+            "value_type": "codeable_concept",
+            "code": {"system": "http://snomed.info/sct", "code": "370386005", "display": "Ultrasound scan - multiple fetus"},
+            "options": [
+                {"system": "http://loinc.org", "code": "LA33-6", "display": "Yes"},
+                {"system": "http://loinc.org", "code": "LA32-8", "display": "No"},
+                {"system": "http://loinc.org", "code": "LA4489-6", "display": "Unknown"},
+            ],
+            "shown_when": {"link_id": "SNM/118185001", "code": "77386006"},
+        },
+        {
+            "link_id": "SNM/161714006",
+            "text": "Patient expected delivery date",
+            "value_type": "date_time",
+            "code": {"system": "http://snomed.info/sct", "code": "161714006", "display": "Estimated date of delivery"},
+            "shown_when": {"link_id": "SNM/118185001", "code": "77386006"},
+        },
+        {
+            "link_id": "SNM/598151000005105",
+            "text": "Patient gestation",
+            "value_type": "quantity",
+            "code": {"system": "http://snomed.info/sct", "code": "57036006", "display": "Fetal gestational age"},
+            "unit": {"unit": "wk", "system": "http://unitsofmeasure.org", "code": "wk"},
+            "shown_when": {"link_id": "SNM/118185001", "code": "77386006"},
+        },
+        {
+            "link_id": "SNM/17369002",
+            "text": "Is this test for a pregnancy loss?",
+            "value_type": "codeable_concept",
+            "code": {"system": "http://snomed.info/sct", "code": "17369002", "display": "Miscarriage"},
+            "options": [
+                {"system": "http://loinc.org", "code": "LA33-6", "display": "Yes"},
+                {"system": "http://loinc.org", "code": "LA32-8", "display": "No"},
+                {"system": "http://loinc.org", "code": "LA4489-6", "display": "Unknown"},
+            ],
+        },
+        {
+            "link_id": "SNM/419099009",
+            "text": "Is this test for a deceased infant?",
+            "value_type": "codeable_concept",
+            "code": {"system": "http://snomed.info/sct", "code": "419099009", "display": "Dead"},
+            "options": [
+                {"system": "http://loinc.org", "code": "LA33-6", "display": "Yes"},
+                {"system": "http://loinc.org", "code": "LA32-8", "display": "No"},
+                {"system": "http://loinc.org", "code": "LA4489-6", "display": "Unknown"},
+            ],
+        },
+    ]
+
+    @classmethod
+    def _build_aoe_observation(cls, question, raw_value, patient_ref):
+        """One Ask-At-Order-Entry answer as an Observation resource (see
+        ASK_AT_ORDER_ENTRY_QUESTIONS), `subject` referencing the
+        in-bundle Patient via its urn:uuid `patient_ref`. `raw_value` is
+        the submitted form value — an option code for a `codeable_concept`
+        question, an ISO date string for `date_time`, or a plain number
+        for `quantity`."""
+        observation = {
+            "resourceType": "Observation",
+            "status": "final",
+            "category": [{"coding": [
+                {"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"},
+            ]}],
+            "code": {"coding": [dict(question["code"])]},
+            "subject": {"reference": patient_ref},
+        }
+        if question["value_type"] == "codeable_concept":
+            option = next((o for o in question.get("options", []) if o["code"] == raw_value), None)
+            observation["valueCodeableConcept"] = {"coding": [dict(option) if option else {"code": raw_value}]}
+        elif question["value_type"] == "date_time":
+            observation["valueDateTime"] = raw_value
+        elif question["value_type"] == "quantity":
+            quantity = {"value": float(raw_value)}
+            quantity.update(question.get("unit") or {})
+            observation["valueQuantity"] = quantity
+        return observation
+
+    @staticmethod
+    def _format_gmc_number(value):
+        """Normalizes a GMC number to this IG's required identifier
+        *value* format — literally the letter "C" followed by the
+        digits (e.g. "C3456789"), per
+        https://nw-gmsa.github.io/en/StructureDefinition-PractitionerIdentifier.html#professional-registration-entry-identifier
+        ("CONSULTANT_CODE", format `CNNNNNNN`) — confirmed by that page's
+        own worked example, `{"system": "https://fhir.hl7.org.uk/Id/gmc-number",
+        "value": "C3456789"}`. Strips any existing "C"/"c" prefix first
+        and re-adds exactly one, so this is safe to call whether the
+        Practitioner resource already has it prefixed or not (e.g.
+        import_econcur() currently stores the bare digits). Returns None
+        unchanged if `value` is falsy."""
+        if not value:
+            return None
+        digits = value.strip().lstrip("Cc").strip()
+        return f"C{digits}" if digits else None
+
+    @staticmethod
+    def _logical_reference(system, value, display=None):
+        """A FHIR logical reference — `identifier` + optional `display`,
+        deliberately no `.reference` — for linking to a resource that
+        isn't included in this bundle and doesn't live on the receiving
+        system's server either. Mirrors exactly how the IG's own worked
+        example links PractitionerRole.practitioner/.organization (by
+        GMC number / ODS code) and MessageHeader.sender — a bundle meant
+        to travel to another system can't reference our internal
+        database ids, which would be meaningless there."""
+        ref = {"identifier": {"system": system, "value": value}}
+        if display:
+            ref["display"] = display
+        return ref
+
+    #: Fixed message destination for orders built by this screen — this
+    #: app is specifically for the North West Genomic Laboratory Hub, so
+    #: every order goes to the same place. Taken directly from the IG's
+    #: own worked example
+    #: (https://nw-gmsa.github.io/en/Bundle-GenomicsOrderMessageCodedEntries.html),
+    #: not guessed.
+    ORDER_MESSAGE_DESTINATION_ENDPOINT = "https://fhir.nwgenomics.nhs.uk/Endpoint/RIE"
+    ORDER_MESSAGE_DESTINATION_ODS = "699X0"
+    ORDER_MESSAGE_DESTINATION_NAME = "NORTH WEST GLH"
+
+    #: This app has no registered Endpoint resource of its own (unlike
+    #: the worked example's sending system, which has a real
+    #: "https://fhir.nwgenomics.nhs.uk/Endpoint/EPIC") — MessageHeader.source.endpoint
+    #: is mandatory per FHIR R4, so this is a placeholder rather than an
+    #: omission; not confirmed/registered anywhere.
+    ORDER_MESSAGE_SOURCE_ENDPOINT = "https://fhir.nwgenomics.nhs.uk/Endpoint/LabExplorer"
+
+    #: The IG's own published specimen-type ValueSet
+    #: (https://nw-gmsa.github.io/en/ValueSet-specimen-type.html) —
+    #: SNOMED-coded specimen types only; the ValueSet also includes an
+    #: open-ended "all codes in https://fhir.nwgenomics.nhs.uk/CodeSystem/IGENE"
+    #: rule for backward-compatible local codes, but the page's own text
+    #: says "SNOMED codes are preferred" and that CodeSystem's contents
+    #: aren't published anywhere this app can enumerate, so only the 24
+    #: SNOMED concepts are offered here. Hardcoded (not fetched live)
+    #: since — unlike GENOMIC_TEST_DIRECTORY_CODESYSTEM_URL — the
+    #: ValueSet's own JSON doesn't carry `display` text for most of these
+    #: concepts (only the rendered HTML expansion does), so a live fetch
+    #: wouldn't save anything here.
+    SPECIMEN_TYPE_VALUESET_URL = "https://fhir.nwgenomics.nhs.uk/ValueSet/specimen-type"
+    SPECIMEN_TYPE_CODES = [
+        {"code": "119297000", "display": "Blood specimen"},
+        {"code": "258580003", "display": "Whole blood specimen"},
+        {"code": "122552005", "display": "Arterial blood specimen"},
+        {"code": "122555007", "display": "Venous blood specimen"},
+        {"code": "122556008", "display": "Cord blood specimen"},
+        {"code": "737357006", "display": "Fetal blood specimen"},
+        {"code": "440500007", "display": "Dried blood spot specimen"},
+        {"code": "119359002", "display": "Bone marrow specimen"},
+        {"code": "119373006", "display": "Amniotic fluid specimen"},
+        {"code": "258565009", "display": "Chorionic villi specimen"},
+        {"code": "309201001", "display": "Ascitic fluid specimen"},
+        {"code": "258450006", "display": "Cerebrospinal fluid specimen"},
+        {"code": "122571007", "display": "Pericardial fluid specimen"},
+        {"code": "418564007", "display": "Pleural fluid specimen"},
+        {"code": "309147000", "display": "Thyroid cyst fluid specimen"},
+        {"code": "119342007", "display": "Saliva specimen"},
+        {"code": "122575003", "display": "Urine specimen"},
+        {"code": "733104004", "display": "Swab from buccal mucosa"},
+        {"code": "441479001", "display": "Fresh tissue specimen"},
+        {"code": "441652008", "display": "Formalin-fixed paraffin-embedded tissue specimen"},
+        {"code": "702451000", "display": "Cultured cells"},
+        {"code": "258566005", "display": "Deoxyribonucleic acid specimen"},
+        {"code": "441673008", "display": "Ribonucleic acid specimen"},
+        {"code": "1003517007", "display": "Freeze dried specimen"},
+    ]
+
+    @classmethod
+    def specimen_type_display(cls, code):
+        """Display text for a SPECIMEN_TYPE_CODES `code`, or the bare
+        code itself if it's somehow not in the list — same
+        trust-the-source-list pattern as genomic_test_directory_display()."""
+        for entry in cls.SPECIMEN_TYPE_CODES:
+            if entry["code"] == code:
+                return entry["display"]
+        return code
+
+    def build_order_message_bundle(
+        self, *, patient, organization, practitioner,
+        test_code, priority="routine", clinical_details=None,
+        specimen_type, specimen_date=None, specimen_received_date=None,
+        specimen_body_site=None, specimen_placer_id=None,
+        specimen_accession_number=None, specimen_tracking_number=None,
+        specimen_notes=None, aoe_answers=None,
+    ):
+        """
+        Builds a genomic test order as a FHIR message Bundle
+        (`Bundle.type = "message"`: a `MessageHeader` + the resources it
+        `focus`es on) for the order-create screen (app.order_new()) to
+        offer as a `.json` download — shaped after the IG's own worked
+        example at
+        https://nw-gmsa.github.io/en/Bundle-GenomicsOrderMessageCodedEntries.html.
+
+        **Nothing this method builds is written to the FHIR server** —
+        no `_post`/`_put` calls anywhere in it. `patient`/`organization`/
+        `practitioner` are the full resources already resolved from this
+        server (searched/picked, never freely typed — see
+        app.order_new()), not just ids, because a message bundle must be
+        self-contained: a receiving system has no way to dereference a
+        "Patient/<our-internal-id>" reference, so this inlines a full
+        copy of the picked Patient and links the picked
+        Practitioner/Organization by *identifier* (GMC number / ODS
+        code) rather than by internal id — `_logical_reference()`,
+        exactly how the worked example's own PractitionerRole entry (and
+        MessageHeader.sender) does it. Every resource in the bundle gets
+        a fresh `urn:uuid:` `fullUrl`; none of them have (or need) a
+        real server-assigned id.
+
+        `test_code` must be a code from genomic_test_directory_codes()
+        — its display text is looked up from there
+        (genomic_test_directory_display()) rather than trusting a
+        second free-typed field, so ServiceRequest.code/.text always
+        match what the R-code select actually offered.
+
+        `aoe_answers`, if given, is `{link_id: raw form value}` for
+        whichever of ASK_AT_ORDER_ENTRY_QUESTIONS were answered — each
+        becomes its own Observation entry (_build_aoe_observation()),
+        referenced from ServiceRequest.supportingInfo, same as the
+        worked example's OBX-* Observations for these same questions.
+
+        `specimen_type` is required — it must be a code from
+        SPECIMEN_TYPE_CODES — since the IG's Specimen profile makes
+        `Specimen.type` mandatory (1..1); every other `specimen_*`
+        parameter maps onto the fields listed under that profile's own
+        "Domain Archetype" table
+        (https://nw-gmsa.github.io/en/StructureDefinition-Specimen.html#domain-archetype):
+        `specimen_placer_id` → `Specimen.identifier[PlacerSpecimenNumber]`,
+        `specimen_accession_number` → `Specimen.accessionIdentifier`,
+        `specimen_tracking_number` → `Specimen.identifier[ShipmentTrackingNumber]`
+        (LOINC 97209-1, confirmed by that same table), `specimen_body_site`
+        → `Specimen.collection.bodySite`, `specimen_date` →
+        `Specimen.collection.collectedDateTime`, `specimen_received_date`
+        → `Specimen.receivedTime`.
+
+        One order = one test, one specimen — the paper form's note that
+        "more than one Test Indication Code can be requested" would need
+        multiple ServiceRequest resources (optionally sharing one
+        Specimen); not built here, submit the form again for a second
+        test. Fields the paper form has that neither this IG's profiles
+        nor the domain archetype/AskAtOrderEntry questions model
+        structurally ("taken by", say) fold into `specimen_notes`/
+        `clinical_details` free text instead, same faithful-subset-only
+        approach order_view.html documents for reading real orders back.
+        """
+        aoe_answers = aoe_answers or {}
+
+        def new_ref():
+            return f"urn:uuid:{uuid.uuid4()}"
+
+        entries = []
+
+        patient_ref = new_ref()
+        entries.append({"fullUrl": patient_ref, "resource": patient})
+
+        # GMC values on a stored Practitioner may or may not already
+        # carry the "C" prefix this IG's identifier format requires (see
+        # _format_gmc_number()) — normalized here so the exported bundle
+        # is spec-correct regardless of how it's stored on this server.
+        practitioner_gmc = self._format_gmc_number(self._identifier_value(practitioner, self.GMC_NUMBER_SYSTEM))
+        practitioner_name = self._practitioner_name(practitioner)
+        organization_ods = self.organisation_ods_code(organization)
+        organization_name = organization.get("name")
+
+        practitioner_role_ref = new_ref()
+        entries.append({"fullUrl": practitioner_role_ref, "resource": {
+            "resourceType": "PractitionerRole",
+            "practitioner": (
+                self._logical_reference(self.GMC_NUMBER_SYSTEM, practitioner_gmc, practitioner_name)
+                if practitioner_gmc else {"display": practitioner_name}
+            ),
+            "organization": (
+                self._logical_reference(self.ODS_ORGANIZATION_CODE_SYSTEM, organization_ods, organization_name)
+                if organization_ods else {"display": organization_name}
+            ),
+        }})
+
+        specimen_ref = new_ref()
+        specimen_identifiers = []
+        if specimen_placer_id:
+            specimen_identifiers.append({"system": self.SPECIMEN_IDENTIFIER_SYSTEM, "value": specimen_placer_id})
+        if specimen_tracking_number:
+            specimen_identifiers.append({
+                "type": {"coding": [{"system": "http://loinc.org", "code": "97209-1", "display": "Shipment tracking number"}]},
+                "value": specimen_tracking_number,
+            })
+        specimen = {
+            "resourceType": "Specimen",
+            "subject": {"reference": patient_ref},
+            "type": {"coding": [{
+                "system": "http://snomed.info/sct", "code": specimen_type,
+                "display": self.specimen_type_display(specimen_type),
+            }]},
+        }
+        if specimen_identifiers:
+            specimen["identifier"] = specimen_identifiers
+        if specimen_accession_number:
+            specimen["accessionIdentifier"] = {"value": specimen_accession_number}
+        if specimen_date:
+            specimen["collection"] = {"collectedDateTime": specimen_date}
+        if specimen_body_site:
+            specimen.setdefault("collection", {})["bodySite"] = {"text": specimen_body_site}
+        if specimen_received_date:
+            specimen["receivedTime"] = specimen_received_date
+        if specimen_notes:
+            specimen["note"] = [{"text": specimen_notes}]
+        entries.append({"fullUrl": specimen_ref, "resource": specimen})
+
+        supporting_info = []
+        for question in self.ASK_AT_ORDER_ENTRY_QUESTIONS:
+            raw_value = aoe_answers.get(question["link_id"])
+            if not raw_value:
+                continue
+            obs_ref = new_ref()
+            entries.append({"fullUrl": obs_ref, "resource": self._build_aoe_observation(question, raw_value, patient_ref)})
+            supporting_info.append({"reference": obs_ref})
+
+        placer_identifier = {
+            "system": self.ORDER_PLACER_NUMBER_SYSTEM,
+            "value": self.generate_order_placer_number(),
+            "type": {"coding": [{"system": self.IDENTIFIER_TYPE_SYSTEM, "code": self.PLACER_IDENTIFIER_TYPE}]},
+        }
+        if organization_ods:
+            placer_identifier["assigner"] = self._logical_reference(
+                self.ODS_ORGANIZATION_CODE_SYSTEM, organization_ods, organization_name)
+
+        test_display = self.genomic_test_directory_display(test_code)
+        order = {
+            "resourceType": "ServiceRequest",
+            "status": "active",
+            "intent": "order",
+            "category": [{"coding": [
+                {"system": "http://snomed.info/sct", "code": "116148004", "display": "Genomic procedure"},
+            ]}],
+            "priority": priority,
+            "code": {
+                "coding": [{"system": self.GENOMIC_TEST_DIRECTORY_SYSTEM, "code": test_code, "display": test_display}],
+                "text": test_display,
+            },
+            "subject": {"reference": patient_ref},
+            "requester": {"reference": practitioner_role_ref},
+            "authoredOn": date.today().isoformat(),
+            "reasonCode": [{"coding": [{"system": self.GENOMIC_TEST_DIRECTORY_SYSTEM, "code": test_code}]}],
+            "identifier": [placer_identifier],
+        }
+        if clinical_details:
+            order["note"] = [{"text": clinical_details}]
+        order["specimen"] = [{"reference": specimen_ref}]
+        if supporting_info:
+            order["supportingInfo"] = supporting_info
+
+        service_request_ref = new_ref()
+        entries.append({"fullUrl": service_request_ref, "resource": order})
+
+        message_header = {
+            "resourceType": "MessageHeader",
+            "eventCoding": {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0003",
+                "code": "O21",
+                "display": "OML - Laboratory order",
+            },
+            "destination": [{
+                "endpoint": self.ORDER_MESSAGE_DESTINATION_ENDPOINT,
+                "receiver": self._logical_reference(
+                    self.ODS_ORGANIZATION_CODE_SYSTEM,
+                    self.ORDER_MESSAGE_DESTINATION_ODS, self.ORDER_MESSAGE_DESTINATION_NAME),
+            }],
+            "sender": (
+                self._logical_reference(self.ODS_ORGANIZATION_CODE_SYSTEM, organization_ods, organization_name)
+                if organization_ods else {"display": organization_name}
+            ),
+            "source": {"software": "Lab Explorer", "endpoint": self.ORDER_MESSAGE_SOURCE_ENDPOINT},
+            "focus": [{"reference": service_request_ref, "type": "ServiceRequest"}],
+        }
+        entries.insert(0, {"fullUrl": new_ref(), "resource": message_header})
+
+        return {
+            "resourceType": "Bundle",
+            "type": "message",
+            "identifier": {"system": "urn:ietf:rfc:3986", "value": f"urn:uuid:{uuid.uuid4()}"},
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+            "entry": entries,
+        }

@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import secrets
 import difflib
 import threading
@@ -338,6 +339,9 @@ app.jinja_env.filters["report_identifier"] = FhirClient.report_identifier
 app.jinja_env.filters["reason_code_reference"] = reason_code_reference
 app.jinja_env.filters["conclusion_code_reference"] = conclusion_code_reference
 app.jinja_env.filters["slugify"] = slugify
+app.jinja_env.filters["nhs_or_chi_number"] = FhirClient.nhs_or_chi_number
+app.jinja_env.filters["organisation_ods_code"] = FhirClient.organisation_ods_code
+app.jinja_env.filters["gmc_number"] = lambda p: FhirClient._identifier_value(p, FhirClient.GMC_NUMBER_SYSTEM)
 
 
 @app.route("/", methods=["GET"])
@@ -494,6 +498,152 @@ def _patient_postcode(patient):
         if addr.get("postalCode"):
             return addr["postalCode"]
     return None
+
+
+@app.route("/order/new", methods=["GET", "POST"])
+def order_new():
+    """
+    Create-order screen for a genomic test order — builds a FHIR message
+    Bundle (MessageHeader + ServiceRequest + Specimen + Observations) and
+    offers it as a `.json` download; **nothing is written to the FHIR
+    server** (see FhirClient.build_order_message_bundle()). Laid out
+    after NW GLH's "Genomic Testing Request Form (Rare Disease)"
+    (https://mft.nhs.uk/nwglh/documents/test-request-forms/), the IG's
+    ServiceRequest/Specimen profiles, and its GenomicTestOrder
+    Questionnaire's "Ask At Order Entry" section (all at
+    https://nw-gmsa.github.io/).
+
+    Patient and requesting organisation are never freely typed — each is
+    a small search-then-pick panel backed by this FHIR server
+    (search_patients()/search_organizations()). The requesting clinician
+    picker only appears once an organisation is picked, and is *not* a
+    free search — practitioners_for_organization() lists only
+    Practitioners this FHIR server already links to that organisation
+    via an existing PractitionerRole, not every Practitioner on the
+    server. All three picks are carried across requests as
+    `patient_id`/`org_id`/`practitioner_id` (query params on GET, hidden
+    form fields once POSTing the finished order); only once all three
+    resolve does the rest of the order/specimen/AOE-questions form
+    render.
+    """
+    patient_id = request.values.get("patient_id", "").strip()
+    org_id = request.values.get("org_id", "").strip()
+    practitioner_id = request.values.get("practitioner_id", "").strip()
+
+    error = None
+    form_values = {
+        "test_code": request.form.get("test_code", ""),
+        "priority": request.form.get("priority", "routine"),
+        "clinical_details": request.form.get("clinical_details", ""),
+        "specimen_type": request.form.get("specimen_type", ""),
+        "specimen_date": request.form.get("specimen_date", ""),
+        "specimen_received_date": request.form.get("specimen_received_date", ""),
+        "specimen_body_site": request.form.get("specimen_body_site", ""),
+        "specimen_placer_id": request.form.get("specimen_placer_id", ""),
+        "specimen_accession_number": request.form.get("specimen_accession_number", ""),
+        "specimen_tracking_number": request.form.get("specimen_tracking_number", ""),
+        "specimen_notes": request.form.get("specimen_notes", ""),
+    }
+    # {link_id: submitted value} for every ASK_AT_ORDER_ENTRY_QUESTIONS
+    # field that was actually filled in — read here (not just on POST)
+    # so a re-rendered form after a validation error keeps them.
+    aoe_values = {
+        q["link_id"]: request.form.get(f"aoe.{q['link_id']}", "").strip()
+        for q in FhirClient.ASK_AT_ORDER_ENTRY_QUESTIONS
+    }
+
+    if request.method == "POST" and patient_id and org_id and practitioner_id:
+        test_code = form_values["test_code"].strip()
+        priority = form_values["priority"] if form_values["priority"] in ("routine", "urgent") else "routine"
+        clinical_details = form_values["clinical_details"].strip() or None
+        specimen_type = form_values["specimen_type"].strip() or None
+        specimen_date = form_values["specimen_date"].strip() or None
+        specimen_received_date = form_values["specimen_received_date"].strip() or None
+        specimen_body_site = form_values["specimen_body_site"].strip() or None
+        specimen_placer_id = form_values["specimen_placer_id"].strip() or None
+        specimen_accession_number = form_values["specimen_accession_number"].strip() or None
+        specimen_tracking_number = form_values["specimen_tracking_number"].strip() or None
+        specimen_notes = form_values["specimen_notes"].strip() or None
+
+        # Both mandatory per the IG's profiles: ServiceRequest.code (1..1)
+        # and Specimen.type (1..1) — see build_order_message_bundle().
+        if not test_code:
+            error = "A test R code is required."
+        elif not specimen_type:
+            error = "A specimen type is required."
+        else:
+            try:
+                patient = client.resolve_reference({"reference": f"Patient/{patient_id}"})
+                organization = client.resolve_reference({"reference": f"Organization/{org_id}"})
+                practitioner = client.resolve_reference({"reference": f"Practitioner/{practitioner_id}"})
+                if not (patient and organization and practitioner):
+                    raise ValueError("Patient, organisation, or clinician could not be re-resolved.")
+                bundle = client.build_order_message_bundle(
+                    patient=patient, organization=organization, practitioner=practitioner,
+                    test_code=test_code, priority=priority, clinical_details=clinical_details,
+                    specimen_type=specimen_type, specimen_date=specimen_date,
+                    specimen_received_date=specimen_received_date, specimen_body_site=specimen_body_site,
+                    specimen_placer_id=specimen_placer_id, specimen_accession_number=specimen_accession_number,
+                    specimen_tracking_number=specimen_tracking_number, specimen_notes=specimen_notes,
+                    aoe_answers={k: v for k, v in aoe_values.items() if v},
+                )
+            except Exception as e:
+                error = str(e)
+            else:
+                service_request = next(
+                    e["resource"] for e in bundle["entry"] if e["resource"]["resourceType"] == "ServiceRequest")
+                placer_number = service_request["identifier"][0]["value"]
+                response = Response(json.dumps(bundle, indent=2), mimetype="application/fhir+json")
+                response.headers["Content-Disposition"] = f"attachment; filename=genomic-order-{placer_number}.json"
+                return response
+
+    # Resolve whatever's already picked (GET query params, or a POST
+    # that failed validation — same ids, re-displayed alongside the
+    # error and the rest of what was typed). resolve_reference()
+    # swallows a bad/stale id into None rather than raising, same as
+    # every other reference lookup in this app.
+    patient = client.resolve_reference({"reference": f"Patient/{patient_id}"}) if patient_id else None
+    organization = client.resolve_reference({"reference": f"Organization/{org_id}"}) if org_id else None
+    practitioner = client.resolve_reference({"reference": f"Practitioner/{practitioner_id}"}) if practitioner_id else None
+
+    patient_name_q = request.args.get("patient_name", "").strip()
+    patient_nhs_q = request.args.get("patient_nhs", "").strip()
+    org_name_q = request.args.get("org_name", "").strip()
+    org_ods_q = request.args.get("org_ods", "").strip()
+
+    ready = bool(patient and organization and practitioner)
+
+    patient_results, org_results, practitioner_results = [], [], []
+    test_codes = []
+    try:
+        if not patient and (patient_name_q or patient_nhs_q):
+            patient_results = client.search_patients(name=patient_name_q or None, nhs_number=patient_nhs_q or None)
+        if not organization and (org_name_q or org_ods_q):
+            org_results = client.search_organizations(name=org_name_q or None, ods_code=org_ods_q or None)
+        if organization and not practitioner:
+            # Not a free search — every practitioner offered here already
+            # has a PractitionerRole at the picked organisation (see
+            # practitioners_for_organization()). The dropdown itself
+            # supports type-to-filter client-side (order_new.html), so
+            # the full org-scoped list is fetched once rather than
+            # re-querying per keystroke.
+            practitioner_results = client.practitioners_for_organization(organization["id"])
+        if ready:
+            test_codes = FhirClient.genomic_test_directory_codes()
+    except Exception as e:
+        error = error or str(e)
+
+    return render_template(
+        "order_new.html", error=error, form_values=form_values, aoe_values=aoe_values,
+        aoe_questions=FhirClient.ASK_AT_ORDER_ENTRY_QUESTIONS, test_codes=test_codes,
+        specimen_type_codes=FhirClient.SPECIMEN_TYPE_CODES,
+        patient=patient, organization=organization, practitioner=practitioner,
+        patient_id=patient_id, org_id=org_id, practitioner_id=practitioner_id,
+        patient_results=patient_results, org_results=org_results, practitioner_results=practitioner_results,
+        patient_name_q=patient_name_q, patient_nhs_q=patient_nhs_q,
+        org_name_q=org_name_q, org_ods_q=org_ods_q,
+        ready=ready,
+    )
 
 
 @app.route("/order/<order_id>")

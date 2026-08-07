@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>New Genomic Test Order</h1>
+  <p class="muted">
+    Laid out after NW GLH's
+    <a href="https://mft.nhs.uk/nwglh/documents/test-request-forms/" target="_blank">Genomic Testing Request Form (Rare Disease)</a>
+    and the <a href="https://nw-gmsa.github.io/" target="_blank">NHS North West Genomics FHIR IG</a>.
+    Patient and requesting organisation are always picked from this FHIR
+    server, never freely typed; the requesting clinician list is limited
+    to practitioners this server already links to the picked organisation
+    (via <code>PractitionerRole</code>).
+  </p>
+  <p class="muted">
+    <strong>Nothing is written to the FHIR server.</strong> Submitting
+    downloads the order as a FHIR message <code>Bundle</code> (<code>.json</code>)
+    laid out after the IG's own
+    <a href="https://nw-gmsa.github.io/en/StructureDefinition-BundleMessage-examples.html" target="_blank">worked message-bundle examples</a>.
+  </p>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <h2>Patient details</h2>
+  {% if patient %}
+    <table>
+      <tr><th>Name</th><td>{{ patient|human_name }}</td></tr>
+      <tr><th>Date of birth</th><td>{{ patient.birthDate or "—" }}</td></tr>
+      <tr><th>NHS number</th><td>{{ (patient|nhs_or_chi_number)[1] or "—" }}</td></tr>
+    </table>
+    <p><a href="{{ request.script_root }}/order/new?org_id={{ org_id }}&amp;practitioner_id={{ practitioner_id }}">Change patient</a></p>
+  {% else %}
+    <form method="get" action="{{ request.script_root }}/order/new">
+      <input type="hidden" name="org_id" value="{{ org_id }}">
+      <input type="hidden" name="practitioner_id" value="{{ practitioner_id }}">
+      <input type="text" name="patient_name" placeholder="Search by name" value="{{ patient_name_q }}">
+      <input type="text" name="patient_nhs" placeholder="Search by NHS number" value="{{ patient_nhs_q }}">
+      <button type="submit">Search</button>
+    </form>
+    {% if patient_results %}
+      <table>
+        <tr><th></th><th>Name</th><th>NHS number</th><th>D.O.B.</th></tr>
+        {% for p in patient_results %}
+          <tr>
+            <td><a href="{{ request.script_root }}/order/new?patient_id={{ p.id }}&amp;org_id={{ org_id }}&amp;practitioner_id={{ practitioner_id }}">Select</a></td>
+            <td>{{ p|human_name }}</td>
+            <td>{{ (p|nhs_or_chi_number)[1] or "—" }}</td>
+            <td>{{ p.birthDate or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% elif patient_name_q or patient_nhs_q %}
+      <p class="muted">No matching patients found.</p>
+    {% endif %}
+  {% endif %}
+
+  <h2>Requesting organisation</h2>
+  {% if organization %}
+    <table>
+      <tr><th>Name</th><td>{{ organization.name or "—" }}</td></tr>
+      <tr><th>ODS code</th><td>{{ organization|organisation_ods_code or "—" }}</td></tr>
+    </table>
+    <p><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}">Change organisation</a></p>
+  {% else %}
+    <form method="get" action="{{ request.script_root }}/order/new">
+      <input type="hidden" name="patient_id" value="{{ patient_id }}">
+      <input type="text" name="org_name" placeholder="Search by name" value="{{ org_name_q }}">
+      <input type="text" name="org_ods" placeholder="Search by ODS code" value="{{ org_ods_q }}">
+      <button type="submit">Search</button>
+    </form>
+    {% if org_results %}
+      <table>
+        <tr><th></th><th>Name</th><th>ODS code</th></tr>
+        {% for o in org_results %}
+          <tr>
+            <td><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}&amp;org_id={{ o.id }}">Select</a></td>
+            <td>{{ o.name or "—" }}</td>
+            <td>{{ o|organisation_ods_code or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% elif org_name_q or org_ods_q %}
+      <p class="muted">No matching organisations found.</p>
+    {% endif %}
+  {% endif %}
+
+  <h2>Requesting clinician</h2>
+  {% if practitioner %}
+    <table>
+      <tr><th>Name</th><td>{{ practitioner|human_name }}</td></tr>
+    </table>
+    <p><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}&amp;org_id={{ org_id }}">Change clinician</a></p>
+  {% elif not organization %}
+    <p class="muted">Pick a requesting organisation above first — the clinician list is limited to practitioners linked to it.</p>
+  {% elif practitioner_results %}
+    <form method="get" action="{{ request.script_root }}/order/new">
+      <input type="hidden" name="patient_id" value="{{ patient_id }}">
+      <input type="hidden" name="org_id" value="{{ org_id }}">
+      <p>
+        <input type="text" id="clinician-typeahead" placeholder="Type to filter…" autocomplete="off"
+               style="width: 100%; max-width: 300px;">
+      </p>
+      <select name="practitioner_id" id="clinician-select" size="8" style="width: 100%; max-width: 400px;">
+        <option value="">— select a clinician —</option>
+        {% for pr in practitioner_results %}
+          <option value="{{ pr.id }}" data-name="{{ (pr|human_name)|lower }}">
+            {{ pr|human_name }}{% if pr|gmc_number %} (GMC {{ pr|gmc_number }}){% endif %}
+          </option>
+        {% endfor %}
+      </select>
+      <p><button type="submit">Select</button></p>
+    </form>
+    <script>
+      (function () {
+        var input = document.getElementById('clinician-typeahead');
+        var options = document.querySelectorAll('#clinician-select option[data-name]');
+        input.addEventListener('input', function () {
+          var needle = input.value.toLowerCase();
+          options.forEach(function (opt) {
+            opt.hidden = needle.length > 0 && opt.getAttribute('data-name').indexOf(needle) === -1;
+          });
+        });
+      })();
+    </script>
+  {% else %}
+    <p class="muted">
+      No practitioners are linked to this organisation via PractitionerRole yet
+      (e.g. via an <a href="{{ request.script_root }}/admin/econcur-import">econcur import</a>).
+    </p>
+  {% endif %}
+
+  {% if ready %}
+    <h2>Test request</h2>
+    <form method="post" action="{{ request.script_root }}/order/new">
+      <input type="hidden" name="patient_id" value="{{ patient_id }}">
+      <input type="hidden" name="org_id" value="{{ org_id }}">
+      <input type="hidden" name="practitioner_id" value="{{ practitioner_id }}">
+
+      <table>
+        <tr>
+          <th>R code / test</th>
+          <td>
+            <select name="test_code" required style="width: 100%; max-width: 500px;">
+              <option value="">— select a test —</option>
+              {% for t in test_codes %}
+                <option value="{{ t.code }}" {{ "selected" if form_values.test_code == t.code }}>{{ t.code }} — {{ t.display }}</option>
+              {% endfor %}
+            </select>
+            {% if not test_codes %}
+              <p class="muted">Test code list could not be loaded from the IG's GenomicTestCode CodeSystem.</p>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th>Priority</th>
+          <td>
+            <label><input type="radio" name="priority" value="routine" {{ "checked" if form_values.priority != "urgent" }}> Routine</label>
+            &nbsp;&nbsp;
+            <label><input type="radio" name="priority" value="urgent" {{ "checked" if form_values.priority == "urgent" }}> Urgent</label>
+          </td>
+        </tr>
+      </table>
+
+      <h2>Clinical information</h2>
+      <p class="muted">
+        Eligibility criteria, clinical details, affected status, and (if
+        applicable) clinical utility — the closest FHIR equivalent of the
+        paper form's clinical details/clinical utility section is a single
+        free-text field (<code>ServiceRequest.note</code>).
+      </p>
+      <textarea name="clinical_details" rows="5" style="width: 100%; max-width: 600px;">{{ form_values.clinical_details }}</textarea>
+
+      <h2>Specimen details</h2>
+      <p class="muted">
+        Fields from the IG's Specimen profile's
+        <a href="https://nw-gmsa.github.io/en/StructureDefinition-Specimen.html#domain-archetype" target="_blank">Domain Archetype</a>.
+        Specimen type is required (<code>Specimen.type</code> is mandatory); everything else here is optional.
+      </p>
+      <table>
+        <tr>
+          <th>Sample type</th>
+          <td>
+            <select name="specimen_type" required style="width: 100%; max-width: 500px;">
+              <option value="">— select a specimen type —</option>
+              {% for t in specimen_type_codes %}
+                <option value="{{ t.code }}" {{ "selected" if form_values.specimen_type == t.code }}>{{ t.display }}</option>
+              {% endfor %}
+            </select>
+            <p class="muted">From the IG's <a href="https://nw-gmsa.github.io/en/ValueSet-specimen-type.html" target="_blank">specimen-type ValueSet</a> (SNOMED).</p>
+          </td>
+        </tr>
+        <tr>
+          <th>Sample collection date</th>
+          <td><input type="date" name="specimen_date" value="{{ form_values.specimen_date }}"></td>
+        </tr>
+        <tr>
+          <th>Sample received date</th>
+          <td><input type="date" name="specimen_received_date" value="{{ form_values.specimen_received_date }}"></td>
+        </tr>
+        <tr>
+          <th>Specimen source site</th>
+          <td><input type="text" name="specimen_body_site" value="{{ form_values.specimen_body_site }}" placeholder="Anatomical collection site" style="width: 100%; max-width: 400px;"></td>
+        </tr>
+        <tr>
+          <th>Specimen ID</th>
+          <td><input type="text" name="specimen_placer_id" value="{{ form_values.specimen_placer_id }}" style="width: 100%; max-width: 300px;"></td>
+        </tr>
+        <tr>
+          <th>Specimen accession number</th>
+          <td><input type="text" name="specimen_accession_number" value="{{ form_values.specimen_accession_number }}" style="width: 100%; max-width: 300px;"></td>
+        </tr>
+        <tr>
+          <th>Shipment tracking number</th>
+          <td><input type="text" name="specimen_tracking_number" value="{{ form_values.specimen_tracking_number }}" style="width: 100%; max-width: 300px;"></td>
+        </tr>
+        <tr>
+          <th>Specimen notes</th>
+          <td>
+            <textarea name="specimen_notes" rows="3" style="width: 100%; max-width: 400px;"
+                      placeholder="Taken by, high infection risk details, etc.">{{ form_values.specimen_notes }}</textarea>
+          </td>
+        </tr>
+      </table>
+
+      <h2>Ask at order entry</h2>
+      <p class="muted">
+        From the IG's
+        <a href="https://nw-gmsa.github.io/en/Questionnaire-GenomicTestOrder.html" target="_blank">GenomicTestOrder Questionnaire</a>'s
+        "Ask At Order Entry Questions" section — each answered question
+        becomes its own <code>Observation</code>, referenced from
+        <code>ServiceRequest.supportingInfo</code>. All optional.
+      </p>
+      <table>
+        {% for q in aoe_questions %}
+          <tr{% if q.shown_when %} data-shown-when="{{ q.shown_when.link_id }}:{{ q.shown_when.code }}" style="display:none"{% endif %}>
+            <th>{{ q.text }}</th>
+            <td>
+              {% if q.value_type == "codeable_concept" %}
+                <select name="aoe.{{ q.link_id }}" data-aoe-link-id="{{ q.link_id }}">
+                  <option value="">— not answered —</option>
+                  {% for opt in q.options %}
+                    <option value="{{ opt.code }}" {{ "selected" if aoe_values.get(q.link_id) == opt.code }}>{{ opt.display }}</option>
+                  {% endfor %}
+                </select>
+              {% elif q.value_type == "date_time" %}
+                <input type="date" name="aoe.{{ q.link_id }}" value="{{ aoe_values.get(q.link_id, "") }}">
+              {% elif q.value_type == "quantity" %}
+                <input type="number" name="aoe.{{ q.link_id }}" value="{{ aoe_values.get(q.link_id, "") }}"> {{ q.unit.unit }}
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+      <script>
+        (function () {
+          function applyConditions() {
+            document.querySelectorAll('[data-shown-when]').forEach(function (row) {
+              var parts = row.getAttribute('data-shown-when').split(':');
+              var trigger = document.querySelector('[data-aoe-link-id="' + parts[0] + '"]');
+              row.style.display = (trigger && trigger.value === parts[1]) ? '' : 'none';
+            });
+          }
+          document.querySelectorAll('[data-aoe-link-id]').forEach(function (el) {
+            el.addEventListener('change', applyConditions);
+          });
+          applyConditions();
+        })();
+      </script>
+
+      <p><button type="submit">Download order (FHIR JSON)</button></p>
+    </form>
+  {% else %}
+    <p class="muted">Select a patient, requesting organisation, and requesting clinician above to continue.</p>
+  {% endif %}
+{% endblock %}
