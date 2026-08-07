@@ -3251,6 +3251,51 @@ class FhirClient:
                 return entry["display"]
         return code
 
+    #: This IG's own CodeSystem for clinical indications — confirmed by
+    #: the worked example's own ServiceRequest.reasonCode
+    #: (https://nw-gmsa.github.io/en/Bundle-GenomicsOrderMessageCodedEntries.html,
+    #: `{"system": "https://fhir.nwgenomics.nhs.uk/CodeSystem/GenomicClinicalIndication",
+    #: "code": "R240", ...}` for test code "R240.1" — i.e. the indication
+    #: code is the test code's prefix before the "."). Used for
+    #: ServiceRequest.reasonCode in build_order_message_bundle() below,
+    #: derived automatically from whichever test_code was picked rather
+    #: than needing its own form field.
+    GENOMIC_CLINICAL_INDICATION_SYSTEM = "https://fhir.nwgenomics.nhs.uk/CodeSystem/GenomicClinicalIndication"
+
+    @classmethod
+    def genomic_clinical_indications(cls):
+        """Clinical indications derived from genomic_test_directory_codes()
+        — the R/M code's own two-part structure encodes this: the part
+        before the "." is the indication code (e.g. "M1" from "M1.1"),
+        and the part of the test's display text before its first comma
+        is the indication's description (e.g. "Colorectal Carcinoma"
+        from "M1.1"'s "Colorectal Carcinoma, Multi-target NGS panel,
+        small variant (KRAS, NRAS, BRAF)" — a display with no comma at
+        all just uses the whole thing). One entry per distinct indication
+        code, using the first matching test code's description (codes
+        sharing an indication prefix share the same leading phrase).
+        Powers the order-create screen's "Clinical indication" <select>,
+        which narrows the R/M code <select> to just that indication's
+        codes client-side (see order_new.html) — this method doesn't
+        need its own form field/round trip for that."""
+        indications = {}
+        for entry in cls.genomic_test_directory_codes():
+            indication_code = entry["code"].split(".")[0]
+            if indication_code not in indications:
+                indications[indication_code] = entry["display"].split(",")[0].strip()
+        return [{"code": code, "display": display} for code, display in indications.items()]
+
+    @classmethod
+    def genomic_clinical_indication_display(cls, indication_code):
+        """Description for an indication_code from
+        genomic_clinical_indications(), or the bare code itself if it's
+        somehow not in the list — same trust-the-source-list pattern as
+        genomic_test_directory_display()."""
+        for entry in cls.genomic_clinical_indications():
+            if entry["code"] == indication_code:
+                return entry["display"]
+        return indication_code
+
     #: "Ask At Order Entry Questions" — the linkId "AskAtOrderEntry"
     #: group from the IG's GenomicTestOrder Questionnaire
     #: (https://nw-gmsa.github.io/en/Questionnaire-GenomicTestOrder.html,
@@ -3440,6 +3485,49 @@ class FhirClient:
     #: omission; not confirmed/registered anywhere.
     ORDER_MESSAGE_SOURCE_ENDPOINT = "https://fhir.nwgenomics.nhs.uk/Endpoint/LabExplorer"
 
+    def _patient_for_order_bundle(self, patient, organization_ods, hospital_number=None):
+        """The Patient resource to inline into the order message bundle
+        — a shallow copy of `patient` with its `identifier` list adjusted
+        for the requesting organisation (`organization_ods`):
+
+        - Medical record number (HL7 v2-0203 "MR") identifiers assigned
+          by a *different* organisation are dropped — a receiving lab
+          has no use for, and shouldn't be sent, this patient's hospital
+          number at some unrelated trust. Non-MR identifiers (NHS
+          number, etc.) are never touched.
+        - If `hospital_number` is given (the order form's "Hospital
+          number" field — pre-filled from any existing MR identifier
+          already assigned by this organisation, see
+          medical_record_numbers()), it replaces whatever MR identifier
+          this organisation already had on the resource, in case the
+          form value was edited from what was pre-filled.
+
+        `resolve_organisation_ods()` (not organisation_ods_code()) is
+        used to read each identifier's own assigner, since — same as
+        medical_record_numbers() — `identifier.assigner` can be a
+        logical reference (inline `.identifier`, no resource to fetch)
+        or a literal one needing a GET, and this server uses either
+        shape depending on the identifier.
+        """
+        identifiers = []
+        for ident in patient.get("identifier", []):
+            codings = (ident.get("type") or {}).get("coding", [])
+            is_mr = any(c.get("code") == self.MEDICAL_RECORD_NUMBER_TYPE for c in codings)
+            if is_mr:
+                assigner_ods = self.resolve_organisation_ods(ident.get("assigner") or {})
+                if assigner_ods != organization_ods or hospital_number:
+                    continue
+            identifiers.append(ident)
+        if hospital_number:
+            new_mrn = {
+                "type": {"coding": [{"system": self.IDENTIFIER_TYPE_SYSTEM, "code": self.MEDICAL_RECORD_NUMBER_TYPE}]},
+                "value": hospital_number,
+            }
+            if organization_ods:
+                new_mrn["assigner"] = self._logical_reference(self.ODS_ORGANIZATION_CODE_SYSTEM, organization_ods)
+            identifiers.append(new_mrn)
+        return {**patient, "identifier": identifiers}
+
     #: The IG's own published specimen-type ValueSet
     #: (https://nw-gmsa.github.io/en/ValueSet-specimen-type.html) —
     #: SNOMED-coded specimen types only; the ValueSet also includes an
@@ -3491,12 +3579,11 @@ class FhirClient:
         return code
 
     def build_order_message_bundle(
-        self, *, patient, organization, practitioner,
-        test_code, priority="routine", clinical_details=None,
+        self, *, patient, organization, practitioner, hospital_number=None,
+        test_code, order_number=None, priority="routine", clinical_details=None,
         specimen_type, specimen_date=None, specimen_received_date=None,
-        specimen_body_site=None, specimen_placer_id=None,
-        specimen_accession_number=None, specimen_tracking_number=None,
-        specimen_notes=None, aoe_answers=None,
+        specimen_placer_id=None, specimen_accession_number=None,
+        specimen_tracking_number=None, aoe_answers=None,
     ):
         """
         Builds a genomic test order as a FHIR message Bundle
@@ -3513,13 +3600,18 @@ class FhirClient:
         app.order_new()), not just ids, because a message bundle must be
         self-contained: a receiving system has no way to dereference a
         "Patient/<our-internal-id>" reference, so this inlines a full
-        copy of the picked Patient and links the picked
+        copy of the picked Patient (see _patient_for_order_bundle() for
+        how its identifier list is adjusted first) and links the picked
         Practitioner/Organization by *identifier* (GMC number / ODS
         code) rather than by internal id — `_logical_reference()`,
         exactly how the worked example's own PractitionerRole entry (and
         MessageHeader.sender) does it. Every resource in the bundle gets
         a fresh `urn:uuid:` `fullUrl`; none of them have (or need) a
         real server-assigned id.
+
+        `hospital_number`, if given, becomes this Patient's medical
+        record number (HL7 v2-0203 "MR") *for the requesting
+        organisation* — see _patient_for_order_bundle().
 
         `test_code` must be a code from genomic_test_directory_codes()
         — its display text is looked up from there
@@ -3533,19 +3625,23 @@ class FhirClient:
         referenced from ServiceRequest.supportingInfo, same as the
         worked example's OBX-* Observations for these same questions.
 
+        `reasonCode` (the clinical indication) is always derived from
+        `test_code` itself — the part before the "." — rather than a
+        separate parameter; see genomic_clinical_indications().
+
         `specimen_type` is required — it must be a code from
         SPECIMEN_TYPE_CODES — since the IG's Specimen profile makes
         `Specimen.type` mandatory (1..1); every other `specimen_*`
-        parameter maps onto the fields listed under that profile's own
+        parameter maps onto fields listed under that profile's own
         "Domain Archetype" table
         (https://nw-gmsa.github.io/en/StructureDefinition-Specimen.html#domain-archetype):
         `specimen_placer_id` → `Specimen.identifier[PlacerSpecimenNumber]`,
         `specimen_accession_number` → `Specimen.accessionIdentifier`,
         `specimen_tracking_number` → `Specimen.identifier[ShipmentTrackingNumber]`
-        (LOINC 97209-1, confirmed by that same table), `specimen_body_site`
-        → `Specimen.collection.bodySite`, `specimen_date` →
+        (LOINC 97209-1, confirmed by that same table), `specimen_date` →
         `Specimen.collection.collectedDateTime`, `specimen_received_date`
-        → `Specimen.receivedTime`.
+        → `Specimen.receivedTime`. Source site/notes (which that table
+        also lists) aren't collected by the form.
 
         One order = one test, one specimen — the paper form's note that
         "more than one Test Indication Code can be requested" would need
@@ -3553,9 +3649,9 @@ class FhirClient:
         Specimen); not built here, submit the form again for a second
         test. Fields the paper form has that neither this IG's profiles
         nor the domain archetype/AskAtOrderEntry questions model
-        structurally ("taken by", say) fold into `specimen_notes`/
-        `clinical_details` free text instead, same faithful-subset-only
-        approach order_view.html documents for reading real orders back.
+        structurally fold into `clinical_details` free text instead, same
+        faithful-subset-only approach order_view.html documents for
+        reading real orders back.
         """
         aoe_answers = aoe_answers or {}
 
@@ -3564,8 +3660,14 @@ class FhirClient:
 
         entries = []
 
+        organization_ods = self.organisation_ods_code(organization)
+        organization_name = organization.get("name")
+
         patient_ref = new_ref()
-        entries.append({"fullUrl": patient_ref, "resource": patient})
+        entries.append({
+            "fullUrl": patient_ref,
+            "resource": self._patient_for_order_bundle(patient, organization_ods, hospital_number),
+        })
 
         # GMC values on a stored Practitioner may or may not already
         # carry the "C" prefix this IG's identifier format requires (see
@@ -3573,8 +3675,6 @@ class FhirClient:
         # is spec-correct regardless of how it's stored on this server.
         practitioner_gmc = self._format_gmc_number(self._identifier_value(practitioner, self.GMC_NUMBER_SYSTEM))
         practitioner_name = self._practitioner_name(practitioner)
-        organization_ods = self.organisation_ods_code(organization)
-        organization_name = organization.get("name")
 
         practitioner_role_ref = new_ref()
         entries.append({"fullUrl": practitioner_role_ref, "resource": {
@@ -3592,7 +3692,11 @@ class FhirClient:
         specimen_ref = new_ref()
         specimen_identifiers = []
         if specimen_placer_id:
-            specimen_identifiers.append({"system": self.SPECIMEN_IDENTIFIER_SYSTEM, "value": specimen_placer_id})
+            placer_specimen_id = {"value": specimen_placer_id}
+            if organization_ods:
+                placer_specimen_id["assigner"] = self._logical_reference(
+                    self.ODS_ORGANIZATION_CODE_SYSTEM, organization_ods, organization_name)
+            specimen_identifiers.append(placer_specimen_id)
         if specimen_tracking_number:
             specimen_identifiers.append({
                 "type": {"coding": [{"system": "http://loinc.org", "code": "97209-1", "display": "Shipment tracking number"}]},
@@ -3612,12 +3716,8 @@ class FhirClient:
             specimen["accessionIdentifier"] = {"value": specimen_accession_number}
         if specimen_date:
             specimen["collection"] = {"collectedDateTime": specimen_date}
-        if specimen_body_site:
-            specimen.setdefault("collection", {})["bodySite"] = {"text": specimen_body_site}
         if specimen_received_date:
             specimen["receivedTime"] = specimen_received_date
-        if specimen_notes:
-            specimen["note"] = [{"text": specimen_notes}]
         entries.append({"fullUrl": specimen_ref, "resource": specimen})
 
         supporting_info = []
@@ -3629,9 +3729,13 @@ class FhirClient:
             entries.append({"fullUrl": obs_ref, "resource": self._build_aoe_observation(question, raw_value, patient_ref)})
             supporting_info.append({"reference": obs_ref})
 
+        # order_number lets the form supply a placer number from an
+        # external ordering system instead of one this app mints itself
+        # — same ORDER_PLACER_NUMBER_SYSTEM/PLAC shape either way, so
+        # placer_identifier() reads either back identically.
         placer_identifier = {
             "system": self.ORDER_PLACER_NUMBER_SYSTEM,
-            "value": self.generate_order_placer_number(),
+            "value": order_number or self.generate_order_placer_number(),
             "type": {"coding": [{"system": self.IDENTIFIER_TYPE_SYSTEM, "code": self.PLACER_IDENTIFIER_TYPE}]},
         }
         if organization_ods:
@@ -3639,6 +3743,8 @@ class FhirClient:
                 self.ODS_ORGANIZATION_CODE_SYSTEM, organization_ods, organization_name)
 
         test_display = self.genomic_test_directory_display(test_code)
+        indication_code = test_code.split(".")[0]
+        indication_display = self.genomic_clinical_indication_display(indication_code)
         order = {
             "resourceType": "ServiceRequest",
             "status": "active",
@@ -3654,7 +3760,9 @@ class FhirClient:
             "subject": {"reference": patient_ref},
             "requester": {"reference": practitioner_role_ref},
             "authoredOn": date.today().isoformat(),
-            "reasonCode": [{"coding": [{"system": self.GENOMIC_TEST_DIRECTORY_SYSTEM, "code": test_code}]}],
+            "reasonCode": [{"coding": [
+                {"system": self.GENOMIC_CLINICAL_INDICATION_SYSTEM, "code": indication_code, "display": indication_display},
+            ]}],
             "identifier": [placer_identifier],
         }
         if clinical_details:

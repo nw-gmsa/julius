@@ -330,50 +330,81 @@ shaped after that same worked example:
   not guessed. `source.endpoint` (`ORDER_MESSAGE_SOURCE_ENDPOINT`) is a
   placeholder — this app has no real registered `Endpoint` resource of
   its own, unlike the worked example's sending system.
-- **`code` and `reasonCode`** are both populated from the one R-code the
-  select collects, under `GENOMIC_TEST_DIRECTORY_SYSTEM` — the paper
-  form has one R-code field, not the two separate FHIR concepts
-  `order_view.html` happens to read from separately (this bundle isn't
-  read by `order_view.html` at all, since it's never written to the
-  server, but the same one-code-two-places choice was kept for
-  consistency). One order = one test, one specimen (mandatory — see
-  below); the paper form's note that more than one Test Indication Code
-  can be requested
-  on one form isn't modelled — that would need multiple `ServiceRequest`
-  resources (optionally sharing one `Specimen`), so submit the form
-  again for a second test.
-- **Placer order number** — this app has no external order-numbering
-  system to draw one from, so `generate_order_placer_number()` mints its
-  own (`"LE" + today's date + a random 6-hex-digit suffix`) under a local
-  identifier system, `ORDER_PLACER_NUMBER_SYSTEM`
+- **`code` and `reasonCode` are two separate concepts, not the same
+  value repeated** — `code` (the test itself) is the full R/M code
+  under `GENOMIC_TEST_DIRECTORY_SYSTEM`; `reasonCode` (the clinical
+  indication) is the **prefix before the "."** (e.g. `"M1"` from
+  `"M1.1"`) under a different system, `GENOMIC_CLINICAL_INDICATION_SYSTEM`
+  (`https://fhir.nwgenomics.nhs.uk/CodeSystem/GenomicClinicalIndication`)
+  — confirmed by the worked example's own `reasonCode`
+  (`{"system": ".../GenomicClinicalIndication", "code": "R240", ...}`
+  for test code `"R240.1"`). `reasonCode` is *always derived from
+  `test_code` itself* inside `build_order_message_bundle()`
+  (`test_code.split(".")[0]`) — there's no separate form field for it to
+  go out of sync with. See "Clinical indication" below for the select
+  that surfaces this on the form itself. One order = one test, one
+  specimen (mandatory — see below); the paper form's note that more than
+  one Test Indication Code can be requested on one form isn't modelled —
+  that would need multiple `ServiceRequest` resources (optionally
+  sharing one `Specimen`), so submit the form again for a second test.
+- **Placer order number** — an optional "Order number" field lets the
+  form supply one from an external ordering system; if left blank,
+  `generate_order_placer_number()` mints one itself (`"LE" + today's
+  date + a random 6-hex-digit suffix`) under a local identifier system,
+  `ORDER_PLACER_NUMBER_SYSTEM`
   (`https://fhir.nwgenomics.nhs.uk/Id/lab-explorer-order-number`, same
   local-system convention as `IGENE_PATIENT_IDENTIFIER_SYSTEM`/
-  `SPECIMEN_IDENTIFIER_SYSTEM`), stored as a v2-0203 `"PLAC"`-typed
-  identifier — the same shape `placer_identifier()` reads back elsewhere
-  in this app, even though nothing reads this particular one back since
-  it's never posted anywhere. `app.order_new()` finds the `ServiceRequest`
-  entry by `resourceType` (not a positional index) to pull this value
-  back out for the download's filename.
+  `SPECIMEN_IDENTIFIER_SYSTEM`) — either way it's stored as a v2-0203
+  `"PLAC"`-typed identifier, the same shape `placer_identifier()` reads
+  back elsewhere in this app, with `assigner` set to the requesting
+  organisation (via `_logical_reference()`) when it has an ODS code.
+  `app.order_new()` finds the `ServiceRequest` entry by `resourceType`
+  (not a positional index) to pull this value back out for the
+  download's filename.
 - **Fields the paper form has that neither this IG's profiles nor the
   AOE questions model structurally** (e.g. "taken by") fold into
-  `specimen_notes`/`clinical_details` free text instead, same
-  faithful-subset-only approach `order_view.html` documents for reading
-  real orders back.
+  `clinical_details` free text instead, same faithful-subset-only
+  approach `order_view.html` documents for reading real orders back —
+  the domain archetype's own "source site"/notes-shaped fields aren't
+  collected by this form at all (deliberately trimmed; see below).
+
+**Clinical indication** — a new `<select>` above the R/M code one,
+populated by `genomic_clinical_indications()` (grouping
+`genomic_test_directory_codes()` by the prefix before each code's ".",
+using the first matching test's display text up to its first comma as
+the description — e.g. `"M1.1"`'s "Colorectal Carcinoma, Multi-target
+NGS panel, small variant (KRAS, NRAS, BRAF)" becomes indication `"M1"`
+"Colorectal Carcinoma"; a display with no comma at all just uses the
+whole thing). **Purely a client-side narrowing aid, not its own form
+field** — `order_new.html` gives every R/M code `<option>` a
+`data-indication` attribute (its own prefix) and a small script hides
+non-matching options when an indication is picked (clearing the R/M
+code selection if it no longer matches); nothing about the pick is
+submitted or read server-side, since `reasonCode` is derived from
+whatever `test_code` actually gets submitted anyway (see above) — the
+indication select can only ever narrow to a code that's already
+consistent with it.
 
 **Specimen is mandatory, and its fields follow the Specimen profile's own
 "Domain Archetype" table**
-(https://nw-gmsa.github.io/en/StructureDefinition-Specimen.html#domain-archetype),
-not just type/date/notes — `app.order_new()` rejects a submission with no
-`specimen_type` before calling `build_order_message_bundle()`, since the
-IG makes `Specimen.type` mandatory (1..1). The form's other specimen
-fields map onto that same table: **Specimen ID** →
-`Specimen.identifier[PlacerSpecimenNumber]` (`SPECIMEN_IDENTIFIER_SYSTEM`,
-the same system `specimen_identifier()` already reads elsewhere in this
-app), **Specimen accession number** → `Specimen.accessionIdentifier`,
-**Shipment tracking number** → `Specimen.identifier[ShipmentTrackingNumber]`
-(LOINC `97209-1`, confirmed by that table), **Specimen source site** →
-`Specimen.collection.bodySite` (free text), **Sample collection/received
-date** → `Specimen.collection.collectedDateTime`/`Specimen.receivedTime`.
+(https://nw-gmsa.github.io/en/StructureDefinition-Specimen.html#domain-archetype)
+— `app.order_new()` rejects a submission with no `specimen_type` before
+calling `build_order_message_bundle()`, since the IG makes
+`Specimen.type` mandatory (1..1). The form's other specimen fields map
+onto that same table: **Specimen ID** →
+`Specimen.identifier[PlacerSpecimenNumber]` — no `system` (removed;
+previously carried `SPECIMEN_IDENTIFIER_SYSTEM`, which named the
+*iGene* specimen identifier specifically, not a generic placer number),
+just a bare `value` plus an **`assigner`** identifying the requesting
+organisation (`_logical_reference()`, same as the placer order number's
+own `assigner` above) — **Specimen accession number** →
+`Specimen.accessionIdentifier`, **Shipment tracking number** →
+`Specimen.identifier[ShipmentTrackingNumber]` (LOINC `97209-1`,
+confirmed by that table), **Sample collection/received date** →
+`Specimen.collection.collectedDateTime`/`Specimen.receivedTime`.
+**Specimen source site and specimen notes are deliberately not
+collected** — removed from the form (they were free text; not worth the
+extra fields for this screen).
 
 **Specimen type is a `<select>` sourced from the IG's own
 `specimen-type` ValueSet**
@@ -431,6 +462,23 @@ the preload doesn't already cover a GMC number) tries the bare-digit form
 too if the "C"-prefixed search comes back empty. Verified directly: a
 Practitioner seeded with the old bare-digit identifier value is matched
 (not duplicated) by a re-import of the same GMC number.
+
+**Hospital number, and other-organisation medical record numbers being
+stripped from the exported Patient** — `_patient_for_order_bundle()`
+builds the Patient copy that actually goes into the bundle (not the raw
+resolved resource): any HL7 v2-0203 `"MR"`-typed identifier whose
+`assigner` isn't the requesting organisation is dropped before inlining
+— a receiving lab has no business seeing a patient's hospital number at
+some unrelated trust, and shouldn't be sent it. Non-MR identifiers (NHS
+number, etc.) are never touched. The order-create form surfaces this as
+a **"Hospital number"** field (`order_new.html`, top of the Test request
+table) — pre-filled, GET-only, from any existing MR identifier the
+picked Patient already has for the picked organisation
+(`medical_record_numbers()`, matched by `assigner_ods`); whatever value
+is actually submitted becomes (or replaces) that organisation's MR
+identifier on the exported Patient, letting the user correct/supply it
+rather than just silently dropping a patient's only hospital number for
+this trust because the stored data doesn't have one, or has a stale one.
 
 Reached from the nav ("Orders and Reports" → "New order"), or from a
 patient page's "Genomic test orders" section ("+ New order for this

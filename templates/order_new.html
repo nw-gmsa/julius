@@ -138,12 +138,39 @@
 
       <table>
         <tr>
+          <th>Hospital number</th>
+          <td>
+            <input type="text" name="hospital_number" value="{{ form_values.hospital_number }}" style="width: 100%; max-width: 300px;">
+            <p class="muted">
+              This patient's medical record number at the requesting
+              organisation — pre-filled if one is already on file.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <th>Clinical indication</th>
+          <td>
+            <select id="clinical-indication-select" style="width: 100%; max-width: 500px;">
+              <option value="">— any —</option>
+              {% for ind in clinical_indications %}
+                <option value="{{ ind.code }}">{{ ind.code }} — {{ ind.display }}</option>
+              {% endfor %}
+            </select>
+            <p class="muted">
+              Optional — derived from the R/M code's own prefix before the "."
+              (e.g. "M1" from "M1.1"); narrows the R/M code list below to just
+              that indication's tests.
+            </p>
+          </td>
+        </tr>
+        <tr>
           <th>R code / test</th>
           <td>
-            <select name="test_code" required style="width: 100%; max-width: 500px;">
+            <select name="test_code" id="test-code-select" required style="width: 100%; max-width: 500px;">
               <option value="">— select a test —</option>
               {% for t in test_codes %}
-                <option value="{{ t.code }}" {{ "selected" if form_values.test_code == t.code }}>{{ t.code }} — {{ t.display }}</option>
+                <option value="{{ t.code }}" data-indication="{{ t.code.split('.')[0] }}"
+                        {{ "selected" if form_values.test_code == t.code }}>{{ t.code }} — {{ t.display }}</option>
               {% endfor %}
             </select>
             {% if not test_codes %}
@@ -159,7 +186,31 @@
             <label><input type="radio" name="priority" value="urgent" {{ "checked" if form_values.priority == "urgent" }}> Urgent</label>
           </td>
         </tr>
+        <tr>
+          <th>Order number</th>
+          <td>
+            <input type="text" name="order_number" value="{{ form_values.order_number }}" style="width: 100%; max-width: 300px;">
+            <p class="muted">Optional — leave blank to have one generated automatically.</p>
+          </td>
+        </tr>
       </table>
+      <script>
+        (function () {
+          var indicationSelect = document.getElementById('clinical-indication-select');
+          var testCodeSelect = document.getElementById('test-code-select');
+          var options = testCodeSelect.querySelectorAll('option[data-indication]');
+          indicationSelect.addEventListener('change', function () {
+            var chosen = indicationSelect.value;
+            options.forEach(function (opt) {
+              opt.hidden = chosen.length > 0 && opt.getAttribute('data-indication') !== chosen;
+            });
+            var selected = testCodeSelect.options[testCodeSelect.selectedIndex];
+            if (chosen && selected && selected.hidden) {
+              testCodeSelect.value = '';
+            }
+          });
+        })();
+      </script>
 
       <h2>Clinical information</h2>
       <p class="muted">
@@ -198,10 +249,6 @@
           <td><input type="date" name="specimen_received_date" value="{{ form_values.specimen_received_date }}"></td>
         </tr>
         <tr>
-          <th>Specimen source site</th>
-          <td><input type="text" name="specimen_body_site" value="{{ form_values.specimen_body_site }}" placeholder="Anatomical collection site" style="width: 100%; max-width: 400px;"></td>
-        </tr>
-        <tr>
           <th>Specimen ID</th>
           <td><input type="text" name="specimen_placer_id" value="{{ form_values.specimen_placer_id }}" style="width: 100%; max-width: 300px;"></td>
         </tr>
@@ -212,13 +259,6 @@
         <tr>
           <th>Shipment tracking number</th>
           <td><input type="text" name="specimen_tracking_number" value="{{ form_values.specimen_tracking_number }}" style="width: 100%; max-width: 300px;"></td>
-        </tr>
-        <tr>
-          <th>Specimen notes</th>
-          <td>
-            <textarea name="specimen_notes" rows="3" style="width: 100%; max-width: 400px;"
-                      placeholder="Taken by, high infection risk details, etc.">{{ form_values.specimen_notes }}</textarea>
-          </td>
         </tr>
       </table>
 

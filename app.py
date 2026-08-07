@@ -532,17 +532,17 @@ def order_new():
 
     error = None
     form_values = {
+        "hospital_number": request.form.get("hospital_number", ""),
         "test_code": request.form.get("test_code", ""),
+        "order_number": request.form.get("order_number", ""),
         "priority": request.form.get("priority", "routine"),
         "clinical_details": request.form.get("clinical_details", ""),
         "specimen_type": request.form.get("specimen_type", ""),
         "specimen_date": request.form.get("specimen_date", ""),
         "specimen_received_date": request.form.get("specimen_received_date", ""),
-        "specimen_body_site": request.form.get("specimen_body_site", ""),
         "specimen_placer_id": request.form.get("specimen_placer_id", ""),
         "specimen_accession_number": request.form.get("specimen_accession_number", ""),
         "specimen_tracking_number": request.form.get("specimen_tracking_number", ""),
-        "specimen_notes": request.form.get("specimen_notes", ""),
     }
     # {link_id: submitted value} for every ASK_AT_ORDER_ENTRY_QUESTIONS
     # field that was actually filled in — read here (not just on POST)
@@ -553,17 +553,17 @@ def order_new():
     }
 
     if request.method == "POST" and patient_id and org_id and practitioner_id:
+        hospital_number = form_values["hospital_number"].strip() or None
         test_code = form_values["test_code"].strip()
+        order_number = form_values["order_number"].strip() or None
         priority = form_values["priority"] if form_values["priority"] in ("routine", "urgent") else "routine"
         clinical_details = form_values["clinical_details"].strip() or None
         specimen_type = form_values["specimen_type"].strip() or None
         specimen_date = form_values["specimen_date"].strip() or None
         specimen_received_date = form_values["specimen_received_date"].strip() or None
-        specimen_body_site = form_values["specimen_body_site"].strip() or None
         specimen_placer_id = form_values["specimen_placer_id"].strip() or None
         specimen_accession_number = form_values["specimen_accession_number"].strip() or None
         specimen_tracking_number = form_values["specimen_tracking_number"].strip() or None
-        specimen_notes = form_values["specimen_notes"].strip() or None
 
         # Both mandatory per the IG's profiles: ServiceRequest.code (1..1)
         # and Specimen.type (1..1) — see build_order_message_bundle().
@@ -580,11 +580,13 @@ def order_new():
                     raise ValueError("Patient, organisation, or clinician could not be re-resolved.")
                 bundle = client.build_order_message_bundle(
                     patient=patient, organization=organization, practitioner=practitioner,
-                    test_code=test_code, priority=priority, clinical_details=clinical_details,
+                    hospital_number=hospital_number,
+                    test_code=test_code, order_number=order_number,
+                    priority=priority, clinical_details=clinical_details,
                     specimen_type=specimen_type, specimen_date=specimen_date,
-                    specimen_received_date=specimen_received_date, specimen_body_site=specimen_body_site,
+                    specimen_received_date=specimen_received_date,
                     specimen_placer_id=specimen_placer_id, specimen_accession_number=specimen_accession_number,
-                    specimen_tracking_number=specimen_tracking_number, specimen_notes=specimen_notes,
+                    specimen_tracking_number=specimen_tracking_number,
                     aoe_answers={k: v for k, v in aoe_values.items() if v},
                 )
             except Exception as e:
@@ -614,7 +616,7 @@ def order_new():
     ready = bool(patient and organization and practitioner)
 
     patient_results, org_results, practitioner_results = [], [], []
-    test_codes = []
+    test_codes, clinical_indications = [], []
     try:
         if not patient and (patient_name_q or patient_nhs_q):
             patient_results = client.search_patients(name=patient_name_q or None, nhs_number=patient_nhs_q or None)
@@ -630,12 +632,30 @@ def order_new():
             practitioner_results = client.practitioners_for_organization(organization["id"])
         if ready:
             test_codes = FhirClient.genomic_test_directory_codes()
+            # Purely a client-side narrowing aid for the R/M code select
+            # (order_new.html) — the clinical indication itself is never
+            # submitted as its own field, build_order_message_bundle()
+            # derives it straight from whichever test_code was picked.
+            clinical_indications = FhirClient.genomic_clinical_indications()
+            # Pre-fill "Hospital number" from any existing MR identifier
+            # already assigned by the requesting organisation — GET only
+            # (a failed POST re-render keeps whatever was actually
+            # typed/submitted, even if that was cleared to blank).
+            if request.method == "GET" and not form_values["hospital_number"]:
+                org_ods = FhirClient.organisation_ods_code(organization)
+                existing_mrn = next(
+                    (m["value"] for m in client.medical_record_numbers(patient) if m["assigner_ods"] == org_ods),
+                    None,
+                )
+                if existing_mrn:
+                    form_values["hospital_number"] = existing_mrn
     except Exception as e:
         error = error or str(e)
 
     return render_template(
         "order_new.html", error=error, form_values=form_values, aoe_values=aoe_values,
         aoe_questions=FhirClient.ASK_AT_ORDER_ENTRY_QUESTIONS, test_codes=test_codes,
+        clinical_indications=clinical_indications,
         specimen_type_codes=FhirClient.SPECIMEN_TYPE_CODES,
         patient=patient, organization=organization, practitioner=practitioner,
         patient_id=patient_id, org_id=org_id, practitioner_id=practitioner_id,
