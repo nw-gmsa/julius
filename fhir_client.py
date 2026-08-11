@@ -3418,6 +3418,19 @@ class FhirClient:
         for `quantity`."""
         observation = {
             "resourceType": "Observation",
+            # Observation.identifier is 1..1 mandatory per the IG's
+            # ObservationOrder profile
+            # (https://nw-gmsa.github.io/en/StructureDefinition-ObservationOrder.html)
+            # -- confirmed by a real validation failure against a live
+            # server, not just a profile technicality. A bare generated
+            # UUID with no `system`, same shape a real producer's export
+            # uses for these (examples/Liverpool_O21_Apr26.json's OBX-*
+            # Observations, e.g.
+            # {"value": "54bbd361-474d-4090-9727-aaf1b7d1bacd"}) -- this
+            # app's own worked example
+            # (examples/genomic-order-YHCRABCDORDER.json) omits it
+            # entirely, which is what let this slip through unnoticed.
+            "identifier": [{"value": str(uuid.uuid4())}],
             "status": "final",
             "category": [{"coding": [
                 {"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"},
@@ -3779,6 +3792,9 @@ class FhirClient:
             obs_ref = new_ref()
             entries.append({"fullUrl": obs_ref, "resource": {
                 "resourceType": "Observation",
+                # Same ObservationOrder-profile requirement as
+                # _build_aoe_observation() -- see its comment.
+                "identifier": [{"value": str(uuid.uuid4())}],
                 "status": "final",
                 "category": [{"coding": [
                     {"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"},
