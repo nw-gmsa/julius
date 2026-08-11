@@ -23,6 +23,7 @@ import os
 import csv
 import io
 import re
+import time
 import base64
 import secrets
 import uuid
@@ -3583,7 +3584,7 @@ class FhirClient:
         test_code, order_number=None, priority="routine", clinical_details=None,
         specimen_type, specimen_date=None, specimen_received_date=None,
         specimen_placer_id=None, specimen_accession_number=None,
-        specimen_tracking_number=None, aoe_answers=None,
+        specimen_tracking_number=None, aoe_answers=None, extra_observations=None,
     ):
         """
         Builds a genomic test order as a FHIR message Bundle
@@ -3624,6 +3625,17 @@ class FhirClient:
         becomes its own Observation entry (_build_aoe_observation()),
         referenced from ServiceRequest.supportingInfo, same as the
         worked example's OBX-* Observations for these same questions.
+
+        `extra_observations`, if given, is a list of
+        `{"label", "value"}` dicts — parse_order_message_bundle()'s own
+        "extra observations" (ones from a loaded order that didn't match
+        any ASK_AT_ORDER_ENTRY_QUESTIONS) round-tripped back out as
+        simple `Observation`s (`code.text` = label, `valueString` =
+        value), also referenced from `ServiceRequest.supportingInfo`.
+        Loading an order and re-submitting it without this would
+        silently drop whatever supplementary data didn't fit one of the
+        7 fixed questions — this is what keeps it in the output instead
+        of only ever showing it read-only on the form.
 
         `reasonCode` (the clinical indication) is always derived from
         `test_code` itself — the part before the "." — rather than a
@@ -3729,6 +3741,22 @@ class FhirClient:
             entries.append({"fullUrl": obs_ref, "resource": self._build_aoe_observation(question, raw_value, patient_ref)})
             supporting_info.append({"reference": obs_ref})
 
+        for extra in extra_observations or []:
+            if not extra.get("value") or extra["value"] == "—":
+                continue
+            obs_ref = new_ref()
+            entries.append({"fullUrl": obs_ref, "resource": {
+                "resourceType": "Observation",
+                "status": "final",
+                "category": [{"coding": [
+                    {"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"},
+                ]}],
+                "code": {"text": extra.get("label") or "—"},
+                "subject": {"reference": patient_ref},
+                "valueString": extra["value"],
+            }})
+            supporting_info.append({"reference": obs_ref})
+
         # order_number lets the form supply a placer number from an
         # external ordering system instead of one this app mints itself
         # — same ORDER_PLACER_NUMBER_SYSTEM/PLAC shape either way, so
@@ -3803,3 +3831,445 @@ class FhirClient:
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
             "entry": entries,
         }
+
+    # ------------------------------------------------------------------
+    # ESB submission — /order/new's "Send to ESB" action (app.py)
+    #
+    # Sends a build_order_message_bundle() Bundle straight to this
+    # deployment's ESB (Enterprise Service Bus) $process-message
+    # endpoint instead of downloading it — a genuinely separate
+    # integration from the rest of this file: it talks to a different
+    # base URL, with its own OAuth2 client-credentials app registration,
+    # not the per-user Basic-auth FhirClient session everything else in
+    # this app uses. Kept as classmethods (no FhirClient instance/session
+    # needed) with a class-level token cache, same reasoning as
+    # _icb_boundary_cache/_genomic_test_directory_cache above: this
+    # doesn't depend on which user is logged in.
+    # ------------------------------------------------------------------
+
+    #: The two URLs are this deployment's actual values (not secrets) and
+    #: so have defaults; ESB_CLIENT_ID/ESB_CLIENT_SECRET below deliberately
+    #: don't — they're credentials, only ever read from the environment,
+    #: never hardcoded or committed. Same host as FHIR_BASE_URL's own
+    #: default (192.168.1.62) — see esb_config() for why FHIR_VERIFY_SSL
+    #: is reused for this endpoint's TLS verification too.
+    ESB_TOKEN_URL_DEFAULT = "https://192.168.1.62/healthconnect/oauth2/token"
+    ESB_PROCESS_MESSAGE_URL_DEFAULT = "https://192.168.1.62/healthconnect/ESB/$process-message"
+
+    #: Class-level OAuth2 token cache — not per-request, since a client-
+    #: credentials token is valid for every request until it expires
+    #: regardless of who's using this app.
+    _esb_token_cache = {"access_token": None, "expires_at": 0}
+
+    @classmethod
+    def esb_config(cls):
+        """(token_url, process_message_url, client_id, client_secret,
+        verify_ssl, scope) — read fresh from the environment on every
+        call (ESB_TOKEN_URL/ESB_PROCESS_MESSAGE_URL/ESB_CLIENT_ID/
+        ESB_CLIENT_SECRET/ESB_SCOPE), same lazy-env-var pattern
+        FhirClient.__init__ uses for FHIR_BASE_URL/FHIR_USER/
+        FHIR_PASSWORD, rather than freezing them at import time.
+        `verify_ssl` reuses FHIR_VERIFY_SSL rather than a separate env
+        var — the ESB endpoint is the same host (192.168.1.62) as this
+        deployment's own FHIR_BASE_URL, so the same TLS cert situation
+        applies. `scope` is None unless ESB_SCOPE is set — many OAuth2
+        authorization servers (InterSystems IRIS/HealthConnect's
+        included) reject a client_credentials token request with 400
+        `invalid_scope`/`invalid_request` if no `scope` is sent at all,
+        so this is opt-in per deployment rather than guessed at."""
+        return (
+            os.environ.get("ESB_TOKEN_URL", cls.ESB_TOKEN_URL_DEFAULT),
+            os.environ.get("ESB_PROCESS_MESSAGE_URL", cls.ESB_PROCESS_MESSAGE_URL_DEFAULT),
+            os.environ.get("ESB_CLIENT_ID"),
+            os.environ.get("ESB_CLIENT_SECRET"),
+            os.environ.get("FHIR_VERIFY_SSL", "false").lower() == "true",
+            os.environ.get("ESB_SCOPE"),
+        )
+
+    @classmethod
+    def esb_access_token(cls, force_refresh=False):
+        """OAuth2 client-credentials bearer token for the ESB (see
+        esb_config()) — client id/secret sent as HTTP Basic auth on the
+        token request, per this deployment's own instructions (not every
+        OAuth2 server does it this way; some expect them in the POST
+        body instead). Cached at class level until 60s before it expires,
+        so a burst of sends doesn't re-authenticate every time;
+        `force_refresh=True` bypasses the cache (send_order_to_esb()
+        uses this to recover from a 401 on an apparently-still-valid
+        cached token — expired early, or revoked server-side).
+
+        Raises RuntimeError if ESB_CLIENT_ID/ESB_CLIENT_SECRET aren't
+        set — this app never has default/hardcoded credentials for this
+        endpoint, unlike the two URLs above. Raises requests.HTTPError
+        with the authorization server's own error body (not just the
+        generic "400 Client Error: Bad Request" requests.Response.
+        raise_for_status() gives on its own — OAuth2 token errors are
+        JSON per RFC 6749 §5.2, `{"error": "...", "error_description":
+        "..."}`, and that detail is the only way to actually tell
+        invalid_client from invalid_scope from anything else) if the
+        token request itself is rejected.
+        """
+        token_url, _, client_id, client_secret, verify_ssl, scope = cls.esb_config()
+        if not client_id or not client_secret:
+            raise RuntimeError(
+                "ESB_CLIENT_ID / ESB_CLIENT_SECRET are not set as environment variables "
+                "— required to authenticate to the ESB before an order can be sent."
+            )
+        cached = cls._esb_token_cache
+        if not force_refresh and cached["access_token"] and time.time() < cached["expires_at"]:
+            return cached["access_token"]
+        data = {"grant_type": "client_credentials"}
+        if scope:
+            data["scope"] = scope
+        resp = requests.post(
+            token_url, data=data,
+            auth=HTTPBasicAuth(client_id, client_secret),
+            timeout=15, verify=verify_ssl,
+        )
+        if not resp.ok:
+            detail = None
+            try:
+                body = resp.json()
+                detail = body.get("error_description") or body.get("error")
+            except ValueError:
+                detail = (resp.text or "").strip()[:500] or None
+            message = f"ESB token request to {token_url} failed ({resp.status_code})"
+            if detail:
+                message += f": {detail}"
+            elif not scope:
+                message += " (no ESB_SCOPE set — try setting one if the server requires it)"
+            raise requests.HTTPError(message, response=resp)
+        token_data = resp.json()
+        access_token = token_data["access_token"]
+        expires_in = token_data.get("expires_in", 300)
+        cls._esb_token_cache = {"access_token": access_token, "expires_at": time.time() + max(expires_in - 60, 0)}
+        return access_token
+
+    @staticmethod
+    def _post_bundle_to_esb(url, bundle, token, verify_ssl):
+        return requests.post(
+            url, json=bundle,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/fhir+json",
+                "Accept": "application/fhir+json",
+            },
+            timeout=30, verify=verify_ssl,
+        )
+
+    @classmethod
+    def send_order_to_esb(cls, bundle):
+        """POSTs `bundle` (a build_order_message_bundle() message
+        Bundle) to the ESB's $process-message endpoint
+        (ESB_PROCESS_MESSAGE_URL, see esb_config()), Bearer-authenticated
+        via esb_access_token(). One retry with a forced token refresh on
+        a 401 — the one client-credentials failure worth silently
+        recovering from (a cached token that expired early or was
+        revoked server-side); any other failure (network error, 4xx/5xx
+        after the retry) raises via `raise_for_status()` for the caller
+        to show as-is, same "surface it, don't swallow it" approach this
+        app takes everywhere else.
+
+        Returns the parsed JSON response body (typically another message
+        Bundle — the $process-message response/acknowledgement), or None
+        if the response has no body / isn't JSON.
+        """
+        _, process_message_url, _, _, verify_ssl, _ = cls.esb_config()
+        token = cls.esb_access_token()
+        resp = cls._post_bundle_to_esb(process_message_url, bundle, token, verify_ssl)
+        if resp.status_code == 401:
+            token = cls.esb_access_token(force_refresh=True)
+            resp = cls._post_bundle_to_esb(process_message_url, bundle, token, verify_ssl)
+        resp.raise_for_status()
+        if not resp.content:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
+    @classmethod
+    def parse_order_message_bundle(cls, bundle):
+        """
+        Extracts order-create-screen prefill values from a previously
+        obtained genomic test order message Bundle — the same shape
+        build_order_message_bundle() produces (and a real downloaded
+        order, e.g. examples/genomic-order-YHCRABCDORDER.json, has):
+        MessageHeader + inline Patient + PractitionerRole (logical
+        references) + Specimen + Observations + ServiceRequest, all
+        linked by `urn:uuid:` `fullUrl`.
+
+        Patient/organisation/clinician still can't be filled in
+        directly — app.order_new()'s "always picked from this FHIR
+        server" rule doesn't change just because a file was loaded — so
+        this only extracts their *identifying* values (NHS number, ODS
+        code, GMC number) for the caller to search this server with
+        (search_patients()/search_organizations()/
+        practitioners_for_organization()). Everything else (test code,
+        specimen fields, priority, clinical details, AOE answers) comes
+        back ready to drop straight into form_values/aoe_values.
+
+        Raises ValueError if `bundle` isn't a Bundle containing a
+        ServiceRequest — this is meant for a bundle this same screen (or
+        something producing the same shape) built, not arbitrary FHIR.
+        """
+        if not isinstance(bundle, dict) or bundle.get("resourceType") != "Bundle":
+            raise ValueError("Not a FHIR Bundle.")
+
+        resources_by_ref = {
+            entry["fullUrl"]: entry["resource"]
+            for entry in bundle.get("entry", [])
+            if entry.get("fullUrl") and entry.get("resource")
+        }
+
+        def resolve(ref):
+            return resources_by_ref.get((ref or {}).get("reference")) if ref else None
+
+        service_request = next(
+            (r for r in resources_by_ref.values() if r.get("resourceType") == "ServiceRequest"), None)
+        if not service_request:
+            raise ValueError("No ServiceRequest found in this bundle.")
+
+        extracted = {}
+
+        patient = resolve(service_request.get("subject"))
+        organization_ods = None
+        if patient:
+            extracted["patient_nhs_number"] = cls.nhs_number(patient)
+            extracted["patient_name"] = cls._practitioner_name(patient)
+
+        # ServiceRequest.requester isn't always a PractitionerRole
+        # reference into this same bundle — a real producer (Liverpool's
+        # O21 export, examples/Liverpool_O21_Apr26.json) sends it as a
+        # bare logical reference straight to the requesting Organization
+        # instead ({"identifier": {ods-organization-code, ...}}, no
+        # `.reference`, no individually identified clinician anywhere in
+        # the bundle at all) — the same "requester isn't always a
+        # PractitionerRole" case requester_display() already handles on
+        # the read side (see "Reference resolution" elsewhere in this
+        # file). Handled here as three possibilities, broadest first:
+        requester_ref = service_request.get("requester") or {}
+        requester_resource = resolve(requester_ref)
+        if requester_resource and requester_resource.get("resourceType") == "PractitionerRole":
+            org_ref = requester_resource.get("organization") or {}
+            organization_ods = (org_ref.get("identifier") or {}).get("value")
+            extracted["organization_ods"] = organization_ods
+            extracted["organization_name"] = org_ref.get("display")
+            practitioner_ref = requester_resource.get("practitioner") or {}
+            gmc = (practitioner_ref.get("identifier") or {}).get("value")
+            if gmc:
+                extracted["practitioner_gmc"] = gmc
+                extracted["practitioner_name"] = practitioner_ref.get("display")
+        elif requester_resource and requester_resource.get("resourceType") == "Organization":
+            organization_ods = cls.organisation_ods_code(requester_resource)
+            extracted["organization_ods"] = organization_ods
+            extracted["organization_name"] = requester_resource.get("name")
+        elif requester_ref.get("identifier"):
+            organization_ods = requester_ref["identifier"].get("value")
+            extracted["organization_ods"] = organization_ods
+            extracted["organization_name"] = requester_ref.get("display")
+
+        if patient and organization_ods:
+            for ident in patient.get("identifier", []):
+                codings = (ident.get("type") or {}).get("coding", [])
+                if not any(c.get("code") == cls.MEDICAL_RECORD_NUMBER_TYPE for c in codings):
+                    continue
+                assigner_ods = ((ident.get("assigner") or {}).get("identifier") or {}).get("value")
+                if assigner_ods == organization_ods:
+                    extracted["hospital_number"] = ident.get("value")
+                    break
+
+        extracted["test_code"] = cls.test_directory_code(service_request.get("code"))
+        extracted["priority"] = service_request.get("priority") or "routine"
+        # Joins every note, not just the first — a real producer's
+        # export (examples/Liverpool_O21_Apr26.json) puts each
+        # order-entry-form field into its own separate `note` entry
+        # (27 of them, one per field: "**Referring Clinician Name:**
+        # : _Dr Natalie Canham_" and so on) rather than one combined
+        # block, so taking only note[0] silently dropped the rest.
+        note_texts = [n["text"] for n in (service_request.get("note") or []) if n.get("text")]
+        if note_texts:
+            extracted["clinical_details"] = "\n".join(note_texts)
+        order_number = cls.placer_identifier(service_request)
+        if order_number:
+            extracted["order_number"] = order_number
+
+        specimen_refs = service_request.get("specimen") or []
+        specimen = resolve(specimen_refs[0]) if specimen_refs else None
+        if not specimen:
+            # A real producer's export (examples/Liverpool_O21_Apr26.json)
+            # includes a Specimen resource in the bundle but never
+            # references it from ServiceRequest.specimen at all — same
+            # "servers don't reliably link things the way the spec
+            # implies" lesson as ctdna_orders()'s Bundle.entry.search.mode
+            # caveat elsewhere in this file. Falls back to the Specimen
+            # (if exactly one) whose own `subject` matches this order's
+            # patient, rather than leaving specimen_type/etc. unset.
+            subject_ref = (service_request.get("subject") or {}).get("reference")
+            candidates = [
+                r for r in resources_by_ref.values()
+                if r.get("resourceType") == "Specimen" and subject_ref
+                and (r.get("subject") or {}).get("reference") == subject_ref
+            ]
+            if len(candidates) == 1:
+                specimen = candidates[0]
+        if specimen:
+            for coding in (specimen.get("type") or {}).get("coding", []):
+                if coding.get("system") == "http://snomed.info/sct":
+                    extracted["specimen_type"] = coding.get("code")
+                    break
+            collection = specimen.get("collection") or {}
+            if collection.get("collectedDateTime"):
+                extracted["specimen_date"] = collection["collectedDateTime"][:10]
+            if specimen.get("receivedTime"):
+                extracted["specimen_received_date"] = specimen["receivedTime"][:10]
+            accession_value = (specimen.get("accessionIdentifier") or {}).get("value")
+            if accession_value:
+                extracted["specimen_accession_number"] = accession_value
+            for ident in specimen.get("identifier", []):
+                type_codes = [c.get("code") for c in (ident.get("type") or {}).get("coding", [])]
+                if "97209-1" in type_codes:
+                    extracted["specimen_tracking_number"] = ident.get("value")
+                elif not ident.get("type"):
+                    extracted["specimen_placer_id"] = ident.get("value")
+
+        def is_observation_panel(observation):
+            """Whether `observation` is a grouping/"panel" Observation —
+            just a `hasMember` list pointing at the real ones, no code
+            or value of its own (examples/Liverpool_O21_Apr26.json's
+            single supportingInfo entry is exactly this: 14 real
+            Observations grouped under one panel with nothing but
+            `hasMember`) — as opposed to a leaf Observation that merely
+            also happens to reference others."""
+            has_own_code = bool(((observation.get("code") or {}).get("coding")) or (observation.get("code") or {}).get("text"))
+            has_own_value = any(key.startswith("value") for key in observation)
+            return bool(observation.get("hasMember")) and not has_own_code and not has_own_value
+
+        def flatten_observation_refs(refs):
+            """Expands `refs` (a list of Observation References, e.g.
+            ServiceRequest.supportingInfo) into (reference_url,
+            observation) pairs for the *leaf* Observations they resolve
+            to — dereferencing through any panel Observation's
+            `hasMember` (recursively, in case a panel groups other
+            panels) rather than yielding the panel itself, which has no
+            code/value to match against ASK_AT_ORDER_ENTRY_QUESTIONS."""
+            leaves = []
+            for ref in refs or []:
+                obs = resolve(ref)
+                if not obs or obs.get("resourceType") != "Observation":
+                    continue
+                if is_observation_panel(obs):
+                    leaves.extend(flatten_observation_refs(obs.get("hasMember")))
+                else:
+                    leaves.append(((ref or {}).get("reference"), obs))
+            return leaves
+
+        aoe_values = {}
+        matched_observation_urls = set()
+        for obs_ref_url, obs in flatten_observation_refs(service_request.get("supportingInfo")):
+            obs_coding = ((obs.get("code") or {}).get("coding") or [{}])[0]
+            for question in cls.ASK_AT_ORDER_ENTRY_QUESTIONS:
+                q_code = question["code"]
+                if q_code["system"] != obs_coding.get("system") or q_code["code"] != obs_coding.get("code"):
+                    continue
+                matched_observation_urls.add(obs_ref_url)
+                if question["value_type"] == "codeable_concept":
+                    value_coding = ((obs.get("valueCodeableConcept") or {}).get("coding") or [{}])[0]
+                    if value_coding.get("code"):
+                        aoe_values[question["link_id"]] = value_coding["code"]
+                elif question["value_type"] == "date_time":
+                    value = obs.get("valueDateTime")
+                    if value:
+                        aoe_values[question["link_id"]] = value[:10]
+                elif question["value_type"] == "quantity":
+                    value = (obs.get("valueQuantity") or {}).get("value")
+                    if value is not None:
+                        aoe_values[question["link_id"]] = str(value)
+                break
+        extracted["aoe_values"] = aoe_values
+
+        # Observations that aren't one of the fixed
+        # ASK_AT_ORDER_ENTRY_QUESTIONS (and so have nowhere to go as an
+        # editable field) still get surfaced — read-only — rather than
+        # silently dropped. Scans every Observation in the bundle, not
+        # just ones service_request.supportingInfo actually references:
+        # a real producer (examples/Liverpool_O21_Apr26.json) includes
+        # over a dozen free-text Q&A-style Observations that
+        # supportingInfo never references at all.
+        extra_observations = []
+        for full_url, resource in resources_by_ref.items():
+            if resource.get("resourceType") != "Observation" or full_url in matched_observation_urls:
+                continue
+            label, value = cls._observation_label_and_value(resource)
+            if label != "—" or value != "—":
+                extra_observations.append({"label": label, "value": value})
+        extracted["extra_observations"] = extra_observations
+
+        return extracted
+
+    @staticmethod
+    def _observation_label_and_value(observation):
+        """Best-effort (label, value) for an arbitrary Observation, for
+        parse_order_message_bundle()'s "extra observations" (ones that
+        aren't one of ASK_AT_ORDER_ENTRY_QUESTIONS, shown read-only
+        instead). Handles two shapes:
+
+        - The normal one: `code` names the question, a `value[x]`
+          carries the answer (valueCodeableConcept's coding display/
+          text, valueQuantity's value+unit, or the raw value for
+          valueString/valueDateTime/valueInteger/valueBoolean).
+        - A real producer's non-conformant one (Liverpool's O21 export,
+          examples/Liverpool_O21_Apr26.json): no `value[x]` at all —
+          the question text is in `code.coding[0].code` and the answer
+          in `code.coding[0].display` instead. Only used as a fallback
+          when there's genuinely no `value[x]` to prefer, so a properly
+          value[x]-shaped Observation is never misread this way.
+        """
+        code = observation.get("code") or {}
+        codings = code.get("coding") or []
+        first = codings[0] if codings else {}
+
+        value_text = None
+        for key in ("valueCodeableConcept", "valueQuantity", "valueString", "valueDateTime", "valueInteger", "valueBoolean"):
+            value = observation.get(key)
+            if value is None:
+                continue
+            if key == "valueCodeableConcept":
+                value_codings = value.get("coding") or []
+                value_text = (value_codings[0].get("display") if value_codings else None) or value.get("text")
+            elif key == "valueQuantity":
+                value_text = " ".join(str(p) for p in [value.get("value"), value.get("unit") or value.get("code")] if p)
+            else:
+                value_text = str(value)
+            break
+
+        if value_text:
+            label = code.get("text") or first.get("display") or first.get("code") or "—"
+            return label, value_text
+
+        if first.get("code") and first.get("display"):
+            return first["code"].rstrip(":").strip(), first["display"]
+
+        return (code.get("text") or first.get("display") or first.get("code") or "—"), "—"
+
+    @staticmethod
+    def extract_hl7v2_message(esb_response):
+        """The HL7 v2 message embedded in a $process-message ESB
+        response (see examples/OrderResponse.json) — this deployment's
+        ESB replies with a message Bundle whose
+        `OperationOutcome.issue[].diagnostics` carries the HL7 v2 the
+        FHIR order was actually converted to and sent onward as
+        (segments separated by "\\r", standard HL7 v2 — not a documented
+        FHIR convention, just what this ESB happens to do). Returns None
+        if `esb_response` isn't a Bundle, or has no OperationOutcome
+        with a non-empty `diagnostics` string on any of its issues."""
+        if not isinstance(esb_response, dict):
+            return None
+        for entry in esb_response.get("entry", []):
+            resource = entry.get("resource") or {}
+            if resource.get("resourceType") != "OperationOutcome":
+                continue
+            for issue in resource.get("issue", []):
+                if issue.get("diagnostics"):
+                    return issue["diagnostics"]
+        return None

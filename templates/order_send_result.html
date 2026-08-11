@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Order sent to ESB</h1>
+
+  {% if error %}
+    <div class="error">
+      <strong>Send failed:</strong> {{ error }}
+      <p class="muted">Nothing was written to the FHIR server either — this order still only exists as the bundle that was submitted. You can go back and try again, or download it instead.</p>
+    </div>
+  {% else %}
+    <div class="card">
+      <strong>Submitted successfully.</strong> Placer number: <code>{{ placer_number }}</code>
+    </div>
+  {% endif %}
+
+  {% if hl7v2_message %}
+    <h2>HL7 v2 message</h2>
+    <p class="muted">
+      The HL7 v2 message the ESB converted this order into and sent
+      onward as, extracted from the response's own
+      <code>OperationOutcome.issue[].diagnostics</code>.
+    </p>
+    <pre style="white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 10px; border-radius: 4px; overflow-x: auto;">{{ hl7v2_message }}</pre>
+  {% endif %}
+
+  {% if response_body %}
+    <h2>Raw ESB response</h2>
+    <pre style="white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 10px; border-radius: 4px; overflow-x: auto;">{{ response_body }}</pre>
+  {% endif %}
+
+  <p><a href="{{ request.script_root }}/order/new">&larr; Place another order</a></p>
+{% endblock %}

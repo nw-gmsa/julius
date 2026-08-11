@@ -30,6 +30,17 @@ app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 # long-lived process, but a lot of abandoned logins would leak memory.
 _session_clients = {}
 
+# order_new()'s "Load from a saved FHIR order" state (FhirClient.
+# parse_order_message_bundle()'s return value), keyed by a random token
+# carried through the picker flow's GET links/hidden fields as
+# `load_token` — same server-side-dict-keyed-by-a-token pattern as
+# _session_clients above. Needed because picking a patient/organisation/
+# clinician that didn't auto-resolve is a plain GET, and GETs carry no
+# form body — without this, everything a "load" just filled in would be
+# gone the moment the user had to pick one of those manually. Same no-
+# expiry-beyond-the-life-of-the-process caveat as _session_clients.
+_order_load_cache = {}
+
 LOGIN_EXEMPT_ENDPOINTS = {"login", "static"}
 
 #: Usernames allowed to see/use the Admin screens (the bulk clear-downs,
@@ -552,7 +563,107 @@ def order_new():
         for q in FhirClient.ASK_AT_ORDER_ENTRY_QUESTIONS
     }
 
-    if request.method == "POST" and patient_id and org_id and practitioner_id:
+    # "Load from a saved FHIR order" — reads a previously downloaded (or
+    # otherwise obtained) order bundle, e.g. examples/genomic-order-
+    # YHCRABCDORDER.json, and pre-fills the rest of this route's usual
+    # state from it (FhirClient.parse_order_message_bundle()) rather
+    # than building/submitting anything. patient_id/org_id/
+    # practitioner_id can only be set here by actually finding a
+    # matching resource on this server — the loaded bundle's own inline
+    # Patient/logical-reference Practitioner+Organization are never
+    # used directly, same "always picked from this server" rule as the
+    # rest of this route. load_notes surfaces anything that couldn't be
+    # resolved that way, so the picker sections below explain themselves
+    # rather than just silently starting from patient_id="".
+    load_notes = []
+    load_token = request.values.get("load_token", "").strip()
+    # The parsed prefill state from a loaded file (FhirClient.
+    # parse_order_message_bundle()'s return value) — either freshly
+    # parsed below (a "load" POST) or recovered from _order_load_cache
+    # via load_token (any later request in the same picker flow, most
+    # importantly the GET a manual patient/organisation/clinician pick
+    # triggers). None if no file has been loaded this flow at all.
+    loaded = None
+
+    if request.method == "POST" and request.form.get("action") == "load":
+        upload = request.files.get("order_file")
+        if not upload or not upload.filename:
+            error = "Choose a FHIR order JSON file to load."
+        else:
+            try:
+                loaded_bundle = json.loads(upload.read())
+                loaded = FhirClient.parse_order_message_bundle(loaded_bundle)
+            except Exception as e:
+                error = f"Could not read that file as a FHIR order bundle: {e}"
+            else:
+                load_token = secrets.token_urlsafe(16)
+                _order_load_cache[load_token] = loaded
+                try:
+                    if loaded.get("patient_nhs_number"):
+                        matches = client.search_patients(nhs_number=loaded["patient_nhs_number"])
+                        if len(matches) == 1:
+                            patient_id = matches[0]["id"]
+                        else:
+                            load_notes.append(
+                                f"{'No patient' if not matches else 'More than one patient'} found for NHS "
+                                f"number {loaded['patient_nhs_number']} "
+                                f"({loaded.get('patient_name') or 'unknown name'}) — search manually below."
+                            )
+                    if loaded.get("organization_ods"):
+                        matches = client.search_organizations(ods_code=loaded["organization_ods"])
+                        if len(matches) == 1:
+                            org_id = matches[0]["id"]
+                        else:
+                            load_notes.append(
+                                f"Organisation with ODS code {loaded['organization_ods']} "
+                                f"({loaded.get('organization_name') or 'unknown name'}) not found on this "
+                                f"server — search manually below."
+                            )
+                    if org_id and loaded.get("practitioner_gmc"):
+                        wanted_gmc = FhirClient._format_gmc_number(loaded["practitioner_gmc"])
+                        candidates = client.practitioners_for_organization(org_id)
+                        match = next(
+                            (p for p in candidates if FhirClient._format_gmc_number(
+                                FhirClient._identifier_value(p, FhirClient.GMC_NUMBER_SYSTEM)) == wanted_gmc),
+                            None,
+                        )
+                        if match:
+                            practitioner_id = match["id"]
+                        else:
+                            load_notes.append(
+                                f"Clinician with GMC {loaded['practitioner_gmc']} "
+                                f"({loaded.get('practitioner_name') or 'unknown name'}) not linked to this "
+                                f"organisation — pick one below."
+                            )
+                except Exception as e:
+                    error = error or str(e)
+    elif load_token:
+        loaded = _order_load_cache.get(load_token)
+
+    # Re-applying `loaded` onto form_values/aoe_values is only safe when
+    # request.form doesn't already hold the real, possibly-user-edited
+    # values — true for the "load" POST itself (its own form has no
+    # test_code/specimen_* fields at all) and for every GET in the
+    # picker flow (a GET has no form body). It's NOT true for a
+    # download/send_esb POST that failed validation and fell through to
+    # this same render — request.form there holds what the user actually
+    # has in the form right now, which must never be silently overwritten
+    # by the originally-loaded values.
+    resubmitting_order = request.method == "POST" and request.form.get("action") in ("download", "send_esb")
+    if loaded and not resubmitting_order:
+        for key in (
+            "hospital_number", "test_code", "order_number", "priority", "clinical_details",
+            "specimen_type", "specimen_date", "specimen_received_date",
+            "specimen_placer_id", "specimen_accession_number", "specimen_tracking_number",
+        ):
+            if loaded.get(key):
+                form_values[key] = loaded[key]
+        aoe_values.update({k: v for k, v in (loaded.get("aoe_values") or {}).items() if v})
+    # extra_observations has no form field at all — always safe to pull
+    # from `loaded` regardless of resubmitting_order.
+    extra_observations = (loaded or {}).get("extra_observations") or []
+
+    if request.method == "POST" and patient_id and org_id and practitioner_id and request.form.get("action") in ("download", "send_esb"):
         hospital_number = form_values["hospital_number"].strip() or None
         test_code = form_values["test_code"].strip()
         order_number = form_values["order_number"].strip() or None
@@ -588,6 +699,7 @@ def order_new():
                     specimen_placer_id=specimen_placer_id, specimen_accession_number=specimen_accession_number,
                     specimen_tracking_number=specimen_tracking_number,
                     aoe_answers={k: v for k, v in aoe_values.items() if v},
+                    extra_observations=extra_observations,
                 )
             except Exception as e:
                 error = str(e)
@@ -595,6 +707,27 @@ def order_new():
                 service_request = next(
                     e["resource"] for e in bundle["entry"] if e["resource"]["resourceType"] == "ServiceRequest")
                 placer_number = service_request["identifier"][0]["value"]
+
+                if request.form.get("action") == "send_esb":
+                    esb_error = None
+                    esb_response = None
+                    hl7v2_message = None
+                    try:
+                        esb_response = client.send_order_to_esb(bundle)
+                        hl7v2_message = FhirClient.extract_hl7v2_message(esb_response)
+                        if hl7v2_message:
+                            # HL7 v2 segments are \r-separated on the wire —
+                            # normalize to \n so a <pre> block shows one
+                            # segment per line instead of one long run.
+                            hl7v2_message = hl7v2_message.replace("\r\n", "\n").replace("\r", "\n")
+                    except Exception as e:
+                        esb_error = str(e)
+                    return render_template(
+                        "order_send_result.html", error=esb_error, placer_number=placer_number,
+                        hl7v2_message=hl7v2_message,
+                        response_body=json.dumps(esb_response, indent=2) if esb_response is not None else None,
+                    )
+
                 response = Response(json.dumps(bundle, indent=2), mimetype="application/fhir+json")
                 response.headers["Content-Disposition"] = f"attachment; filename=genomic-order-{placer_number}.json"
                 return response
@@ -653,7 +786,9 @@ def order_new():
         error = error or str(e)
 
     return render_template(
-        "order_new.html", error=error, form_values=form_values, aoe_values=aoe_values,
+        "order_new.html", error=error, form_values=form_values, aoe_values=aoe_values, load_notes=load_notes,
+        load_token=load_token,
+        extra_observations=extra_observations,
         aoe_questions=FhirClient.ASK_AT_ORDER_ENTRY_QUESTIONS, test_codes=test_codes,
         clinical_indications=clinical_indications,
         specimen_type_codes=FhirClient.SPECIMEN_TYPE_CODES,

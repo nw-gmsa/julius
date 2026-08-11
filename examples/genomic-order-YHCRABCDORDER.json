@@ -1,0 +1,608 @@
+{
+  "resourceType": "Bundle",
+  "type": "message",
+  "identifier": {
+    "system": "urn:ietf:rfc:3986",
+    "value": "urn:uuid:0f03d99b-1c7b-458e-839a-e1cc365ff73e"
+  },
+  "timestamp": "2026-08-11T04:33:54+00:00",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:be7ffb75-ba23-4716-a724-fd5414fa7c53",
+      "resource": {
+        "resourceType": "MessageHeader",
+        "eventCoding": {
+          "system": "http://terminology.hl7.org/CodeSystem/v2-0003",
+          "code": "O21",
+          "display": "OML - Laboratory order"
+        },
+        "destination": [
+          {
+            "endpoint": "https://fhir.nwgenomics.nhs.uk/Endpoint/RIE",
+            "receiver": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "699X0"
+              },
+              "display": "NORTH WEST GLH"
+            }
+          }
+        ],
+        "sender": {
+          "identifier": {
+            "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+            "value": "RV9"
+          },
+          "display": "HUMBER TEACHING NHS FOUNDATION TRUST"
+        },
+        "source": {
+          "software": "Lab Explorer",
+          "endpoint": "https://fhir.nwgenomics.nhs.uk/Endpoint/LabExplorer"
+        },
+        "focus": [
+          {
+            "reference": "urn:uuid:535aea39-5814-443b-8517-0965bcfc78ce",
+            "type": "ServiceRequest"
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154",
+      "resource": {
+        "resourceType": "Patient",
+        "address": [
+          {
+            "id": "CqtPg",
+            "line": [
+              "4 Centurion Way",
+              "BROUGH",
+              "Hull"
+            ],
+            "period": {
+              "start": "1991-04-06"
+            },
+            "postalCode": "HU15 1AY",
+            "use": "home"
+          }
+        ],
+        "birthDate": "1981-04-23",
+        "gender": "female",
+        "generalPractitioner": [
+          {
+            "id": "uGRMQ",
+            "identifier": {
+              "period": {
+                "start": "2005-01-18"
+              },
+              "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+              "value": "B81061"
+            },
+            "type": "Organization"
+          }
+        ],
+        "id": "24852",
+        "identifier": [
+          {
+            "assigner": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "X24"
+              }
+            },
+            "extension": [
+              {
+                "url": "https://fhir.hl7.org.uk/StructureDefinition/Extension-UKCore-NHSNumberVerificationStatus",
+                "valueCodeableConcept": {
+                  "coding": [
+                    {
+                      "code": "01",
+                      "display": "Number present and verified",
+                      "system": "https://fhir.hl7.org.uk/CodeSystem/UKCore-NHSNumberVerificationStatusEngland"
+                    }
+                  ]
+                }
+              }
+            ],
+            "system": "https://fhir.nhs.uk/Id/nhs-number",
+            "type": {
+              "coding": [
+                {
+                  "code": "NH",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "9737873963"
+          },
+          {
+            "assigner": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "699X0"
+              }
+            },
+            "system": "https://fhir.nwgenomics.nhs.uk/iGene/PatientIdentifier",
+            "type": {
+              "coding": [
+                {
+                  "code": "PI",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "285232"
+          },
+          {
+            "assigner": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "699X0"
+              }
+            },
+            "system": "https://fhir.nwgenomics.nhs.uk/iGene/PatientIdentifier",
+            "type": {
+              "coding": [
+                {
+                  "code": "PI",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "200048"
+          },
+          {
+            "assigner": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "699X0"
+              }
+            },
+            "system": "https://fhir.nwgenomics.nhs.uk/iGene/PatientIdentifier",
+            "type": {
+              "coding": [
+                {
+                  "code": "PI",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "200073"
+          },
+          {
+            "assigner": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "699X0"
+              }
+            },
+            "system": "https://fhir.nwgenomics.nhs.uk/iGene/PatientIdentifier",
+            "type": {
+              "coding": [
+                {
+                  "code": "PI",
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203"
+                }
+              ]
+            },
+            "value": "200082"
+          },
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "MR"
+                }
+              ]
+            },
+            "value": "123HULLMR",
+            "assigner": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "RV9"
+              }
+            }
+          }
+        ],
+        "managingOrganization": {
+          "display": "NHS HUMBER AND NORTH YORKSHIRE INTEGRATED CARE BOARD",
+          "identifier": {
+            "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+            "value": "QOQ"
+          },
+          "reference": "Organization/4730"
+        },
+        "meta": {
+          "lastUpdated": "2026-08-04T08:28:50Z",
+          "versionId": "7"
+        },
+        "name": [
+          {
+            "family": "HULL",
+            "given": [
+              "Yara"
+            ],
+            "id": "vVJOB",
+            "period": {
+              "start": "1984-10-20"
+            },
+            "prefix": [
+              "MS"
+            ],
+            "use": "usual"
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:38c256f0-3101-4db0-8dc8-808b134ed994",
+      "resource": {
+        "resourceType": "PractitionerRole",
+        "practitioner": {
+          "identifier": {
+            "system": "https://fhir.hl7.org.uk/Id/gmc-number",
+            "value": "C6072875"
+          },
+          "display": "D CHANDRANATH"
+        },
+        "organization": {
+          "identifier": {
+            "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+            "value": "RV9"
+          },
+          "display": "HUMBER TEACHING NHS FOUNDATION TRUST"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:ea8b5019-2500-4ff4-b87b-b3e0a61a1bfd",
+      "resource": {
+        "resourceType": "Specimen",
+        "subject": {
+          "reference": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154"
+        },
+        "type": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "119297000",
+              "display": "Blood specimen"
+            }
+          ]
+        },
+        "identifier": [
+          {
+            "value": "SPEC123",
+            "assigner": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "RV9"
+              },
+              "display": "HUMBER TEACHING NHS FOUNDATION TRUST"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:afbaf379-747d-4454-b664-38af5d64a8c3",
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "laboratory"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "842009",
+              "display": "Consanguinity"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154"
+        },
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "LA33-6",
+              "display": "Yes"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:693bdb95-68e4-4552-8510-8e303dcb6a91",
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "laboratory"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "74996004",
+              "display": "Confirmation of"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154"
+        },
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "LA32-8",
+              "display": "No"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:2ef0a8bb-7146-4d27-bce7-67b5730320c9",
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "laboratory"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "118185001",
+              "display": "Finding related to pregnancy"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154"
+        },
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "77386006",
+              "display": "Pregnancy"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:fee2d974-d8ed-45ca-bb8b-8b60be4b3883",
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "laboratory"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "161714006",
+              "display": "Estimated date of delivery"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154"
+        },
+        "valueDateTime": "2026-05-01"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:7a8a4e2d-400b-4eb7-8c5d-daf77b1f0cb7",
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "laboratory"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "17369002",
+              "display": "Miscarriage"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154"
+        },
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "LA32-8",
+              "display": "No"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:866fda0c-c053-40e3-8179-6a8c47ac6d1b",
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "laboratory"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "419099009",
+              "display": "Dead"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154"
+        },
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "LA32-8",
+              "display": "No"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:535aea39-5814-443b-8517-0965bcfc78ce",
+      "resource": {
+        "resourceType": "ServiceRequest",
+        "status": "active",
+        "intent": "order",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://snomed.info/sct",
+                "code": "116148004",
+                "display": "Genomic procedure"
+              }
+            ]
+          }
+        ],
+        "priority": "routine",
+        "code": {
+          "coding": [
+            {
+              "system": "https://fhir.nhs.uk/CodeSystem/England-GenomicTestDirectory",
+              "code": "M4.14",
+              "display": "Non-Small Cell Lung Cancer, Multi-target ctDNA combined Multi-target NGS panel, small variant (EGFR, ALK, BRAF, KRAS, MET exon 14 skipping and copy number variations) and structural variant (ROS1, RET, ALK, NTRK1, NTRK2, NTRK3, MET exon"
+            }
+          ],
+          "text": "Non-Small Cell Lung Cancer, Multi-target ctDNA combined Multi-target NGS panel, small variant (EGFR, ALK, BRAF, KRAS, MET exon 14 skipping and copy number variations) and structural variant (ROS1, RET, ALK, NTRK1, NTRK2, NTRK3, MET exon"
+        },
+        "subject": {
+          "reference": "urn:uuid:d3fab1ae-3980-47b3-9b74-1033ecf4b154"
+        },
+        "requester": {
+          "reference": "urn:uuid:38c256f0-3101-4db0-8dc8-808b134ed994"
+        },
+        "authoredOn": "2026-08-11",
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "system": "https://fhir.nwgenomics.nhs.uk/CodeSystem/GenomicClinicalIndication",
+                "code": "M4",
+                "display": "Non-Small Cell Lung Cancer"
+              }
+            ]
+          }
+        ],
+        "identifier": [
+          {
+            "system": "https://fhir.nwgenomics.nhs.uk/Id/lab-explorer-order-number",
+            "value": "YHCRABCDORDER",
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "PLAC"
+                }
+              ]
+            },
+            "assigner": {
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "RV9"
+              },
+              "display": "HUMBER TEACHING NHS FOUNDATION TRUST"
+            }
+          }
+        ],
+        "note": [
+          {
+            "text": "Smoker as a young adult"
+          }
+        ],
+        "specimen": [
+          {
+            "reference": "urn:uuid:ea8b5019-2500-4ff4-b87b-b3e0a61a1bfd"
+          }
+        ],
+        "supportingInfo": [
+          {
+            "reference": "urn:uuid:afbaf379-747d-4454-b664-38af5d64a8c3"
+          },
+          {
+            "reference": "urn:uuid:693bdb95-68e4-4552-8510-8e303dcb6a91"
+          },
+          {
+            "reference": "urn:uuid:2ef0a8bb-7146-4d27-bce7-67b5730320c9"
+          },
+          {
+            "reference": "urn:uuid:fee2d974-d8ed-45ca-bb8b-8b60be4b3883"
+          },
+          {
+            "reference": "urn:uuid:7a8a4e2d-400b-4eb7-8c5d-daf77b1f0cb7"
+          },
+          {
+            "reference": "urn:uuid:866fda0c-c053-40e3-8179-6a8c47ac6d1b"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -21,6 +21,19 @@ export FHIR_BASE_URL="https://192.168.1.62/healthconnect/cdr/fhir/r4"
 # If the server has a real (non-self-signed) TLS cert, turn verification on:
 # export FHIR_VERIFY_SSL=true
 
+# Only needed for /order/new's "Send to ESB" button (see "Order creation"
+# below) — never hardcoded, no default:
+# export ESB_CLIENT_ID="..."
+# export ESB_CLIENT_SECRET="..."
+# If the authorization server rejects the token request with 400
+# invalid_scope/invalid_request (check the error message — it now
+# surfaces the server's own error_description), it likely requires an
+# explicit scope for this client:
+# export ESB_SCOPE="..."
+# ESB_TOKEN_URL/ESB_PROCESS_MESSAGE_URL default to this deployment's own
+# values (same host as FHIR_BASE_URL) and don't need setting unless
+# they change.
+
 python3 app.py   # serves on http://localhost:5050 (override with PORT env var)
 ```
 
@@ -479,6 +492,212 @@ is actually submitted becomes (or replaces) that organisation's MR
 identifier on the exported Patient, letting the user correct/supply it
 rather than just silently dropping a patient's only hospital number for
 this trust because the stored data doesn't have one, or has a stale one.
+
+**"Send to ESB" — the form's second submit button, alongside "Download
+order"** — POSTs the exact same bundle straight to this deployment's
+ESB (Enterprise Service Bus) `$process-message` endpoint instead of
+downloading it, via `FhirClient.send_order_to_esb()`. This is a
+genuinely separate integration from the rest of `fhir_client.py`: a
+different base URL, and its own **OAuth2 client-credentials** app
+registration — not the per-user Basic-auth `FhirClient` session
+everything else in this app authenticates with — so it's implemented as
+classmethods needing no session/instance, with a class-level token
+cache (`_esb_token_cache`, same reasoning as `_icb_boundary_cache`/
+`_genomic_test_directory_cache` above: not tied to who's logged in).
+
+- **Config is env-var only, read fresh on every call**
+  (`FhirClient.esb_config()`) — `ESB_TOKEN_URL`/`ESB_PROCESS_MESSAGE_URL`
+  default to this deployment's actual URLs (not secrets), but
+  `ESB_CLIENT_ID`/`ESB_CLIENT_SECRET` have **no default and are never
+  hardcoded** — `esb_access_token()` raises a clear `RuntimeError` if
+  they're unset, shown as-is on the result page. `verify_ssl` reuses
+  `FHIR_VERIFY_SSL` rather than a separate env var, since the ESB
+  endpoint is the same host (192.168.1.62) as this deployment's own
+  `FHIR_BASE_URL` — same TLS cert situation. `ESB_SCOPE`, if set, is
+  sent as the token request's `scope` — added after a real 400 against
+  this deployment's own authorization server; unset by default since
+  guessing a scope value would be worse than omitting it.
+- **Token flow**: client id/secret sent as HTTP Basic auth on the token
+  request (`grant_type=client_credentials`, `scope` too if `ESB_SCOPE`
+  is set), per this deployment's own setup — cached at class level
+  until 60s before `expires_in` runs out. A rejected token request
+  raises `requests.HTTPError` with the authorization server's own
+  `error`/`error_description` body (RFC 6749 §5.2) folded into the
+  message — plain `response.raise_for_status()` only gives a generic
+  "400 Client Error: Bad Request", which was the actual failure mode
+  hit against this deployment's server and gave no way to tell
+  `invalid_scope` from `invalid_client` from anything else without this.
+  `send_order_to_esb()` retries once with `force_refresh=True` on a 401
+  (a cached token that expired early or was revoked server-side) before
+  giving up; any other failure (network, non-401 4xx/5xx) is raised
+  as-is for `app.order_new()` to show — same "surface it, don't swallow
+  it" approach as everywhere else in this app. Verified directly (mocked
+  HTTP): missing credentials, the OAuth2 error body being surfaced,
+  `ESB_SCOPE` being included when set, token caching (a second call
+  doesn't re-authenticate), and the 401→refresh→retry sequence.
+- **`app.order_new()` branches on the clicked button's `action` value**
+  (`"download"` vs `"send_esb"`, both `<button type="submit"
+  name="action" value="...">` in the same form) — the bundle itself is
+  built identically either way; only what happens to it after differs.
+  A successful send renders `order_send_result.html` with the placer
+  number and the ESB's own response body (typically another message
+  Bundle) pretty-printed; a failure renders the same template with
+  `error` set instead — nothing is written to the FHIR server on
+  either path, this route still never calls `_post()`/`_put()`.
+- **The response's embedded HL7 v2 message is pulled out and shown
+  separately** — `FhirClient.extract_hl7v2_message()` (verified against
+  the real `examples/OrderResponse.json`) reads
+  `OperationOutcome.issue[].diagnostics` from the response Bundle: this
+  ESB replies with the actual HL7 v2 (`MSH|...`/`PID|...`/etc.) the FHIR
+  order was converted into and sent onward as, not just an
+  acknowledgement — not a documented FHIR convention, just what this
+  particular deployment does. `app.order_new()` normalizes the
+  segment-separating `\r`s to `\n` before rendering, so
+  `order_send_result.html`'s "HL7 v2 message" `<pre>` block shows one
+  segment per line; the full raw JSON response is still shown
+  underneath it too ("Raw ESB response"), nothing is hidden.
+  The "Send to ESB" button has a JS `confirm()` on its own `onclick`
+  (not the form's `onsubmit`, which would also gate the unrelated
+  "Download" button) — same destructive-action-confirmation convention
+  as the admin screens', since this one has a real external side effect
+  the download doesn't.
+
+**"Load from a saved FHIR order"** (a collapsed `<details>` at the top
+of the page) — uploads a previously downloaded order `Bundle` (`.json`;
+`examples/genomic-order-YHCRABCDORDER.json` is a real one, and
+`FhirClient.parse_order_message_bundle()` is verified directly against
+it) and pre-fills the rest of the form from it, via a third POST
+`action` (`"load"`) on the same route, handled *before* — and mutually
+exclusive with, via `elif` — the existing build/submit branch.
+
+- **The "always picked from this server" rule still applies** — a
+  loaded bundle's inline Patient and logical-reference Practitioner/
+  Organization are never used directly as `patient_id`/`org_id`/
+  `practitioner_id`. `parse_order_message_bundle()` only extracts their
+  *identifying* values (NHS number, ODS code, GMC number — plus
+  display names, for the "not found" messages below), which
+  `app.order_new()` then searches this server with
+  (`search_patients(nhs_number=...)`/`search_organizations(ods_code=...)`/
+  `practitioners_for_organization(org_id)` filtered by
+  `_format_gmc_number()`-normalized GMC, same normalization the ESB
+  bundle-building side already uses). A single match sets that id
+  straight away; zero or multiple matches leave it unset and add a
+  message to `load_notes` (shown in a card above the picker sections)
+  explaining why and pointing at the manual search below — the
+  clinician lookup is skipped entirely if the organisation itself
+  didn't resolve, since `practitioners_for_organization()` needs a real
+  `org_id` to query with.
+- **`ServiceRequest.requester` isn't always a PractitionerRole
+  reference into the same bundle** — a real producer's export
+  (`examples/Liverpool_O21_Apr26.json`) sends it as a bare logical
+  reference straight to the requesting Organization instead
+  (`{"identifier": {ods-organization-code, ...}}`, no `.reference` at
+  all, and no individually identified clinician anywhere in the
+  bundle). `parse_order_message_bundle()` tries three shapes in order:
+  a resolved `PractitionerRole` (the normal case), a resolved
+  `Organization` directly, then a bare logical reference with no
+  resolvable resource at all — this was the actual bug reported
+  (organisation not picked up on import): the old code only handled
+  the first shape and silently extracted nothing for the other two.
+- **`ServiceRequest.supportingInfo` can point at an Observation
+  "panel", not the individual answers directly** — the same Liverpool
+  export's *one* `supportingInfo` entry isn't an AOE answer at all,
+  it's a grouping Observation with no code/value of its own, just a
+  `hasMember` list of the 14 real ones (`is_observation_panel()`/
+  `flatten_observation_refs()`, the latter recursing in case a panel
+  groups other panels). `parse_order_message_bundle()`'s
+  `supportingInfo` walk goes through this dereference before matching
+  against `ASK_AT_ORDER_ENTRY_QUESTIONS`, rather than trying to match
+  the panel wrapper itself (which never matches anything, silently).
+- **Observations that aren't one of `ASK_AT_ORDER_ENTRY_QUESTIONS` are
+  kept, not dropped — shown read-only *and* still included in the
+  output** — Liverpool's 14 panel members are exactly this case:
+  free-text Q&A-style Observations, none SNOMED-coded the way the fixed
+  7 questions are. `parse_order_message_bundle()` scans *every*
+  Observation in the bundle for these (not just ones reachable via
+  `supportingInfo`, panel-dereferenced or not — a real producer's
+  export might not even link them that way at all), and only excludes
+  ones already matched to a real question via the panel walk above.
+  `_observation_label_and_value()` handles two shapes: the normal one
+  (`code` names the question, `value[x]` carries the answer) and a
+  non-conformant one the same Liverpool export uses for these extras —
+  no `value[x]` at all, question text in `code.coding[0].code` and the
+  answer in `code.coding[0].display` instead (backwards from normal
+  FHIR convention) — falling back to the latter only when there's
+  genuinely no `value[x]` to prefer. Rendered inside "Ask at order
+  entry", below the editable questions, muted, only once `ready` (like
+  the rest of that section) — not before, and not as a separate
+  always-visible card (an earlier version showed it early specifically
+  because Liverpool's clinician-pick GET used to wipe it; that's now
+  fixed at the actual cause instead, see `_order_load_cache` below, so
+  there's no more reason to special-case where it renders).
+  **`build_order_message_bundle()`'s `extra_observations` parameter**
+  round-trips each `{"label", "value"}` back out as its own simple
+  `Observation` (`code.text` = label, `valueString` = value —
+  deliberately not trying to reconstruct the source coding/`value[x]`
+  shape, since for Liverpool's non-conformant ones there's nothing
+  clean to reconstruct), referenced from `ServiceRequest.supportingInfo`
+  alongside the AOE-matched ones. Without this, re-downloading or
+  re-sending a loaded order would have silently dropped everything that
+  didn't fit one of the 7 fixed questions — this was a real gap: these
+  were only ever shown read-only, never actually included in what
+  gets submitted (verified on both the download and Send-to-ESB paths).
+- **`ServiceRequest.specimen` can be absent even when a `Specimen` is
+  in the bundle** — Liverpool's `ServiceRequest` has no `specimen`
+  element at all; the `Specimen` entry (and so its type/placer id/etc.)
+  simply isn't linked from the order at all. Falls back to the one
+  `Specimen` in the bundle (if there's exactly one — deliberately not
+  auto-picked when there's more than one candidate, same
+  don't-guess-when-ambiguous stance as everywhere else in this method)
+  whose own `subject` matches the order's patient. This was the actual
+  bug reported (specimen type/ID not prepopulated) — the old code only
+  ever looked at `ServiceRequest.specimen`, so on this file `specimen`
+  stayed `None` and every specimen field silently came back empty.
+- **`ServiceRequest.note` — *every* entry, not just the first** — a
+  real producer's export (same Liverpool file) puts each order-entry-
+  form field into its own separate `note` (27 of them: `"**Referring
+  Clinician Name:** : _Dr Natalie Canham_"` and so on) rather than one
+  combined block. `clinical_details` (the "Clinical information"
+  section) now joins every note's text with newlines instead of taking
+  only `note[0]`, which silently dropped the other 26.
+- **Everything else round-trips directly into `form_values`/
+  `aoe_values`** — test code, order number, priority, clinical details,
+  hospital number, every specimen field, and AOE answers (matched back
+  to `ASK_AT_ORDER_ENTRY_QUESTIONS` by `(system, code)`, not just
+  `code`, to avoid any cross-question collision) — verified end-to-end
+  against both real example files: every one of these fields, plus all
+  three resolved ids (where resolvable) and the extra read-only
+  observations, comes out correct, with no regression against the
+  original well-formed example (single note, panel-free, all 6 AOE
+  answers, ready state reached, real submission still builds correctly).
+
+**The loaded state survives a manual patient/organisation/clinician
+pick** (`_order_load_cache`, `app.py`) — fixes what was originally a
+real gap: picking one of those when it doesn't auto-resolve is a plain
+GET, which carries no form body, so anything a "load" had just filled
+in (test code, specimen fields, hospital number, AOE answers, the extra
+observations above) would otherwise vanish the moment Liverpool's file
+— which has no clinician in structured form at all — forced a manual
+pick. Fixed with the same server-side-dict-keyed-by-a-random-token
+pattern `_session_clients` already uses: a "load" POST stores
+`parse_order_message_bundle()`'s full return value in `_order_load_cache`
+under a fresh `load_token`, which then rides along as a hidden field/
+query param on every picker link and form on the page (patient/
+organisation/clinician search results, "Change X" links, and the main
+order form) exactly the way `patient_id`/`org_id`/`practitioner_id`
+already do. Whenever `load_token` resolves to a cached entry, it's
+re-applied the same way a fresh load applies it — **except when the
+current request is itself a `download`/`send_esb` submission**
+(`resubmitting_order` in `app.order_new()`): that POST's `request.form`
+already holds whatever the user actually has in the form right now,
+possibly edited from what was originally loaded, and must never be
+silently overwritten by the stale original values — verified directly
+(the user clears/replaces a loaded field, submission fails validation
+on an unrelated field, the page re-renders with the user's edit intact,
+not the original loaded one). `extra_observations` has no form field at
+all, so it's the one piece always re-applied from the cache regardless.
+No expiry beyond the life of the process, same caveat as
+`_session_clients`.
 
 Reached from the nav ("Orders and Reports" → "New order"), or from a
 patient page's "Genomic test orders" section ("+ New order for this

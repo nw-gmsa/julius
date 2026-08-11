@@ -1,0 +1,62 @@
+{
+  "resourceType": "Bundle",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:c1bc4e57-5f73-43da-af25-6fc8888a9210",
+      "resource": {
+        "resourceType": "MessageHeader",
+        "destination": [
+          {
+            "receiver": {
+              "display": "HUMBER TEACHING NHS FOUNDATION TRUST",
+              "identifier": {
+                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                "value": "RV9"
+              }
+            }
+          }
+        ],
+        "eventCoding": {
+          "code": "O21",
+          "display": "OML - Laboratory order",
+          "system": "http://terminology.hl7.org/CodeSystem/v2-0003"
+        },
+        "response": {
+          "code": "ok",
+          "details": {
+            "reference": "urn:uuid:cdc4392d-d430-4522-95b8-519aeda67363"
+          },
+          "identifier": "urn:uuid:b57be12f-60b2-4ecb-984b-6e456c9a2af7"
+        },
+        "sender": {
+          "identifier": {
+            "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+            "value": "X24"
+          }
+        },
+        "source": {
+          "endpoint": "https://fhir.nwgenomics.nhs.uk/Endpoint/RIE",
+          "software": "NW GLH Regional Integration Engine"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:cdc4392d-d430-4522-95b8-519aeda67363",
+      "resource": {
+        "resourceType": "OperationOutcome",
+        "issue": [
+          {
+            "code": "incomplete",
+            "diagnostics": "MSH|^~\\&|LabExplorer|RV9|RIE|699X0|20260811043402+0000||OML^O21^OML_O21|urn:uuid:b57be12f-60b2-4ecb-984b-6e456c9a2af7|T|2.5.1|||AL\rPID|1||9737873963^^^NHS^NH~123HULLMR^^^RV9^MR~200082^^^699X0^PI||HULL^Yara^^^^^L||19810423|F|||4 Centurion Way^BROUGH^^^HU15 1AY|||||||||||||||||||||01\rORC|NW|YHCRABCDORDER^RV9|||||||20260811|||C6072875^^CHANDRANATH^^^D^^GMC|||||||||HUMBER TEACHING NHS FOUNDATION TRUST^^RV9^^^ODS\rOBR|1|YHCRABCDORDER^RV9||M4.14^Non-Small Cell Lung Cancer, Multi-target ctDNA combined Multi-target NGS panel, small variant (EGFR, ALK, BRAF, KRAS, MET exon 14 skipping and copy number variations) and structural variant (ROS1, RET, ALK, NTRK1, NTRK2, NTRK3, MET exon^England-GenomicTestDirectory||20260811||||||||||C6072875^^CHANDRANATH^^^D^^GMC|||||||||||||||M4^Non-Small Cell Lung Cancer^GenomicClinicalIndication\rNTE|1||Smoker as a young adult\rOBX|1|CWE|842009^Consanguinity^SNM3||LA33-6^Yes^LN||||||F\rOBX|2|CWE|74996004^Confirmation of^SNM3||LA32-8^No^LN||||||F\rOBX|3|CWE|118185001^Finding related to pregnancy^SNM3||77386006^Pregnancy^SNM3||||||F\rOBX|4|DT|161714006^Estimated date of delivery^SNM3||20260501||||||F\rOBX|5|CWE|17369002^Miscarriage^SNM3||LA32-8^No^LN||||||F\rOBX|6|CWE|419099009^Dead^SNM3||LA32-8^No^LN||||||F\rSPM|1|SPEC123&RV9||119297000^Blood specimen^SNM3\r",
+            "severity": "information"
+          }
+        ]
+      }
+    }
+  ],
+  "identifier": {
+    "value": "885186"
+  },
+  "timestamp": "2026-08-11T04:34:04.413+01:00",
+  "type": "message"
+}

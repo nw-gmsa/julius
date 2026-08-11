@@ -21,6 +21,31 @@
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
 
+  <details>
+    <summary>Load from a saved FHIR order</summary>
+    <p class="muted">
+      Loads a previously downloaded order <code>Bundle</code> (<code>.json</code>)
+      and pre-fills the fields below from it. Patient, organisation, and
+      clinician are still only ever picked from this FHIR server — the
+      file's own patient/organisation/clinician are looked up here by
+      NHS number/ODS code/GMC number, not used directly.
+    </p>
+    <form method="post" action="{{ request.script_root }}/order/new" enctype="multipart/form-data">
+      <input type="hidden" name="action" value="load">
+      <input type="file" name="order_file" accept="application/json,.json" required>
+      <button type="submit">Load</button>
+    </form>
+  </details>
+
+  {% if load_notes %}
+    <div class="card">
+      <strong>Loaded from file — some fields need attention:</strong>
+      <ul>
+        {% for note in load_notes %}<li>{{ note }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
   <h2>Patient details</h2>
   {% if patient %}
     <table>
@@ -28,11 +53,12 @@
       <tr><th>Date of birth</th><td>{{ patient.birthDate or "—" }}</td></tr>
       <tr><th>NHS number</th><td>{{ (patient|nhs_or_chi_number)[1] or "—" }}</td></tr>
     </table>
-    <p><a href="{{ request.script_root }}/order/new?org_id={{ org_id }}&amp;practitioner_id={{ practitioner_id }}">Change patient</a></p>
+    <p><a href="{{ request.script_root }}/order/new?org_id={{ org_id }}&amp;practitioner_id={{ practitioner_id }}&amp;load_token={{ load_token }}">Change patient</a></p>
   {% else %}
     <form method="get" action="{{ request.script_root }}/order/new">
       <input type="hidden" name="org_id" value="{{ org_id }}">
       <input type="hidden" name="practitioner_id" value="{{ practitioner_id }}">
+      <input type="hidden" name="load_token" value="{{ load_token }}">
       <input type="text" name="patient_name" placeholder="Search by name" value="{{ patient_name_q }}">
       <input type="text" name="patient_nhs" placeholder="Search by NHS number" value="{{ patient_nhs_q }}">
       <button type="submit">Search</button>
@@ -42,7 +68,7 @@
         <tr><th></th><th>Name</th><th>NHS number</th><th>D.O.B.</th></tr>
         {% for p in patient_results %}
           <tr>
-            <td><a href="{{ request.script_root }}/order/new?patient_id={{ p.id }}&amp;org_id={{ org_id }}&amp;practitioner_id={{ practitioner_id }}">Select</a></td>
+            <td><a href="{{ request.script_root }}/order/new?patient_id={{ p.id }}&amp;org_id={{ org_id }}&amp;practitioner_id={{ practitioner_id }}&amp;load_token={{ load_token }}">Select</a></td>
             <td>{{ p|human_name }}</td>
             <td>{{ (p|nhs_or_chi_number)[1] or "—" }}</td>
             <td>{{ p.birthDate or "—" }}</td>
@@ -60,10 +86,11 @@
       <tr><th>Name</th><td>{{ organization.name or "—" }}</td></tr>
       <tr><th>ODS code</th><td>{{ organization|organisation_ods_code or "—" }}</td></tr>
     </table>
-    <p><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}">Change organisation</a></p>
+    <p><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}&amp;load_token={{ load_token }}">Change organisation</a></p>
   {% else %}
     <form method="get" action="{{ request.script_root }}/order/new">
       <input type="hidden" name="patient_id" value="{{ patient_id }}">
+      <input type="hidden" name="load_token" value="{{ load_token }}">
       <input type="text" name="org_name" placeholder="Search by name" value="{{ org_name_q }}">
       <input type="text" name="org_ods" placeholder="Search by ODS code" value="{{ org_ods_q }}">
       <button type="submit">Search</button>
@@ -73,7 +100,7 @@
         <tr><th></th><th>Name</th><th>ODS code</th></tr>
         {% for o in org_results %}
           <tr>
-            <td><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}&amp;org_id={{ o.id }}">Select</a></td>
+            <td><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}&amp;org_id={{ o.id }}&amp;load_token={{ load_token }}">Select</a></td>
             <td>{{ o.name or "—" }}</td>
             <td>{{ o|organisation_ods_code or "—" }}</td>
           </tr>
@@ -89,13 +116,14 @@
     <table>
       <tr><th>Name</th><td>{{ practitioner|human_name }}</td></tr>
     </table>
-    <p><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}&amp;org_id={{ org_id }}">Change clinician</a></p>
+    <p><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}&amp;org_id={{ org_id }}&amp;load_token={{ load_token }}">Change clinician</a></p>
   {% elif not organization %}
     <p class="muted">Pick a requesting organisation above first — the clinician list is limited to practitioners linked to it.</p>
   {% elif practitioner_results %}
     <form method="get" action="{{ request.script_root }}/order/new">
       <input type="hidden" name="patient_id" value="{{ patient_id }}">
       <input type="hidden" name="org_id" value="{{ org_id }}">
+      <input type="hidden" name="load_token" value="{{ load_token }}">
       <p>
         <input type="text" id="clinician-typeahead" placeholder="Type to filter…" autocomplete="off"
                style="width: 100%; max-width: 300px;">
@@ -135,6 +163,7 @@
       <input type="hidden" name="patient_id" value="{{ patient_id }}">
       <input type="hidden" name="org_id" value="{{ org_id }}">
       <input type="hidden" name="practitioner_id" value="{{ practitioner_id }}">
+      <input type="hidden" name="load_token" value="{{ load_token }}">
 
       <table>
         <tr>
@@ -291,6 +320,19 @@
           </tr>
         {% endfor %}
       </table>
+
+      {% if extra_observations %}
+        <p class="muted">
+          Additional information from the loaded order that doesn't match
+          any of the questions above — shown for reference only, not
+          submitted with this order.
+        </p>
+        <table>
+          {% for obs in extra_observations %}
+            <tr><th class="muted">{{ obs.label }}</th><td class="muted">{{ obs.value }}</td></tr>
+          {% endfor %}
+        </table>
+      {% endif %}
       <script>
         (function () {
           function applyConditions() {
@@ -307,7 +349,13 @@
         })();
       </script>
 
-      <p><button type="submit">Download order (FHIR JSON)</button></p>
+      <p>
+        <button type="submit" name="action" value="download">Download order (FHIR JSON)</button>
+        <button type="submit" name="action" value="send_esb"
+                onclick="return confirm('This will submit the order directly to North West GLH via the ESB. Continue?');">
+          Send to ESB
+        </button>
+      </p>
     </form>
   {% else %}
     <p class="muted">Select a patient, requesting organisation, and requesting clinician above to continue.</p>

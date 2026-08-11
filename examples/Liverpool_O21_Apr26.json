@@ -1,0 +1,739 @@
+{
+    "resourceType": "Bundle",
+    "id": "697b54a9-959f-4e1d-b07a-39d16f1c66d9",
+    "identifier": {
+        "system": "https://tools.ietf.org/html/rfc4122",
+        "value": "696022df-ff1b-4703-9c36-e669dbfdb415"
+    },
+    "type": "message",
+    "timestamp": "2026-04-14T12:09:31.079+01:00",
+    "entry": [
+        {
+            "fullUrl": "urn:uuid:5e5becfb-8f6b-4c0e-9533-c705c654dc06",
+            "resource": {
+                "resourceType": "MessageHeader",
+                "id": "71468.1",
+                "eventCoding": {
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0003",
+                    "code": "O21"
+                },
+                "destination": [
+                    {
+                        "endpoint": "https://fhir.mft.nhs.uk/Endpoint/LIMS",
+                        "receiver": {
+                            "identifier": {
+                                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                                "value": "699X0"
+                            },
+                            "display": "NORTH WEST GLH"
+                        }
+                    }
+                ],
+                "sender": {
+                    "identifier": {
+                        "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                        "value": "REP"
+                    },
+                    "display": "Liverpool Women's Hospital"
+                },
+                "source": {
+                    "name": "EXPANSE_EPR",
+                    "software": "LWH Expanse EPR",
+                    "contact": {
+                        "system": "email",
+                        "value": "Richard.Glyn-Jones@lwh.nhs.uk"
+                    }
+                },
+                "focus": [
+                    {
+                        "reference": "urn:uuid:0e970f98-346e-4d8c-9ffa-d244b2192209",
+                        "type": "ServiceRequest"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:0e970f98-346e-4d8c-9ffa-d244b2192209",
+            "resource": {
+                "resourceType": "ServiceRequest",
+                "id": "0e970f98-346e-4d8c-9ffa-d244b2192209",
+                "identifier": [
+                    {
+                        "use": "official",
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "PLAC"
+                                }
+                            ],
+                            "text": "Placer's Order Number"
+                        },
+                        "system": "urn:oid:1.2.840.114350.1.13.0.1.7.2.798268",
+                        "value": "7209",
+                        "assigner": {
+                            "identifier": {
+                                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                                "value": "REP"
+                            }
+                        }
+                    }
+                ],
+                "status": "active",
+                "intent": "order",
+                "doNotPerform": false,
+                "code": {
+                    "coding": [
+                        {
+                            "system": "https://fhir.nhs.uk/CodeSystem/England-GenomicTestDirectory",
+                            "code": "R21.1"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "authoredOn": "2026-03-05T17:35:59+00:00",
+                "supportingInfo": [
+                    {
+                        "reference": "urn:uuid:5eaa6858-a6d0-4965-9fc6-fc198997d61f"
+                    }
+                ],
+                "requester": {
+                    "identifier": {
+                        "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                        "value": "REP"
+                    }
+                }
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7",
+            "resource": {
+                "resourceType": "Patient",
+                "id": "8328e16e-4c42-448d-b647-d7b2a489fdc7",
+                "identifier": [
+                    {
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "MR"
+                                }
+                            ]
+                        },
+                        "value": "W0007939",
+                        "assigner": {
+                            "identifier": {
+                                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                                "value": "REP"
+                            }
+                        }
+                    },
+                    {
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "NH"
+                                }
+                            ]
+                        },
+                        "system": "https://fhir.nhs.uk/Id/nhs-number",
+                        "value": "9737383281"
+                    }
+                ],
+                "name": [
+                    {
+                        "family": "Congleton",
+                        "given": [
+                            "Margaery",
+                            "Null"
+                        ]
+                    }
+                ],
+                "gender": "male",
+                "birthDate": "1982-02-11",
+                "address": [
+                    {
+                        "line": [
+                            "Town Hall",
+                            "7 High St"
+                        ],
+                        "city": "Congleton",
+                        "state": "CHESHIRE",
+                        "postalCode": "CW9 5BB"
+                    }
+                ],
+                "maritalStatus": {
+                    "coding": [
+                        {
+                            "code": "O",
+                            "display": "Other"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22",
+            "resource": {
+                "resourceType": "Encounter",
+                "id": "d9942aee-fe16-49f4-8b40-4024e0f01a22",
+                "identifier": [
+                    {
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "VN"
+                                }
+                            ]
+                        },
+                        "system": "https://fhir.nhs.uk/Id/visit-number/REP",
+                        "value": "L00001715879",
+                        "assigner": {
+                            "identifier": {
+                                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                                "value": "REP"
+                            }
+                        }
+                    }
+                ],
+                "status": "finished",
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                }
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:b15883e0-ce93-46aa-9b78-b559f62f710a",
+            "resource": {
+                "resourceType": "Specimen",
+                "id": "b15883e0-ce93-46aa-9b78-b559f62f710a",
+                "identifier": [
+                    {
+                        "value": "REP:050326:AG1",
+                        "assigner": {
+                            "identifier": {
+                                "system": "https://fhir.nhs.uk/Id/ods-organization-code",
+                                "value": "REP"
+                            }
+                        }
+                    }
+                ],
+                "type" : {
+                    "coding" : [
+                        {
+                            "system" : "http://snomed.info/sct",
+                            "code" : "119297000",
+                            "display" : "Blood specimen"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                }
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:54bbd361-474d-4090-9727-aaf1b7d1bacd",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-18-CGCT",
+                "identifier": [
+                    {
+                        "value": "54bbd361-474d-4090-9727-aaf1b7d1bacd"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Referring Clinician Telephone:",
+                            "display": "01518025003"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGCT_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:d2a04608-91d8-4df2-8936-ef9314e5309a",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-1-CGAG",
+                "identifier": [
+                    {
+                        "value": "d2a04608-91d8-4df2-8936-ef9314e5309a"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Age at collection:",
+                            "display": "44"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGAG_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:3febab5c-3975-4999-854e-f957bd5f0b08",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-3-CGOT",
+                "identifier": [
+                    {
+                        "value": "3febab5c-3975-4999-854e-f957bd5f0b08"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Has consent been obtained for tests?",
+                            "display": "Y"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGOT_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:b375626f-28ec-4fde-9913-be00ed283ad7",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-16-CGCE",
+                "identifier": [
+                    {
+                        "value": "b375626f-28ec-4fde-9913-be00ed283ad7"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Referring Clinician Email:",
+                            "display": "natalie.canham1@nhs.net"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGCE_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:6342d116-f979-44fc-918f-0338eb4c29c6",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-9-CGOP",
+                "identifier": [
+                    {
+                        "value": "6342d116-f979-44fc-918f-0338eb4c29c6"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Does this test relate to an ongoing pregnancy?",
+                            "display": "Y"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGOP_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:7ae1bf03-42fc-433a-8bb1-d28f7375f43c",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-17-CGSP",
+                "identifier": [
+                    {
+                        "value": "7ae1bf03-42fc-433a-8bb1-d28f7375f43c"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Referring Clinician Current Speciality:",
+                            "display": "Clinical Genetics"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGSP_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:784dd642-467e-421c-aced-38a68a0c97c3",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-26-CGUN",
+                "identifier": [
+                    {
+                        "value": "784dd642-467e-421c-aced-38a68a0c97c3"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Patient is from consanguineous union?",
+                            "display": "No"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGUN_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:0113f594-65ed-4094-8ec0-987f25ed6999",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-15-CGOC",
+                "identifier": [
+                    {
+                        "value": "0113f594-65ed-4094-8ec0-987f25ed6999"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Referring Organisation ODS code:",
+                            "display": "Liverpool Women's Hospital"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGOC_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:3ba6679e-e088-4b4a-b84c-e1fd5ed411ff",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-20-CGSE",
+                "identifier": [
+                    {
+                        "value": "3ba6679e-e088-4b4a-b84c-e1fd5ed411ff"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Secondary Clinician Email:",
+                            "display": "EMERSON.WONG@LWH.NHS.UK"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGSE_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:5fc3db0b-df4f-4bec-b149-b308392409b1",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-7-CGFT",
+                "identifier": [
+                    {
+                        "value": "5fc3db0b-df4f-4bec-b149-b308392409b1"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Does this test relate to a pregnancy with > 1 fetus?",
+                            "display": "N"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGFT_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:fe2aba97-bd12-4398-b7f7-154131c6d0aa",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-4-CGDP",
+                "identifier": [
+                    {
+                        "value": "fe2aba97-bd12-4398-b7f7-154131c6d0aa"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Is this test for a decreased infant or pregnancy loss?",
+                            "display": "No"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGDP_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:3f2532a2-161c-4926-993e-2fb057d9f081",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-6-CGDD",
+                "identifier": [
+                    {
+                        "value": "3f2532a2-161c-4926-993e-2fb057d9f081"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Patient expected delivery date:",
+                            "display": "06/06/26"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGDD_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:9fcfca73-6e62-4da9-be39-417740dba11a",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-11-CGPN",
+                "identifier": [
+                    {
+                        "value": "9fcfca73-6e62-4da9-be39-417740dba11a"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Is the test done in the prenatal or neonatal period?",
+                            "display": "Prenatal"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGPN_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:c4f68bc3-cac4-4f84-b268-37bd8ff0e557",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "OBX-14-CGRN",
+                "identifier": [
+                    {
+                        "value": "c4f68bc3-cac4-4f84-b268-37bd8ff0e557"
+                    }
+                ],
+                "code": {
+                    "coding": [
+                        {
+                            "code": "Referring Clinician Name:",
+                            "display": "Dr Natalie Canham"
+                        }
+                    ]
+                },
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "note": [
+                    {
+                        "text": "This observation was generated by LWH_CGRN_ResourceExtractor"
+                    }
+                ]
+            }
+        },
+        {
+            "fullUrl": "urn:uuid:8ad1bf05-1e65-47f3-b88f-1bec9b3f86b2",
+            "resource": {
+                "resourceType": "Observation",
+                "id": "5eaa6858-a6d0-4965-9fc6-fc198997d61f",
+                "identifier": [
+                    {
+                        "value": "8ad1bf05-1e65-47f3-b88f-1bec9b3f86b2"
+                    }
+                ],
+                "subject": {
+                    "reference": "urn:uuid:8328e16e-4c42-448d-b647-d7b2a489fdc7"
+                },
+                "encounter": {
+                    "reference": "urn:uuid:d9942aee-fe16-49f4-8b40-4024e0f01a22"
+                },
+                "hasMember": [
+                    {
+                        "reference": "urn:uuid:54bbd361-474d-4090-9727-aaf1b7d1bacd"
+                    },
+                    {
+                        "reference": "urn:uuid:d2a04608-91d8-4df2-8936-ef9314e5309a"
+                    },
+                    {
+                        "reference": "urn:uuid:3febab5c-3975-4999-854e-f957bd5f0b08"
+                    },
+                    {
+                        "reference": "urn:uuid:b375626f-28ec-4fde-9913-be00ed283ad7"
+                    },
+                    {
+                        "reference": "urn:uuid:6342d116-f979-44fc-918f-0338eb4c29c6"
+                    },
+                    {
+                        "reference": "urn:uuid:7ae1bf03-42fc-433a-8bb1-d28f7375f43c"
+                    },
+                    {
+                        "reference": "urn:uuid:784dd642-467e-421c-aced-38a68a0c97c3"
+                    },
+                    {
+                        "reference": "urn:uuid:0113f594-65ed-4094-8ec0-987f25ed6999"
+                    },
+                    {
+                        "reference": "urn:uuid:3ba6679e-e088-4b4a-b84c-e1fd5ed411ff"
+                    },
+                    {
+                        "reference": "urn:uuid:5fc3db0b-df4f-4bec-b149-b308392409b1"
+                    },
+                    {
+                        "reference": "urn:uuid:fe2aba97-bd12-4398-b7f7-154131c6d0aa"
+                    },
+                    {
+                        "reference": "urn:uuid:3f2532a2-161c-4926-993e-2fb057d9f081"
+                    },
+                    {
+                        "reference": "urn:uuid:9fcfca73-6e62-4da9-be39-417740dba11a"
+                    },
+                    {
+                        "reference": "urn:uuid:c4f68bc3-cac4-4f84-b268-37bd8ff0e557"
+                    }
+                ]
+            }
+        }
+    ]
+}
