@@ -3409,15 +3409,19 @@ class FhirClient:
     ]
 
     @classmethod
-    def _build_aoe_observation(cls, question, raw_value, patient_ref):
+    def _build_aoe_observation(cls, question, raw_value, patient_ref, authored_on):
         """One Ask-At-Order-Entry answer as an Observation resource (see
         ASK_AT_ORDER_ENTRY_QUESTIONS), `subject` referencing the
         in-bundle Patient via its urn:uuid `patient_ref`. `raw_value` is
         the submitted form value — an option code for a `codeable_concept`
         question, an ISO date string for `date_time`, or a plain number
-        for `quantity`."""
+        for `quantity`. `authored_on` becomes `effectiveDateTime` — the
+        same value as this order's own `ServiceRequest.authoredOn`, since
+        these Observations only exist to answer questions asked at the
+        moment this order was placed."""
         observation = {
             "resourceType": "Observation",
+            "effectiveDateTime": authored_on,
             # Observation.identifier is 1..1 mandatory per the IG's
             # ObservationOrder profile
             # (https://nw-gmsa.github.io/en/StructureDefinition-ObservationOrder.html)
@@ -3697,6 +3701,12 @@ class FhirClient:
 
         entries = []
 
+        # Computed once and reused for both ServiceRequest.authoredOn and
+        # every Observation's effectiveDateTime below, so they always
+        # agree rather than each grabbing today() independently (which
+        # could disagree if the two happened to straddle midnight).
+        authored_on = date.today().isoformat()
+
         organization_ods = self.organisation_ods_code(organization)
         organization_name = organization.get("name")
 
@@ -3796,7 +3806,7 @@ class FhirClient:
             if not raw_value:
                 continue
             obs_ref = new_ref()
-            entries.append({"fullUrl": obs_ref, "resource": self._build_aoe_observation(question, raw_value, patient_ref)})
+            entries.append({"fullUrl": obs_ref, "resource": self._build_aoe_observation(question, raw_value, patient_ref, authored_on)})
             supporting_info.append({"reference": obs_ref})
 
         for extra in extra_observations or []:
@@ -3809,6 +3819,7 @@ class FhirClient:
                 # _build_aoe_observation() -- see its comment.
                 "identifier": [{"value": str(uuid.uuid4())}],
                 "status": "final",
+                "effectiveDateTime": authored_on,
                 "category": [{"coding": [
                     {"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"},
                 ]}],
@@ -3848,7 +3859,7 @@ class FhirClient:
             },
             "subject": {"reference": patient_ref},
             "requester": {"reference": practitioner_role_ref},
-            "authoredOn": date.today().isoformat(),
+            "authoredOn": authored_on,
             "reasonCode": [{"coding": [
                 {"system": self.GENOMIC_CLINICAL_INDICATION_SYSTEM, "code": indication_code, "display": indication_display},
             ]}],
