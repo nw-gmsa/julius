@@ -3773,6 +3773,19 @@ class FhirClient:
             entries.append({"fullUrl": encounter_ref, "resource": {
                 "resourceType": "Encounter",
                 "status": "finished",
+                # Encounter.class is 1..1 mandatory per the base FHIR R4
+                # spec itself (not just the IG) — confirmed by a real
+                # validation failure ("Encounter.class: minimum required
+                # = 1, but only found 0") against a live server. Neither
+                # real producer example in examples/ populates it either
+                # (this form doesn't collect an encounter type at all),
+                # so "AMB" (ambulatory) is a best-effort default rather
+                # than a confirmed value — the standard v3-ActCode
+                # fallback when the actual class is unknown.
+                "class": {
+                    "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                    "code": "AMB", "display": "ambulatory",
+                },
                 "subject": {"reference": patient_ref},
                 "identifier": [encounter_identifier],
             }})
