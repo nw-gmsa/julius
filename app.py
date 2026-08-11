@@ -559,6 +559,7 @@ def order_new():
     error = None
     form_values = {
         "hospital_number": request.form.get("hospital_number", ""),
+        "hospital_spell_id": request.form.get("hospital_spell_id", ""),
         "test_code": request.form.get("test_code", ""),
         "order_number": request.form.get("order_number", ""),
         "priority": request.form.get("priority", "routine"),
@@ -667,7 +668,7 @@ def order_new():
     resubmitting_order = request.method == "POST" and request.form.get("action") in ("download", "send_esb")
     if loaded and not resubmitting_order:
         for key in (
-            "hospital_number", "test_code", "order_number", "priority", "clinical_details",
+            "hospital_number", "hospital_spell_id", "test_code", "order_number", "priority", "clinical_details",
             "specimen_type", "specimen_date", "specimen_received_date",
             "specimen_placer_id", "specimen_accession_number", "specimen_tracking_number",
         ):
@@ -680,6 +681,7 @@ def order_new():
 
     if request.method == "POST" and patient_id and org_id and practitioner_id and request.form.get("action") in ("download", "send_esb"):
         hospital_number = form_values["hospital_number"].strip() or None
+        hospital_spell_id = form_values["hospital_spell_id"].strip() or None
         test_code = form_values["test_code"].strip()
         order_number = form_values["order_number"].strip() or None
         priority = form_values["priority"] if form_values["priority"] in ("routine", "urgent") else "routine"
@@ -706,7 +708,7 @@ def order_new():
                     raise ValueError("Patient, organisation, or clinician could not be re-resolved.")
                 bundle = client.build_order_message_bundle(
                     patient=patient, organization=organization, practitioner=practitioner,
-                    hospital_number=hospital_number,
+                    hospital_number=hospital_number, hospital_spell_id=hospital_spell_id,
                     test_code=test_code, order_number=order_number,
                     priority=priority, clinical_details=clinical_details,
                     specimen_type=specimen_type, specimen_date=specimen_date,

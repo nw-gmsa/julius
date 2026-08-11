@@ -3581,6 +3581,7 @@ class FhirClient:
 
     def build_order_message_bundle(
         self, *, patient, organization, practitioner, hospital_number=None,
+        hospital_spell_id=None,
         test_code, order_number=None, priority="routine", clinical_details=None,
         specimen_type, specimen_date=None, specimen_received_date=None,
         specimen_placer_id=None, specimen_accession_number=None,
@@ -3613,6 +3614,17 @@ class FhirClient:
         `hospital_number`, if given, becomes this Patient's medical
         record number (HL7 v2-0203 "MR") *for the requesting
         organisation* — see _patient_for_order_bundle().
+
+        `hospital_spell_id`, if given, becomes `ServiceRequest.encounter`
+        — a minimal Encounter resource carrying it as an HL7 v2-0203 "AN"
+        (Account number) identifier, assigned by the requesting
+        organisation — this form treats the value as an account number
+        specifically (the term e.g. Liverpool Women's/Alder Hey use for
+        it — see hospital_spell_identifier()'s own docstring), rather
+        than the "VN" (Visit number) coding a real producer's export
+        (examples/Liverpool_O21_Apr26.json) happens to use; either way
+        it's read back the same by hospital_spell_identifier() elsewhere
+        in this file, which recognizes both.
 
         `test_code` must be a code from genomic_test_directory_codes()
         — its display text is looked up from there
@@ -3732,6 +3744,26 @@ class FhirClient:
             specimen["receivedTime"] = specimen_received_date
         entries.append({"fullUrl": specimen_ref, "resource": specimen})
 
+        encounter_ref = None
+        if hospital_spell_id:
+            encounter_identifier = {
+                "type": {"coding": [{
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                    "code": "AN", "display": "Account number",
+                }]},
+                "value": hospital_spell_id,
+            }
+            if organization_ods:
+                encounter_identifier["assigner"] = self._logical_reference(
+                    self.ODS_ORGANIZATION_CODE_SYSTEM, organization_ods, organization_name)
+            encounter_ref = new_ref()
+            entries.append({"fullUrl": encounter_ref, "resource": {
+                "resourceType": "Encounter",
+                "status": "finished",
+                "subject": {"reference": patient_ref},
+                "identifier": [encounter_identifier],
+            }})
+
         supporting_info = []
         for question in self.ASK_AT_ORDER_ENTRY_QUESTIONS:
             raw_value = aoe_answers.get(question["link_id"])
@@ -3796,6 +3828,8 @@ class FhirClient:
         if clinical_details:
             order["note"] = [{"text": clinical_details}]
         order["specimen"] = [{"reference": specimen_ref}]
+        if encounter_ref:
+            order["encounter"] = {"reference": encounter_ref}
         if supporting_info:
             order["supportingInfo"] = supporting_info
 
@@ -4078,6 +4112,26 @@ class FhirClient:
                 if assigner_ods == organization_ods:
                     extracted["hospital_number"] = ident.get("value")
                     break
+
+        # Hospital spell identifier — same "prefer AN/VN-typed, else the
+        # first identifier with a value" resolution as
+        # hospital_spell_identifier() (which returns a formatted display
+        # string; this needs the bare value for the form field instead).
+        encounter = resolve(service_request.get("encounter"))
+        if encounter:
+            preferred, fallback = None, None
+            for ident in encounter.get("identifier", []):
+                if not ident.get("value"):
+                    continue
+                type_codes = [c.get("code") for c in (ident.get("type") or {}).get("coding", [])]
+                if any(code in cls.HOSPITAL_SPELL_IDENTIFIER_TYPES for code in type_codes):
+                    preferred = ident
+                    break
+                if fallback is None:
+                    fallback = ident
+            chosen = preferred or fallback
+            if chosen:
+                extracted["hospital_spell_id"] = chosen.get("value")
 
         extracted["test_code"] = cls.test_directory_code(service_request.get("code"))
         extracted["priority"] = service_request.get("priority") or "routine"
