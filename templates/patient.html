@@ -136,7 +136,9 @@
   {% endmacro %}
 
   <h2>Genomic test orders ({{ orders|length }})</h2>
-  <p><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}">+ New order for this patient</a></p>
+  {% if not is_production %}
+    <p><a href="{{ request.script_root }}/order/new?patient_id={{ patient_id }}">+ New order for this patient</a></p>
+  {% endif %}
   {% if orders %}
     <table>
       <tr><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th><th>Requesting clinician</th><th>Requesting organisation</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>Hospital Spell ID</th><th>ID</th></tr>

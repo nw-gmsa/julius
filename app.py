@@ -80,11 +80,17 @@ client = LocalProxy(lambda: g.client)
 
 @app.context_processor
 def _inject_admin_flag():
-    """Exposes is_admin_user to every template (base.html's nav uses it to
-    show/hide the Admin link) — the actual enforcement is the 403 in
-    _load_client above, this is just what decides whether to show the
-    link at all."""
-    return {"is_admin_user": session.get("username") in ADMIN_USERNAMES}
+    """Exposes is_admin_user/is_production to every template (base.html's
+    nav uses is_admin_user to show/hide the Admin link, and is_production
+    to hide the "New order" link — order_new() is the actual enforcement,
+    this just decides whether to show the link at all). g.client isn't set
+    on login-exempt endpoints (see LOGIN_EXEMPT_ENDPOINTS), hence the
+    getattr guard rather than using the `client` proxy directly."""
+    fhir_client = getattr(g, "client", None)
+    return {
+        "is_admin_user": session.get("username") in ADMIN_USERNAMES,
+        "is_production": fhir_client.is_production() if fhir_client else False,
+    }
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -536,7 +542,16 @@ def order_new():
     form fields once POSTing the finished order); only once all three
     resolve does the rest of the order/specimen/AOE-questions form
     render.
+
+    Disabled entirely (both GET and POST) when client.is_production() —
+    same guard rail as patient_clear_down(): this screen's "Send to RIE"
+    button has a real external side effect (submitting a genomic test
+    order to North West GLH), so it shouldn't be reachable at all against
+    a live production FHIR server, not just have that one button hidden.
     """
+    if client.is_production():
+        return render_template("order_new.html", production_blocked=True, error=None), 403
+
     patient_id = request.values.get("patient_id", "").strip()
     org_id = request.values.get("org_id", "").strip()
     practitioner_id = request.values.get("practitioner_id", "").strip()

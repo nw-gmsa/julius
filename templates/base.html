@@ -62,7 +62,9 @@
       <details class="nav-dropdown">
         <summary>Orders and Reports</summary>
         <div class="dropdown-menu">
-          <a href="{{ request.script_root }}/order/new">New order</a>
+          {% if not is_production %}
+            <a href="{{ request.script_root }}/order/new">New order</a>
+          {% endif %}
           <a href="{{ request.script_root }}/work-orders">Work orders</a>
           <a href="{{ request.script_root }}/test-orders">Test orders</a>
           <a href="{{ request.script_root }}/cepheid-results">Cepheid Test Results</a>

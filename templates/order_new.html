@@ -17,6 +17,16 @@
     <a href="https://nw-gmsa.github.io/en/StructureDefinition-BundleMessage-examples.html" target="_blank">worked message-bundle examples</a>.
   </p>
 
+  {% if production_blocked %}
+    <div class="error">
+      <strong>Order creation is disabled on this server.</strong>
+      <code>FHIR_BASE_URL</code> contains "prod", which this app treats as
+      a live production system — this screen can't be used from here, since
+      its "Send to RIE" button has a real external effect (submitting a
+      genomic test order to North West GLH).
+    </div>
+  {% else %}
+
   {% if error %}
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
   {% endif %}
@@ -353,11 +363,13 @@
         <button type="submit" name="action" value="download">Download order (FHIR JSON)</button>
         <button type="submit" name="action" value="send_esb"
                 onclick="return confirm('This will submit the order directly to North West GLH via the ESB. Continue?');">
-          Send to ESB
+          Send to RIE
         </button>
       </p>
     </form>
   {% else %}
     <p class="muted">Select a patient, requesting organisation, and requesting clinician above to continue.</p>
+  {% endif %}
+
   {% endif %}
 {% endblock %}
