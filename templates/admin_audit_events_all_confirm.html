@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Confirm: delete AuditEvents for all patients</h1>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  <div class="danger-box">
+    <strong>This will permanently delete all {{ event_count }} AuditEvent(s)</strong>
+    recorded between {{ start }} and {{ end }}, across every patient. This
+    cannot be undone. No Patient records or genomic test data are affected.
+  </div>
+
+  {% if event_count %}
+    <form method="post" action="{{ request.script_root }}/admin/audit-events/all/clear-down">
+      <input type="hidden" name="start" value="{{ start }}">
+      <input type="hidden" name="end" value="{{ end }}">
+      <button type="submit" class="danger">Yes, permanently delete these {{ event_count }} AuditEvents</button>
+      &nbsp;
+      <a href="{{ request.script_root }}/admin">Cancel</a>
+    </form>
+  {% else %}
+    <p class="muted">No AuditEvents found in this date range.</p>
+    <p><a href="{{ request.script_root }}/admin">&larr; Back to admin</a></p>
+  {% endif %}
+{% endblock %}
