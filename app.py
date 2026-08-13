@@ -296,6 +296,44 @@ def specimen_received(spec):
     return spec.get("receivedTime") or "—"
 
 
+def audit_recorded_date(recorded):
+    """Date part of AuditEvent.recorded (an instant, e.g.
+    "2026-08-01T10:00:00Z") for the audit trail's separate Date/Time
+    columns — a plain split on "T", not a datetime parse/reformat, since
+    the FHIR wire format already guarantees that separator."""
+    if not recorded:
+        return "—"
+    return recorded.split("T", 1)[0]
+
+
+def audit_recorded_time(recorded):
+    """Time part of AuditEvent.recorded, as plain HH:MM:SS — see
+    audit_recorded_date(). The instant grammar FHIR uses always puts a
+    fixed-width HH:MM:SS first, optionally followed by fractional
+    seconds and/or a timezone offset (".123", "Z", "+01:00", ...), so
+    the first 8 characters after "T" are taken and everything after
+    that is dropped rather than displayed."""
+    if not recorded or "T" not in recorded:
+        return "—"
+    return recorded.split("T", 1)[1][:8]
+
+
+def audit_message_id_short(message_id):
+    """Shortens the Message ID column's raw value from
+    "<system>.<instance>.<queue>:<id>" down to "<system> <id>" — e.g.
+    "RIE.Production.ESBDevelopment:885859" -> "RIE 885859" — keeping just
+    what's before the first "." and after the last ":", dropping the
+    "."-delimited middle segments and the ":"-prefixed queue name.
+    Returns the value unchanged if it doesn't contain both a "." and a
+    ":", rather than guessing at a differently-shaped value (including
+    the "—" placeholder for "no Message ID entity found")."""
+    if not message_id or "." not in message_id or ":" not in message_id:
+        return message_id
+    prefix = message_id.split(".", 1)[0]
+    suffix = message_id.rsplit(":", 1)[-1]
+    return f"{prefix} {suffix}"
+
+
 def reason_code_reference(order):
     """Raw code(s) behind ServiceRequest.reasonCode — e.g. a Genomic
     Clinical Indication reference number — ignoring display text (see
@@ -359,6 +397,15 @@ app.jinja_env.filters["slugify"] = slugify
 app.jinja_env.filters["nhs_or_chi_number"] = FhirClient.nhs_or_chi_number
 app.jinja_env.filters["organisation_ods_code"] = FhirClient.organisation_ods_code
 app.jinja_env.filters["gmc_number"] = lambda p: FhirClient._identifier_value(p, FhirClient.GMC_NUMBER_SYSTEM)
+app.jinja_env.filters["audit_action"] = FhirClient.audit_action_label
+app.jinja_env.filters["audit_outcome"] = FhirClient.audit_outcome_label
+app.jinja_env.filters["audit_agent_display"] = lambda agent: client.audit_event_agent_display(agent)
+app.jinja_env.filters["audit_source_display"] = FhirClient.audit_event_source_display
+app.jinja_env.filters["audit_message_id"] = lambda event: audit_message_id_short(FhirClient.audit_event_message_id(event))
+app.jinja_env.filters["audit_correlation_id"] = FhirClient.audit_event_correlation_id
+app.jinja_env.filters["audit_query_text"] = FhirClient.audit_event_query_text
+app.jinja_env.filters["audit_recorded_date"] = audit_recorded_date
+app.jinja_env.filters["audit_recorded_time"] = audit_recorded_time
 
 
 @app.route("/", methods=["GET"])
@@ -501,6 +548,62 @@ def patient_detail(patient_id):
         order_organisation=order_organisation, order_clinician=order_clinician,
         order_performer=order_performer,
         specimens=specimens, error=error, is_production=client.is_production(),
+    )
+
+
+@app.route("/patient/<patient_id>/audit-trail")
+def patient_audit_trail(patient_id):
+    """
+    Audit trail for one patient, sourced from the FHIR server's own
+    AuditEvent resources (client.audit_events_for_patient()) — who
+    accessed or changed this patient's record, when, and what they did.
+    Bounded by a start/end date range (?start=&end=, same convention as
+    /stats/ctdna/cepheid-results), defaulting to the last 30 days.
+
+    Also filterable by Correlation ID (?correlation_id=) and Message ID
+    (?message_id=) — each a `<select>` of the distinct values actually
+    present in the date-bounded result set (correlation_ids/message_ids
+    below), rather than free text, so the picker can only ever choose a
+    value that's really there. Both are exact matches applied
+    client-side, combined with AND when both are set, rather than as a
+    separate FHIR search — neither is a real search parameter (see
+    AUDIT_ENTITY_CORRELATION_ID_CODE's docstring), each is dug out of
+    one specific entity's fields the same way its table column is.
+    Message ID matches on the same shortened form the column displays
+    (audit_message_id_short()), not the raw entity value, so the
+    dropdown's options read the same as what's in the table.
+    """
+    error = None
+    patient = None
+    events = []
+    correlation_ids = []
+    message_ids = []
+    end = request.args.get("end") or date.today().isoformat()
+    start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
+    correlation_id = request.args.get("correlation_id", "")
+    message_id = request.args.get("message_id", "")
+    try:
+        patient = client.get_patient(patient_id)
+        events = client.audit_events_for_patient(patient_id, start, end)
+        correlation_ids = sorted({
+            cid for e in events
+            if (cid := client.audit_event_correlation_id(e)) != "—"
+        })
+        message_ids = sorted({
+            mid for e in events
+            if (mid := audit_message_id_short(FhirClient.audit_event_message_id(e))) != "—"
+        })
+        if correlation_id:
+            events = [e for e in events if client.audit_event_correlation_id(e) == correlation_id]
+        if message_id:
+            events = [e for e in events if audit_message_id_short(FhirClient.audit_event_message_id(e)) == message_id]
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "audit_trail.html", patient_id=patient_id, patient=patient,
+        start=start, end=end, correlation_id=correlation_id,
+        correlation_ids=correlation_ids, message_id=message_id,
+        message_ids=message_ids, events=events, error=error,
     )
 
 
@@ -1027,6 +1130,12 @@ def admin():
     orphaned (no-patient) ServiceRequests, each with its own destructive
     clear-down action below. This GET only searches/lists — nothing is
     deleted until one of the POST routes below runs.
+
+    Also two AuditEvent clear-down entry points (single patient, or all
+    patients within a date range) — both are small forms here that POST
+    to their own confirm route rather than listing anything on this GET,
+    since (unlike the sections above) there's nothing to preview without
+    the admin first choosing a patient/date range.
     """
     error = None
     test_patients, orphaned_orders = [], []
@@ -1050,8 +1159,11 @@ def admin():
         ]
     except Exception as e:
         error = str(e)
+    audit_events_end = date.today().isoformat()
+    audit_events_start = (date.today() - timedelta(days=30)).isoformat()
     return render_template(
         "admin.html", test_patients=test_patients, orphaned_orders=orphaned_orders, error=error,
+        audit_events_start=audit_events_start, audit_events_end=audit_events_end,
     )
 
 
@@ -1127,6 +1239,112 @@ def admin_orphaned_clear_down():
         error = str(e)
     return render_template(
         "admin_clear_down_result.html", title="Orphaned ServiceRequest clear-down result",
+        deleted=result["deleted"], failed=result["failed"], error=error,
+    )
+
+
+def _resolve_patient_by_id_or_nhs_number(value):
+    """Resolves a free-typed admin-screen value to one Patient — tries it
+    as a raw Patient id first (search_patients(patient_id=...) already
+    swallows a bad/unknown id into []), then as an NHS number if that
+    comes back empty. Returns the first match, or None. Deliberately
+    simple (no disambiguation UI) since search_patients(nhs_number=...)
+    already matches on a specific identifier value, so more than one
+    result would be unusual — same "take the first, don't overbuild"
+    stance as the rest of this admin screen's small forms."""
+    patients = client.search_patients(patient_id=value)
+    if not patients:
+        patients = client.search_patients(nhs_number=value)
+    return patients[0] if patients else None
+
+
+@app.route("/admin/audit-events/patient/confirm", methods=["POST"])
+def admin_audit_events_patient_confirm():
+    """
+    Confirmation page for deleting one patient's AuditEvent history —
+    resolves the typed patient id/NHS number and counts their AuditEvents
+    (client.audit_events_for_patient(), no date bound — see that
+    method's docstring for why unbounded is safe here) before showing a
+    delete button, same preview-then-confirm shape as the NHS-number-
+    range patient clear-down above. Nothing is deleted here.
+    """
+    value = request.form.get("patient", "").strip()
+    error = None
+    patient = None
+    event_count = 0
+    try:
+        patient = _resolve_patient_by_id_or_nhs_number(value)
+        if patient:
+            event_count = len(client.audit_events_for_patient(patient["id"]))
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_audit_events_patient_confirm.html", value=value, patient=patient,
+        event_count=event_count, error=error,
+    )
+
+
+@app.route("/admin/audit-events/patient/clear-down", methods=["POST"])
+def admin_audit_events_patient_clear_down():
+    """Actually deletes every AuditEvent for the confirmed patient
+    (client.clear_down_audit_events_for_patient()) — the AuditEvent
+    resources only, same as the patient page's own clear-down doesn't
+    touch the Patient record itself unless separately opted in."""
+    patient_id = request.form.get("patient_id", "")
+    error = None
+    result = {"deleted": [], "failed": []}
+    try:
+        result = client.clear_down_audit_events_for_patient(patient_id)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html", title="Patient AuditEvent clear-down result",
+        deleted=result["deleted"], failed=result["failed"], error=error,
+        back_url=request.script_root + f"/patient/{patient_id}/audit-trail",
+        back_label="Back to patient audit trail",
+    )
+
+
+@app.route("/admin/audit-events/all/confirm", methods=["POST"])
+def admin_audit_events_all_confirm():
+    """
+    Confirmation page for deleting AuditEvents system-wide (every
+    patient) within a date range — counts what's there
+    (client.audit_events_in_range()) before showing a delete button.
+    Bounded by start/end rather than truly all-time, both to avoid the
+    413 risk an unbounded AuditEvent query carries on this server (see
+    audit_events_in_range()'s docstring) and so this bulk action has a
+    deliberately chosen blast radius rather than nuking the entire audit
+    history in one click. Nothing is deleted here.
+    """
+    start = request.form.get("start") or (date.today() - timedelta(days=30)).isoformat()
+    end = request.form.get("end") or date.today().isoformat()
+    error = None
+    event_count = 0
+    try:
+        event_count = len(client.audit_events_in_range(start, end))
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_audit_events_all_confirm.html", start=start, end=end,
+        event_count=event_count, error=error,
+    )
+
+
+@app.route("/admin/audit-events/all/clear-down", methods=["POST"])
+def admin_audit_events_all_clear_down():
+    """Actually deletes every AuditEvent system-wide within the confirmed
+    date range (client.clear_down_audit_events_in_range())."""
+    start = request.form.get("start", "")
+    end = request.form.get("end", "")
+    error = None
+    result = {"deleted": [], "failed": []}
+    try:
+        result = client.clear_down_audit_events_in_range(start, end)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html", title="AuditEvent clear-down result (all patients)",
         deleted=result["deleted"], failed=result["failed"], error=error,
     )
 

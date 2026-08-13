@@ -1410,6 +1410,49 @@ do. Still no CSRF token/rate limiting, same as every route in this app —
 the `ADMIN_USERNAMES` gate above narrows *who* can reach these, not
 what protects the request itself.
 
+**AuditEvent clear-down** — two more actions, both deleting only
+`AuditEvent` resources (never the Patient record or any genomic test
+data), each with its own confirm step since both can touch
+patient-identifiable audit history:
+
+- **One patient** — a small "Patient ID or NHS number" form (no
+  checkbox list, unlike the NHS-number-range action above, since this
+  targets exactly one patient the admin already knows). `app.
+  _resolve_patient_by_id_or_nhs_number()` tries the typed value as a
+  Patient id first (`search_patients(patient_id=...)`, which already
+  swallows an unknown id into `[]`), then as an NHS number — same
+  "take the first match, don't overbuild a disambiguation UI" stance as
+  the rest of this screen's small forms. `POST
+  /admin/audit-events/patient/confirm` resolves the patient and counts
+  their AuditEvents (`client.audit_events_for_patient()`, no date
+  bound — safe unbounded here since it's patient-scoped, not
+  system-wide) before showing a delete button; `POST
+  /admin/audit-events/patient/clear-down` is the only route that calls
+  `clear_down_audit_events_for_patient()`. Its result page's "back"
+  link (`admin_clear_down_result.html`'s `back_url`/`back_label`
+  params) points at that patient's own `/patient/<id>/audit-trail`
+  rather than back to `/admin`, since that's the page whose data this
+  action just emptied out.
+- **All patients** — bounded by a `start`/`end` date range
+  (`?start=&end=`, same convention as the audit trail screen itself,
+  defaulting to the last 30 days), **not** truly all-time.
+  `FhirClient.audit_events_in_range()` requires `start`/`end` (not
+  optional, unlike `audit_events_for_patient()`'s) for the same reason
+  `_active_orders_with_intent()`'s do — an unbounded system-wide
+  AuditEvent query is exactly the shape of query that's 413'd on this
+  server before (see "413s on unfiltered system-wide searches"), and an
+  audit log is plausibly the largest table on the server, so this is
+  the last place to risk an unbounded fetch. `POST
+  /admin/audit-events/all/confirm` counts what's in range before
+  showing a delete button; `POST /admin/audit-events/all/clear-down` is
+  the only route that calls `clear_down_audit_events_in_range()`.
+
+Both share the same `admin_clear_down_result.html` result page as the
+other two actions above, and follow the same GET/confirm-lists,
+POST-mutates split — the two `*_confirm()` routes never call a
+`_delete()`-backed method, only `admin_audit_events_patient_clear_down()`
+and `admin_audit_events_all_clear_down()` do.
+
 **econcur import (`/admin/econcur-import`)** — imports NHS ODS's
 `econcur.csv` export ("English Hospital Consultants" —
 https://digital.nhs.uk/services/organisation-data-service/data-search-and-export/csv-downloads/miscellaneous)
@@ -1602,6 +1645,129 @@ a server ignores the Accept header. `/report/<report_id>/pdf` streams that
 straight to the browser as the "📄 View report document" link on the patient
 page.
 
+### Audit trail (`/patient/<id>/audit-trail`)
+
+A patient-scoped view of `AuditEvent` resources — who accessed or changed
+this patient's record, when, and how — reached from a "🕵 View Audit Trail"
+link at the top of the patient page.
+
+- **`FhirClient.audit_events_for_patient(patient_id, start, end)`** tries
+  R4's composite `patient` search param first (defined to resolve either
+  `agent.who` or `entity.what` to a Patient — the parameter actually meant
+  for "everything about this patient's audit trail"), falling back to the
+  narrower `entity=Patient/<id>` for a server that indexes
+  `AuditEvent.entity` but not the composite param — same
+  try-then-fall-back stance the category-code searches
+  (`lab_orders_for_patient()` etc.) use elsewhere in this file. Bounded by
+  `date` (`AuditEvent.recorded`) via the same `[ge, le]` repeated-param
+  convention `orders_in_range()`/`reports_in_range()` use — optional here,
+  unlike those, since this is already patient-scoped rather than
+  system-wide, so it isn't the 413 risk those were rewritten to avoid.
+  `app.patient_audit_trail()` defaults `start`/`end` to the last 30 days
+  (`?start=&end=`, same convention as `/stats`/`/ctdna`/
+  `/cepheid-results`).
+- **`action`/`outcome` are rendered from FHIR R4's own fixed ValueSets**
+  (`FhirClient.AUDIT_EVENT_ACTIONS` = C/R/U/D/E →
+  Create/Read/Update/Delete/Execute, `AUDIT_EVENT_OUTCOMES` = 0/4/8/12 →
+  Success/Minor/Serious/Major failure) — hardcoded, not guessed, since
+  these are spec-fixed rather than deployment-specific (same reasoning as
+  `ASK_AT_ORDER_ENTRY_QUESTIONS`).
+- **`type`/`subtype` are a bare `Coding`, not a `CodeableConcept`** — per
+  the AuditEvent resource shape, unlike `ServiceRequest.code` and most
+  other coded fields in this app — so the template reuses the
+  `coding_text` filter (the same one `Encounter.class` uses) rather than
+  `code_text`.
+- **Agent display** (`FhirClient.audit_event_agent_display()`) prefers
+  `agent.name` (the field the spec defines specifically for a
+  human-meaningful label), then a resolved `agent.who` reference's
+  `.name[]`, then that reference's own inline `.display`/`.identifier` —
+  same resolve-then-fall-back-to-logical-reference stance
+  `_resolve_practitioner_display()` uses for a requester's practitioner
+  reference. **Source display** (`audit_event_source_display()`) is
+  `source.observer`'s inline `.display` only, unresolved — typically a
+  Device with nothing more useful to fetch.
+- **No Entity(ies) column** — dropped in favour of three narrower,
+  specifically-useful columns pulled from individual `AuditEvent.entity`
+  entries instead of listing every entity generically:
+  - **Message ID** / **Correlation ID** — the entity whose `.type.code`
+    is `XrequestId` / `XcorrelationId` respectively
+    (`FhirClient.AUDIT_ENTITY_MESSAGE_ID_CODE`/
+    `AUDIT_ENTITY_CORRELATION_ID_CODE`, matched via
+    `_audit_entity_by_type_code()`) — local codes, **system
+    unconfirmed**, so matched by code alone regardless of system, same
+    "code confirmed, system not" stance as `BCRABL_CODE`. The actual ID
+    value's location on that entity is *also* unconfirmed, so
+    `audit_event_message_id()`/`audit_event_correlation_id()` go through
+    `audit_event_entity_display()`, which now also falls back to
+    `what.identifier.value` (added for this — a request/correlation ID
+    is plausibly modelled as a logical identifier, not just free text)
+    before `.display`/`.reference`. **The Message ID column is further
+    shortened for display** (`app.audit_message_id_short()`, composed
+    into the `audit_message_id` Jinja filter) — this deployment's raw
+    value is shaped `"<system>.<instance>.<queue>:<id>"` (e.g.
+    `"RIE.Production.ESBDevelopment:885859"`), and only the part before
+    the first `"."` plus the part after the last `":"` is shown
+    (`"RIE 885859"`) — dropping the middle segments and queue name,
+    which aren't useful here. Falls back to the value unchanged if it
+    doesn't contain both a `"."` and a `":"` (including the `"—"`
+    placeholder for "no Message ID entity found"), rather than guessing
+    at a differently-shaped value. Correlation ID is **not** shortened
+    the same way — it's also the filter column below, and needs to stay
+    the real value to match against.
+  - **Query** — the entity whose `.type` is
+    `http://terminology.hl7.org/CodeSystem/audit-entity-type|2`
+    ("System Object" — `AUDIT_ENTITY_TYPE_SYSTEM`/
+    `AUDIT_ENTITY_QUERY_TYPE_CODE`, both spec-fixed so matched on system
+    *and* code, unlike the two local codes above). Its `.query` is
+    base64Binary per the AuditEvent spec; `audit_event_query_text()`
+    base64-decodes it to plain text, falling back to the raw
+    (undecoded) value if it isn't valid base64 rather than hiding a
+    malformed-but-present value, and returning `None` (not "—") when
+    there's no such entity at all — the template only renders a `<code>`
+    block when there's real decoded text to show.
+- **Recorded is split into separate Date/Time columns**
+  (`app.audit_recorded_date()`/`audit_recorded_time()`) — a plain
+  `split("T", 1)` on the `AuditEvent.recorded` instant string, not a
+  datetime parse/reformat, since the FHIR wire format already guarantees
+  that separator. Time is further trimmed to plain `HH:MM:SS`
+  (`[:8]` on the post-"T" part) — the instant grammar always puts a
+  fixed-width `HH:MM:SS` first, optionally followed by fractional
+  seconds and/or a timezone offset (`.123`, `Z`, `+01:00`, ...), which
+  are dropped rather than shown.
+- **Filterable by Correlation ID (`?correlation_id=`) and Message ID
+  (`?message_id=`)** — each a `<select>`, not free text, offering only
+  the distinct values actually present in the current date-bounded
+  result set (`app.patient_audit_trail()` builds `correlation_ids`/
+  `message_ids` as `sorted({...})` over every fetched event, **before**
+  either filter is applied — so each option list always reflects the
+  full range, not just whatever's currently selected, and independently
+  of what the *other* filter is set to). Filtering itself is an exact
+  match, applied client-side after the date-bounded fetch rather than as
+  a separate FHIR search — neither is a real search parameter, each is
+  dug out of one specific entity's fields the same way its table column
+  is (see above). Both filters combine with AND when both are set.
+  Message ID's `<select>`/filter match on the same shortened form the
+  column displays (`audit_message_id_short()`, see above) rather than
+  the raw entity value, so the dropdown reads the same as the table.
+  **Each `<select>` lives inside its own column's `<th>`** (not a
+  separate control up by the date range) — the `<table>` sits inside the
+  same `<form>` as the date pickers, so submitting via the top "Update"
+  button carries both filter params along with `start`/`end`.
+  **`onchange="this.form.submit()"` on both `<select>`s** — picking a
+  value submits the form immediately, since a bare `<select>` inside a
+  `<form>` doesn't submit on its own (an earlier version required
+  clicking the far-away top "Update" button afterwards, which looked
+  like the dropdown just didn't filter at all). **The table (and so both
+  `<select>`s) stays rendered even when the current filter(s) match zero
+  events** — the row loop's Jinja `{% else %}` prints a "No events match
+  the selected Message ID / Correlation ID." row instead of the whole
+  `{% if events %}` block being skipped, since skipping it would make
+  both `<select>`s disappear along with the table the moment a filter
+  produced no rows, trapping the user with no visible way to reset back
+  to "All". The plain "No audit events found..." message is only shown
+  when there's truly nothing at all for the range (no events *and* no
+  correlation IDs *and* no message IDs to offer).
+
 ### Geography (ICS / country)
 
 Each stats row resolves its patient (`subject`) and derives:
@@ -1697,6 +1863,25 @@ haven't been exercised against a live NHS North West Genomics IG server:
     `/ctdna`, or the `/stats` organisation/ICS drill-downs, sample a
     real Practitioner resource's `identifier` array and adjust the
     system URI(s).
+13. **AuditEvent search params on this server**
+    (`FhirClient.audit_events_for_patient()`, used by
+    `/patient/<id>/audit-trail`) — whether this server indexes the
+    composite `patient` search param at all, and whether it populates
+    `AuditEvent` for patient record access in the first place, are both
+    unconfirmed. If the audit trail screen always comes back empty for a
+    patient known to have activity, check whether the `entity=
+    Patient/<id>` fallback fares any better, and separately confirm the
+    server is generating/storing `AuditEvent` resources at all.
+14. **Message ID / Correlation ID entity codes and value location**
+    (`AUDIT_ENTITY_MESSAGE_ID_CODE` = `"XrequestId"`,
+    `AUDIT_ENTITY_CORRELATION_ID_CODE` = `"XcorrelationId"`, matched on
+    `entity.type.code` alone — system unconfirmed) — if the Message
+    ID/Correlation ID columns on `/patient/<id>/audit-trail` are always
+    "—", sample a real `AuditEvent.entity` array and check both whether
+    these codes are right and which field (`.name`, `.description`,
+    `.what.identifier.value`, `.what.display`) actually carries the ID
+    value — `audit_event_entity_display()` checks all of them in that
+    order but was written without a real example to check against.
 
 ## Maintenance scripts (`scripts/`)
 

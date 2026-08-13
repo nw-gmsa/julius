@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Audit Trail</h1>
+  <p class="muted">
+    Patient: {{ patient|human_name if patient else patient_id }}
+    (<a href="{{ request.script_root }}/patient/{{ patient_id }}">back to patient</a>)
+  </p>
+  <p class="muted">
+    <code>AuditEvent</code> resources for this patient (matched via the
+    <code>patient</code> search param, falling back to
+    <code>entity=Patient/{{ patient_id }}</code> — see
+    <code>FhirClient.audit_events_for_patient()</code>), bounded to
+    <code>AuditEvent.recorded</code> within the range below. Message ID/
+    Correlation ID come from the entity whose <code>type.code</code> is
+    <code>XrequestId</code>/<code>XcorrelationId</code>; Query comes from
+    the entity whose <code>type</code> is
+    <code>http://terminology.hl7.org/CodeSystem/audit-entity-type|2</code>,
+    with its base64-encoded <code>query</code> decoded to plain text.
+  </p>
+
+  <form action="{{ request.script_root }}/patient/{{ patient_id }}/audit-trail" method="get">
+    <p>
+      From <input type="date" name="start" value="{{ start }}">
+      to <input type="date" name="end" value="{{ end }}">
+      <button type="submit">Update</button>
+    </p>
+
+    {% if error %}
+      <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+    {% endif %}
+
+    <h2>Events ({{ events|length }})</h2>
+    {% if events or correlation_ids or message_ids %}
+      <table>
+        <tr>
+          <th>Date</th>
+          <th>Time</th>
+          <th>Type</th>
+          <th>Action</th>
+          <th>Query</th>
+          <th>Outcome</th>
+          <th>
+            Message ID<br>
+            <select name="message_id" onchange="this.form.submit()">
+              <option value="" {% if not message_id %}selected{% endif %}>All</option>
+              {% for mid in message_ids %}
+                <option value="{{ mid }}" {% if mid == message_id %}selected{% endif %}>{{ mid }}</option>
+              {% endfor %}
+            </select>
+          </th>
+          <th>
+            Correlation ID<br>
+            <select name="correlation_id" onchange="this.form.submit()">
+              <option value="" {% if not correlation_id %}selected{% endif %}>All</option>
+              {% for cid in correlation_ids %}
+                <option value="{{ cid }}" {% if cid == correlation_id %}selected{% endif %}>{{ cid }}</option>
+              {% endfor %}
+            </select>
+          </th>
+          <th>Agent(s)</th>
+          <th>Source</th>
+        </tr>
+        {% for event in events %}
+          <tr>
+            <td>{{ event.recorded|audit_recorded_date }}</td>
+            <td>{{ event.recorded|audit_recorded_time }}</td>
+            <td>
+              {{ event.type|coding_text }}
+              {% for st in event.subtype %}
+                <br><span class="muted">{{ st|coding_text }}</span>
+              {% endfor %}
+            </td>
+            <td>{{ event.action|audit_action }}</td>
+            <td>
+              {% set query_text = event|audit_query_text %}
+              {% if query_text %}
+                <code>{{ query_text }}</code>
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td>
+              {{ event.outcome|audit_outcome }}
+              {% if event.outcomeDesc %}
+                <br><span class="muted">{{ event.outcomeDesc }}</span>
+              {% endif %}
+            </td>
+            <td>{{ event|audit_message_id }}</td>
+            <td>{{ event|audit_correlation_id }}</td>
+            <td>
+              {% for agent in event.agent %}
+                {{ agent|audit_agent_display }}{% if not loop.last %}<br>{% endif %}
+              {% else %}
+                —
+              {% endfor %}
+            </td>
+            <td>{{ event|audit_source_display }}</td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="10" class="muted">No events match the selected Message ID / Correlation ID.</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% elif not error %}
+      <p class="muted">No audit events found for this patient in the selected range.</p>
+    {% endif %}
+  </form>
+{% endblock %}

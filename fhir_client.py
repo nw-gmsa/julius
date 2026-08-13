@@ -715,6 +715,221 @@ class FhirClient:
         rather than kept in server state between requests."""
         return self._get(f"ServiceRequest/{order_id}")
 
+    # ---- AuditEvent (audit trail) -------------------------------------
+
+    #: FHIR R4's own "audit-event-action" ValueSet — not deployment-
+    #: specific, so hardcoded rather than fetched (same reasoning as
+    #: ASK_AT_ORDER_ENTRY_QUESTIONS being a small, stable, spec-defined
+    #: set not worth a live lookup for).
+    #: https://hl7.org/fhir/R4/valueset-audit-event-action.html
+    AUDIT_EVENT_ACTIONS = {
+        "C": "Create", "R": "Read/View/Print", "U": "Update",
+        "D": "Delete", "E": "Execute",
+    }
+
+    #: FHIR R4's "audit-event-outcome" ValueSet, same reasoning as above.
+    #: https://hl7.org/fhir/R4/valueset-audit-event-outcome.html
+    AUDIT_EVENT_OUTCOMES = {
+        "0": "Success", "4": "Minor failure",
+        "8": "Serious failure", "12": "Major failure",
+    }
+
+    @classmethod
+    def audit_action_label(cls, code):
+        return cls.AUDIT_EVENT_ACTIONS.get(code, code or "—")
+
+    @classmethod
+    def audit_outcome_label(cls, code):
+        return cls.AUDIT_EVENT_OUTCOMES.get(code, code or "—")
+
+    def audit_events_for_patient(self, patient_id, start=None, end=None, max_pages=10):
+        """
+        AuditEvent history for one patient — who accessed/changed their
+        record, when, and how, per this FHIR server's own audit log.
+
+        AuditEvent has two standard R4 search params that can scope by
+        patient: the composite `patient` param (defined to resolve either
+        `agent.who` or `entity.what` to a Patient — the one actually meant
+        for "everything about this patient's audit trail") and the
+        narrower `entity` param (matches `entity.what` directly). `patient`
+        is tried first, falling back to `entity=Patient/<id>` for a server
+        that indexes AuditEvent.entity but not the composite `patient`
+        param — same try-then-fall-back stance the category-code searches
+        (lab_orders_for_patient() etc.) use elsewhere in this file; neither
+        has been confirmed against a real server yet.
+
+        Bounded by `date` (AuditEvent.recorded) when start/end are given,
+        same [ge, le] repeated-param convention orders_in_range()/
+        reports_in_range() use — unlike those, both are optional here
+        since this is already patient-scoped, not a system-wide query, so
+        an unbounded call isn't the 413 risk those were rewritten to avoid.
+        """
+        params = {"_sort": "-date", "_count": 50}
+        if start and end:
+            params["date"] = [f"ge{start}", f"le{end}"]
+        try:
+            matches = self._search_all("AuditEvent", {**params, "patient": patient_id}, max_pages=max_pages)
+            if matches:
+                return matches
+        except requests.HTTPError:
+            pass
+        return self._search_all("AuditEvent", {**params, "entity": f"Patient/{patient_id}"}, max_pages=max_pages)
+
+    def audit_event_agent_display(self, agent):
+        """Best-effort display name for one AuditEvent.agent entry —
+        prefers the entry's own `.name` (the field the AuditEvent spec
+        specifically defines for this: "Human-meaningful name for the
+        agent"), then a resolved `.who` reference's Patient/Practitioner-
+        style `.name[]`, then that reference's own inline `.display`/
+        `.identifier`, same resolve-then-fall-back-to-logical-reference
+        stance `_resolve_practitioner_display()` uses for a requester's
+        practitioner reference."""
+        if agent.get("name"):
+            return agent["name"]
+        who = agent.get("who") or {}
+        resource = self.resolve_reference(who)
+        if resource:
+            names = resource.get("name", [])
+            if names:
+                n = names[0]
+                given = " ".join(n.get("given", []))
+                family = n.get("family", "")
+                full = f"{given} {family}".strip()
+                if full:
+                    return full
+        if who.get("display"):
+            return who["display"]
+        ident_value = (who.get("identifier") or {}).get("value")
+        if ident_value:
+            return ident_value
+        return "Unknown"
+
+    @staticmethod
+    def audit_event_entity_display(entity):
+        """Best-effort label for one AuditEvent.entity entry — `.name`,
+        then `.description`, then whatever `.what` carries inline
+        (`.identifier.value`, then `.display`/`.reference`); entity.what
+        is deliberately not resolved via resolve_reference() the way
+        agent.who is above, since an entity is very often the patient
+        themself or a non-Patient/Practitioner resource (a
+        ServiceRequest, a DiagnosticReport, ...) with no single shared
+        "name" shape to extract. The `.identifier.value` fallback matters
+        for id-carrying entities specifically (audit_event_message_id()/
+        audit_event_correlation_id() above) — a request/correlation ID is
+        plausibly modelled as a logical identifier rather than free text,
+        so it's checked before falling through to `.display`/`.reference`."""
+        if entity.get("name"):
+            return entity["name"]
+        if entity.get("description"):
+            return entity["description"]
+        what = entity.get("what") or {}
+        ident_value = (what.get("identifier") or {}).get("value")
+        return ident_value or what.get("display") or what.get("reference") or "—"
+
+    @staticmethod
+    def audit_event_source_display(event):
+        """AuditEvent.source.observer's inline display — the system/
+        process that recorded the event. Not resolved via
+        resolve_reference(): source.observer is typically a Device with
+        no more useful a name than its own .display already carries."""
+        observer = (event.get("source") or {}).get("observer") or {}
+        return observer.get("display") or "—"
+
+    #: This deployment appears to carry the originating request's message
+    #: ID / correlation ID as their own AuditEvent.entity entries, each
+    #: identified by entity.type.code — local codes, system unconfirmed
+    #: (same "code confirmed, system not" situation as BCRABL_CODE), so
+    #: matched by code alone regardless of system, same as
+    #: _is_bcrabl_report(). Not confirmed which entity field (`.name`,
+    #: `.description`, `.what.identifier`, ...) actually carries the ID
+    #: value itself either — audit_event_message_id()/
+    #: audit_event_correlation_id() below check all of them via
+    #: audit_event_entity_display() plus an identifier fallback.
+    AUDIT_ENTITY_MESSAGE_ID_CODE = "XrequestId"
+    AUDIT_ENTITY_CORRELATION_ID_CODE = "XcorrelationId"
+
+    #: FHIR R4's own "audit-entity-type" CodeSystem
+    #: (https://hl7.org/fhir/R4/v3/AuditEntityType/cs.html) — code "2" is
+    #: "System Object", the code this deployment's query-carrying entity
+    #: uses. Unlike the two local codes above, both the system and the
+    #: code here are spec-fixed, so matched on both, not code alone.
+    AUDIT_ENTITY_TYPE_SYSTEM = "http://terminology.hl7.org/CodeSystem/audit-entity-type"
+    AUDIT_ENTITY_QUERY_TYPE_CODE = "2"
+
+    @staticmethod
+    def _audit_entity_by_type_code(event, code, system=None):
+        """First AuditEvent.entity whose `.type.code` matches `code` —
+        and, when `system` is given, whose `.type.system` matches too.
+        entity.type is a bare Coding (not a CodeableConcept), so this
+        checks it directly rather than going through a `.coding[]` list."""
+        for entity in event.get("entity", []):
+            etype = entity.get("type") or {}
+            if etype.get("code") != code:
+                continue
+            if system is not None and etype.get("system") != system:
+                continue
+            return entity
+        return None
+
+    @classmethod
+    def audit_event_message_id(cls, event):
+        entity = cls._audit_entity_by_type_code(event, cls.AUDIT_ENTITY_MESSAGE_ID_CODE)
+        return cls.audit_event_entity_display(entity) if entity else "—"
+
+    @classmethod
+    def audit_event_correlation_id(cls, event):
+        entity = cls._audit_entity_by_type_code(event, cls.AUDIT_ENTITY_CORRELATION_ID_CODE)
+        return cls.audit_event_entity_display(entity) if entity else "—"
+
+    @classmethod
+    def audit_event_query_text(cls, event):
+        """The query-type entity's `.query` (base64Binary per spec),
+        base64-decoded to plain text — the entity is found via the
+        FHIR-standard audit-entity-type code "2" ("System Object"), see
+        AUDIT_ENTITY_TYPE_SYSTEM/AUDIT_ENTITY_QUERY_TYPE_CODE above.
+        Returns None (not "—") when there's no such entity or it carries
+        no query, so the template can tell "no query entity" apart from
+        "query entity present but undecodable"; falls back to the raw
+        (undecoded) value if it isn't valid base64, rather than hiding a
+        malformed-but-present value entirely."""
+        entity = cls._audit_entity_by_type_code(
+            event, cls.AUDIT_ENTITY_QUERY_TYPE_CODE, cls.AUDIT_ENTITY_TYPE_SYSTEM)
+        query = entity.get("query") if entity else None
+        if not query:
+            return None
+        try:
+            return base64.b64decode(query).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return query
+
+    def audit_events_in_range(self, start, end, max_pages=10):
+        """
+        Every AuditEvent system-wide, bounded by `date` (AuditEvent.recorded)
+        within [start, end] — used by the admin screen's "delete all
+        AuditEvents" action. Unlike audit_events_for_patient() above,
+        start/end are **required**, not optional, for the same reason
+        _active_orders_with_intent()'s are: an unbounded system-wide
+        AuditEvent query is exactly the shape that's 413'd on this server
+        before (see "413s on unfiltered system-wide searches") — an audit
+        log is plausibly the largest table on the whole server, so this is
+        the last place to risk an unbounded fetch.
+        """
+        params = {"_sort": "-date", "_count": 100, "date": [f"ge{start}", f"le{end}"]}
+        return self._search_all("AuditEvent", params, max_pages=max_pages)
+
+    def clear_down_audit_events_for_patient(self, patient_id):
+        """DELETE every AuditEvent for one patient (audit_events_for_patient()
+        with no date bound — safe unbounded here since it's patient-scoped,
+        not system-wide, same reasoning as that method's own docstring).
+        Returns {"deleted": [...], "failed": [...]} like clear_down_patient()."""
+        return self._delete_resources("AuditEvent", self.audit_events_for_patient(patient_id))
+
+    def clear_down_audit_events_in_range(self, start, end):
+        """DELETE every AuditEvent system-wide within [start, end] (see
+        audit_events_in_range()). Returns {"deleted": [...], "failed":
+        [...]} like clear_down_patient()."""
+        return self._delete_resources("AuditEvent", self.audit_events_in_range(start, end))
+
     #: Cepheid GeneXpert BCR-ABL1 quantitative monitoring test code. Unlike
     #: ctDNA (no confirmed code at all, so text-matched) or the Genomic Test
     #: Directory code (a confirmed system, so system-matched), this is a

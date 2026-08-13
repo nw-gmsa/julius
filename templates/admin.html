@@ -60,6 +60,37 @@
     <p class="muted">No orphaned ServiceRequests found.</p>
   {% endif %}
 
+  <h2>AuditEvent clear-down</h2>
+  <p class="muted">
+    Deletes <code>AuditEvent</code> resources — the audit trail data
+    shown on a patient's "🕵 View Audit Trail" page — either for one
+    patient, or system-wide within a date range. Irreversible.
+  </p>
+
+  <h3>For one patient</h3>
+  <form method="post" action="{{ request.script_root }}/admin/audit-events/patient/confirm">
+    <p>
+      Patient ID or NHS number
+      <input type="text" name="patient" required>
+      <button type="submit" class="danger">Preview deletion</button>
+    </p>
+  </form>
+
+  <h3>For all patients</h3>
+  <p class="muted">
+    Bounded by <code>AuditEvent.recorded</code> — not truly all-time, both
+    to avoid the risk an unbounded system-wide AuditEvent query carries
+    on this server, and so this has a deliberately chosen scope rather
+    than deleting the entire audit history in one click.
+  </p>
+  <form method="post" action="{{ request.script_root }}/admin/audit-events/all/confirm">
+    <p>
+      From <input type="date" name="start" value="{{ audit_events_start }}">
+      to <input type="date" name="end" value="{{ audit_events_end }}">
+      <button type="submit" class="danger">Preview deletion</button>
+    </p>
+  </form>
+
   <h2>econcur import — NHS ODS Hospital Consultants</h2>
   <p class="muted">
     Imports/updates <code>Practitioner</code> + <code>PractitionerRole</code>

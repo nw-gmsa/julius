@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
   <h1>Patient {{ patient_id }}</h1>
+  <p><a href="{{ request.script_root }}/patient/{{ patient_id }}/audit-trail">🕵 View Audit Trail</a></p>
   {% if is_production %}
     <p class="muted">🗑 Clear down patient data — disabled on this server (<code>FHIR_BASE_URL</code> looks like production).</p>
   {% else %}
