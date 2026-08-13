@@ -16,6 +16,9 @@
     the entity whose <code>type</code> is
     <code>http://terminology.hl7.org/CodeSystem/audit-entity-type|2</code>,
     with its base64-encoded <code>query</code> decoded to plain text.
+    Destination is the <code>agent.name</code> of whichever agent has
+    <code>agent.type.coding[].code</code> <code>110152</code> (DICOM audit
+    source role "Destination").
   </p>
 
   <form action="{{ request.script_root }}/patient/{{ patient_id }}/audit-trail" method="get">
@@ -36,6 +39,8 @@
           <th>Date</th>
           <th>Time</th>
           <th>Type</th>
+          <th>Source</th>
+          <th>Destination</th>
           <th>Action</th>
           <th>Query</th>
           <th>Outcome</th>
@@ -58,7 +63,6 @@
             </select>
           </th>
           <th>Agent(s)</th>
-          <th>Source</th>
         </tr>
         {% for event in events %}
           <tr>
@@ -70,6 +74,8 @@
                 <br><span class="muted">{{ st|coding_text }}</span>
               {% endfor %}
             </td>
+            <td>{{ event|audit_source_display }}</td>
+            <td>{{ event|audit_destination_display }}</td>
             <td>{{ event.action|audit_action }}</td>
             <td>
               {% set query_text = event|audit_query_text %}
@@ -94,11 +100,10 @@
                 —
               {% endfor %}
             </td>
-            <td>{{ event|audit_source_display }}</td>
           </tr>
         {% else %}
           <tr>
-            <td colspan="10" class="muted">No events match the selected Message ID / Correlation ID.</td>
+            <td colspan="11" class="muted">No events match the selected Message ID / Correlation ID.</td>
           </tr>
         {% endfor %}
       </table>

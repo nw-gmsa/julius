@@ -828,12 +828,53 @@ class FhirClient:
 
     @staticmethod
     def audit_event_source_display(event):
-        """AuditEvent.source.observer's inline display — the system/
-        process that recorded the event. Not resolved via
-        resolve_reference(): source.observer is typically a Device with
-        no more useful a name than its own .display already carries."""
-        observer = (event.get("source") or {}).get("observer") or {}
-        return observer.get("display") or "—"
+        """The system/process that recorded the event. Prefers
+        AuditEvent.source.observer's inline display (source.observer is
+        typically a Device with no more useful a name than its own
+        .display already carries; not resolved via resolve_reference()),
+        falling back to AuditEvent.source.site — a plain string field
+        confirmed populated on this deployment even when
+        source.observer.display isn't (seen on patient 24786's events).
+
+        The raw value is shaped like
+        "CDR.Production.CDRDevelopment:Operation.GenomicDataRepository" —
+        abbreviated to "<system> <process>": the part before the first
+        "." (the system) and the part after the last "." (the process),
+        e.g. "CDR GenomicDataRepository". Falls back to the value
+        unchanged if it doesn't contain a "." to split on."""
+        source = event.get("source") or {}
+        observer = source.get("observer") or {}
+        display = observer.get("display") or source.get("site")
+        if not display:
+            return "—"
+        if "." not in display:
+            return display
+        system = display.split(".", 1)[0]
+        process = display.rsplit(".", 1)[-1]
+        return f"{system} {process}"
+
+    #: DICOM audit source role code "Destination" (CID 402) — the
+    #: AuditEvent.agent entry representing where the recorded action's
+    #: data went. System unconfirmed against this deployment (not one of
+    #: the terminology.hl7.org-hosted systems this app otherwise pins),
+    #: so matched by code alone, same "code confirmed, system not" stance
+    #: as AUDIT_ENTITY_MESSAGE_ID_CODE/AUDIT_ENTITY_CORRELATION_ID_CODE.
+    AUDIT_AGENT_DESTINATION_TYPE_CODE = "110152"
+
+    @classmethod
+    def audit_event_destination_display(cls, event):
+        """`.name` of the AuditEvent.agent entry acting as the message
+        destination — identified by agent.type.coding[].code ==
+        AUDIT_AGENT_DESTINATION_TYPE_CODE. Deliberately shows only
+        agent.name, with no fallback to `.who`/`.identifier` the way
+        audit_event_agent_display() has, since agent.name is specifically
+        the field asked for here."""
+        for agent in event.get("agent", []):
+            atype = agent.get("type") or {}
+            codes = [coding.get("code") for coding in atype.get("coding", [])]
+            if cls.AUDIT_AGENT_DESTINATION_TYPE_CODE in codes:
+                return agent.get("name") or "—"
+        return "—"
 
     #: This deployment appears to carry the originating request's message
     #: ID / correlation ID as their own AuditEvent.entity entries, each

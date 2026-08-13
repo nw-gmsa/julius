@@ -401,6 +401,7 @@ app.jinja_env.filters["audit_action"] = FhirClient.audit_action_label
 app.jinja_env.filters["audit_outcome"] = FhirClient.audit_outcome_label
 app.jinja_env.filters["audit_agent_display"] = lambda agent: client.audit_event_agent_display(agent)
 app.jinja_env.filters["audit_source_display"] = FhirClient.audit_event_source_display
+app.jinja_env.filters["audit_destination_display"] = FhirClient.audit_event_destination_display
 app.jinja_env.filters["audit_message_id"] = lambda event: audit_message_id_short(FhirClient.audit_event_message_id(event))
 app.jinja_env.filters["audit_correlation_id"] = FhirClient.audit_event_correlation_id
 app.jinja_env.filters["audit_query_text"] = FhirClient.audit_event_query_text
