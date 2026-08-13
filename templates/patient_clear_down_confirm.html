@@ -22,6 +22,7 @@
       <li>{{ orders|length }} genomic test order(s) (ServiceRequest)</li>
       <li>{{ reports|length }} genomic test report(s) (DiagnosticReport)</li>
       <li>{{ specimens|length }} specimen(s) (Specimen)</li>
+      <li>{{ audit_events|length }} audit event(s) (AuditEvent)</li>
     </ul>
     <p class="muted">
       Any Observation results are <strong>not</strong> deleted. The Patient
@@ -72,13 +73,28 @@
     </table>
   {% endif %}
 
+  {% if audit_events %}
+    <h2>Audit events to be deleted</h2>
+    <table>
+      <tr><th>Date</th><th>Time</th><th>Type</th><th>ID</th></tr>
+      {% for a in audit_events %}
+        <tr>
+          <td>{{ a.recorded|audit_recorded_date }}</td>
+          <td>{{ a.recorded|audit_recorded_time }}</td>
+          <td>{{ a.type|coding_text }}</td>
+          <td class="muted">{{ a.id }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
   <form method="post" action="{{ request.script_root }}/patient/{{ patient_id }}/clear-down">
     <p>
       <label>
         <input type="checkbox" name="delete_patient_record" value="1">
         Also permanently delete the <strong>Patient</strong> resource itself
         (<code>Patient/{{ patient_id }}</code>) — otherwise only the orders,
-        reports, and specimens above are deleted.
+        reports, specimens, and audit events above are deleted.
       </label>
     </p>
     <button type="submit" class="danger">Yes, permanently delete the above</button>

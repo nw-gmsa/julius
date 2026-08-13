@@ -62,7 +62,6 @@
               {% endfor %}
             </select>
           </th>
-          <th>Agent(s)</th>
         </tr>
         {% for event in events %}
           <tr>
@@ -93,17 +92,10 @@
             </td>
             <td>{{ event|audit_message_id }}</td>
             <td>{{ event|audit_correlation_id }}</td>
-            <td>
-              {% for agent in event.agent %}
-                {{ agent|audit_agent_display }}{% if not loop.last %}<br>{% endif %}
-              {% else %}
-                —
-              {% endfor %}
-            </td>
           </tr>
         {% else %}
           <tr>
-            <td colspan="11" class="muted">No events match the selected Message ID / Correlation ID.</td>
+            <td colspan="10" class="muted">No events match the selected Message ID / Correlation ID.</td>
           </tr>
         {% endfor %}
       </table>

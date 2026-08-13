@@ -1087,7 +1087,8 @@ def patient_clear_down(patient_id):
     if client.is_production():
         return render_template(
             "patient_clear_down_confirm.html", patient_id=patient_id,
-            orders=[], reports=[], specimens=[], error=None, production_blocked=True,
+            orders=[], reports=[], specimens=[], audit_events=[], error=None,
+            production_blocked=True,
         ), 403
 
     if request.method == "POST":
@@ -1107,7 +1108,7 @@ def patient_clear_down(patient_id):
         )
 
     error = None
-    orders, reports, specimens = [], [], []
+    orders, reports, specimens, audit_events = [], [], [], []
     try:
         orders = client.lab_orders_for_patient(patient_id)
         reports = client.lab_reports_for_patient(patient_id)
@@ -1116,11 +1117,13 @@ def patient_clear_down(patient_id):
             for spec in client.resolve_specimens(resource):
                 specimens_by_id[spec["id"]] = spec
         specimens = list(specimens_by_id.values())
+        audit_events = client.audit_events_for_patient(patient_id)
     except Exception as e:
         error = str(e)
     return render_template(
         "patient_clear_down_confirm.html", patient_id=patient_id,
-        orders=orders, reports=reports, specimens=specimens, error=error,
+        orders=orders, reports=reports, specimens=specimens,
+        audit_events=audit_events, error=error,
     )
 
 

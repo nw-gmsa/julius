@@ -2345,18 +2345,23 @@ class FhirClient:
 
     def clear_down_patient(self, patient_id):
         """
-        DELETE every Specimen, DiagnosticReport, and ServiceRequest
-        resource for a patient from the FHIR server — irreversible. Meant
-        for resetting a test/demo patient's genomic test data between runs,
-        not for use against real clinical records. Patient and Observation
-        resources are left alone — only the three resource types the
-        clear-down button is documented as deleting are touched.
+        DELETE every Specimen, DiagnosticReport, ServiceRequest, and
+        AuditEvent resource for a patient from the FHIR server —
+        irreversible. Meant for resetting a test/demo patient's genomic
+        test data (and its audit trail) between runs, not for use against
+        real clinical records. Patient and Observation resources are left
+        alone — only the resource types the clear-down button is
+        documented as deleting are touched.
 
         Deletes reports and orders before specimens, on the theory that a
         server enforcing referential integrity is more likely to reject
         deleting a Specimen still referenced by a live DiagnosticReport/
         ServiceRequest than the reverse — FHIR doesn't mandate this
         ordering though, so a real server's behaviour here is unverified.
+        AuditEvents (fetched via audit_events_for_patient(), no date bound
+        — safe unbounded here since it's patient-scoped, not system-wide,
+        same reasoning as that method's own docstring) are deleted last,
+        since nothing else here references them.
 
         Returns {"deleted": [...], "failed": [...]}, each a list of
         "ResourceType/id" strings, so the caller can show exactly what
@@ -2367,6 +2372,7 @@ class FhirClient:
         """
         orders = self.lab_orders_for_patient(patient_id)
         reports = self.lab_reports_for_patient(patient_id)
+        audit_events = self.audit_events_for_patient(patient_id)
 
         specimens_by_id = {}
         for resource in orders + reports:
@@ -2387,6 +2393,9 @@ class FhirClient:
                 attempt(f"ServiceRequest/{o['id']}")
         for spec_id in specimens_by_id:
             attempt(f"Specimen/{spec_id}")
+        for a in audit_events:
+            if a.get("id"):
+                attempt(f"AuditEvent/{a['id']}")
 
         return {"deleted": deleted, "failed": failed}
 
