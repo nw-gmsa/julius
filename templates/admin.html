@@ -35,6 +35,41 @@
     <p class="muted">No patients found with an NHS number in the test ranges.</p>
   {% endif %}
 
+  <h2>NW GMSA test patients ({{ nw_gmsa_patients|length }} of {{ nw_gmsa_total }} found)</h2>
+  <p class="muted">
+    Named synthetic test patients from
+    <a href="https://github.com/nw-gmsa/Testing/blob/main/MRN-Mapping.md">nw-gmsa/Testing's MRN-Mapping.md</a>
+    (<code>FhirClient.NW_GMSA_TEST_PATIENTS</code>), resolved by NHS
+    number against this server — only entries actually found here are
+    listed below; the roster has {{ nw_gmsa_total }} in total. Select
+    patients and preview deletion — this removes the <strong>Patient
+    record itself</strong>, plus every Specimen, DiagnosticReport,
+    ServiceRequest, Observation, RelatedPerson, and AuditEvent for that
+    patient. Irreversible.
+  </p>
+  {% if nw_gmsa_error %}
+    <div class="error"><strong>Request failed:</strong> {{ nw_gmsa_error }}</div>
+  {% endif %}
+  {% if nw_gmsa_patients %}
+    <form method="post" action="{{ request.script_root }}/admin/nw-gmsa-patients/confirm">
+      <table>
+        <tr><th></th><th>Label</th><th>Name</th><th>NHS number</th><th>ID</th></tr>
+        {% for p in nw_gmsa_patients %}
+          <tr>
+            <td><input type="checkbox" name="patient_id" value="{{ p.id }}"></td>
+            <td>{{ p.label }}</td>
+            <td><a href="{{ request.script_root }}/patient/{{ p.id }}">{{ p.name }}</a></td>
+            <td>{{ p.nhs_number }}</td>
+            <td class="muted">{{ p.id }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+      <button type="submit" class="danger">Preview deletion of selected patients</button>
+    </form>
+  {% else %}
+    <p class="muted">None of the NW GMSA roster's NHS numbers matched a patient on this server.</p>
+  {% endif %}
+
   <h2>Orphaned ServiceRequests — no patient ({{ orphaned_orders|length }})</h2>
   <p class="muted">
     <code>ServiceRequest</code> resources with no <code>subject</code>

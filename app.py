@@ -1163,10 +1163,26 @@ def admin():
         ]
     except Exception as e:
         error = str(e)
+    nw_gmsa_error = None
+    nw_gmsa_patients = []
+    try:
+        nw_gmsa_patients = [
+            {
+                "id": entry["patient"].get("id"),
+                "name": human_name(entry["patient"]),
+                "nhs_number": FhirClient.nhs_number(entry["patient"]) or "—",
+                "label": entry["label"],
+            }
+            for entry in client.nw_gmsa_test_patients()
+        ]
+    except Exception as e:
+        nw_gmsa_error = str(e)
     audit_events_end = date.today().isoformat()
     audit_events_start = (date.today() - timedelta(days=30)).isoformat()
     return render_template(
         "admin.html", test_patients=test_patients, orphaned_orders=orphaned_orders, error=error,
+        nw_gmsa_patients=nw_gmsa_patients, nw_gmsa_error=nw_gmsa_error,
+        nw_gmsa_total=len(FhirClient.NW_GMSA_TEST_PATIENTS),
         audit_events_start=audit_events_start, audit_events_end=audit_events_end,
     )
 
@@ -1225,6 +1241,72 @@ def admin_patients_clear_down():
     return render_template(
         "admin_clear_down_result.html", title="Patient clear-down result",
         deleted=deleted, failed=failed, error=error,
+    )
+
+
+@app.route("/admin/nw-gmsa-patients/confirm", methods=["POST"])
+def admin_nw_gmsa_patients_confirm():
+    """
+    Confirmation page for the selected NW GMSA named test patients
+    (FhirClient.NW_GMSA_TEST_PATIENTS — see
+    https://github.com/nw-gmsa/Testing/blob/main/MRN-Mapping.md) —
+    re-resolves each one and its order/report/specimen/observation/
+    related-person/audit-event counts, same preview-then-confirm shape
+    as admin_patients_confirm() above, but with the wider set of
+    resource types clear_down_patient_full() actually deletes. Nothing
+    is deleted here.
+    """
+    patient_ids = request.form.getlist("patient_id")
+    error = None
+    rows = []
+    try:
+        for pid in patient_ids:
+            patient = client.get_patient(pid)
+            orders = client.lab_orders_for_patient(pid)
+            reports = client.lab_reports_for_patient(pid)
+            specimens_by_id = {}
+            for resource in orders + reports:
+                for spec in client.resolve_specimens(resource):
+                    specimens_by_id[spec["id"]] = spec
+            rows.append({
+                "id": pid,
+                "name": human_name(patient) if patient else "Unknown",
+                "nhs_number": FhirClient.nhs_number(patient) or "—",
+                "order_count": len(orders),
+                "report_count": len(reports),
+                "specimen_count": len(specimens_by_id),
+                "observation_count": len(client.observations_for_patient(pid)),
+                "related_person_count": len(client.related_persons_for_patient(pid)),
+                "audit_event_count": len(client.audit_events_for_patient(pid)),
+            })
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_nw_gmsa_confirm.html", rows=rows, patient_ids=patient_ids, error=error,
+    )
+
+
+@app.route("/admin/nw-gmsa-patients/clear-down", methods=["POST"])
+def admin_nw_gmsa_patients_clear_down():
+    """Actually deletes the confirmed NW GMSA test patients — Patient
+    record plus all Specimens/DiagnosticReports/ServiceRequests/
+    Observations/RelatedPersons/AuditEvents — via
+    clear_down_patient_full(), the only route in this pair that mutates
+    anything."""
+    patient_ids = request.form.getlist("patient_id")
+    error = None
+    deleted, failed = [], []
+    try:
+        for pid in patient_ids:
+            result = client.clear_down_patient_full(pid)
+            deleted.extend(result["deleted"])
+            failed.extend(result["failed"])
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html", title="NW GMSA test patient clear-down result",
+        deleted=deleted, failed=failed, error=error,
+        back_url=request.script_root + "/admin", back_label="Back to admin",
     )
 
 

@@ -2481,6 +2481,163 @@ class FhirClient:
             pass
         return [p for p in patients if self.nhs_number_in_ranges(p, ranges)]
 
+    #: The NW GMSA test-patient roster — one entry per named synthetic
+    #: patient identity in
+    #: https://github.com/nw-gmsa/Testing/blob/main/MRN-Mapping.md
+    #: ("Master List: NHS Number / Surname -> Trust MRN"), keyed by NHS
+    #: number (digits only, spaces stripped from that doc's
+    #: "973 738 3249"-style formatting) with the doc's own `Surname`
+    #: column as a human-readable label. This is a fixed, curated list of
+    #: *specific* named test identities (Manchester, Liverpool,
+    #: Editestpatient, ...) used across NW GMSA's own test fixtures —
+    #: distinct from NHS_NUMBER_TEST_RANGES above, which is a generic
+    #: numeric-range heuristic that happens to also catch most of these
+    #: (the "999 999 9xxx" Editestpatient rows and "600"/"700"-range ones
+    #: would already match NHS_NUMBER_TEST_RANGES; most of the rest,
+    #: e.g. "973 738 3249", wouldn't).
+    #:
+    #: Four rows from that doc are deliberately omitted here: the
+    #: fetus/baby entries (Brough (baby), Buxton (baby), Hull (fetus),
+    #: London (fetus)) carry no NHS number of their own in the source
+    #: data at all (StarLIMS has no identity columns for a fetus/baby,
+    #: so it reuses the mother's NHS number as a placeholder — see the
+    #: doc's own caveats) — this app matches patients by NHS number (see
+    #: "Patient matching" in CLAUDE.md), so there's no reliable identifier
+    #: here to search this server with. If those need clearing down too,
+    #: look them up manually via the Patient-page clear-down button using
+    #: their `Patient Number(s)` (StarLIMS `PatientAccessionIdentifier`)
+    #: instead.
+    NW_GMSA_TEST_PATIENTS = [
+        {"nhs_number": "7569773373", "label": "Appclindoc"},
+        {"nhs_number": "9737383249", "label": "Birmingham"},
+        {"nhs_number": "9737383370", "label": "Blackburn"},
+        {"nhs_number": "9737383273", "label": "Bolton"},
+        {"nhs_number": "9737873882", "label": "Bradford"},
+        {"nhs_number": "9737383362", "label": "Brough"},
+        {"nhs_number": "9737383389", "label": "Burnley"},
+        {"nhs_number": "9737383338", "label": "Buxton"},
+        {"nhs_number": "9449305552", "label": "Chislett"},
+        {"nhs_number": "9737383281", "label": "Congleton"},
+        {"nhs_number": "9737873998", "label": "Durham"},
+        {"nhs_number": "9999999476", "label": "Editestpatient (300000)"},
+        {"nhs_number": "9999999565", "label": "Editestpatient (300001)"},
+        {"nhs_number": "9999999506", "label": "Editestpatient (300002)"},
+        {"nhs_number": "9999999603", "label": "Editestpatient (300003)"},
+        {"nhs_number": "9999999522", "label": "Editestpatient (300004)"},
+        {"nhs_number": "9999999557", "label": "Editestpatient (300005)"},
+        {"nhs_number": "9999999484", "label": "Editestpatient (300007)"},
+        {"nhs_number": "9999999573", "label": "Editestpatient (300009)"},
+        {"nhs_number": "9999999581", "label": "Editestpatient (300010)"},
+        {"nhs_number": "9999999514", "label": "Editestpatient (300011)"},
+        {"nhs_number": "9999999468", "label": "Editestpatient (300015)"},
+        {"nhs_number": "9999999549", "label": "Editestpatient (300021)"},
+        {"nhs_number": "9999999530", "label": "Editestpatient (300022)"},
+        {"nhs_number": "9999999492", "label": "Editestpatient (300024)"},
+        {"nhs_number": "9999999900", "label": "Gp Comms"},
+        {"nhs_number": "9737383346", "label": "Hawes"},
+        {"nhs_number": "9737873963", "label": "Hull"},
+        {"nhs_number": "5900111075", "label": "Jones"},
+        {"nhs_number": "9737383354", "label": "Kendal"},
+        {"nhs_number": "9737383214", "label": "Lancaster"},
+        {"nhs_number": "9737383222", "label": "Leeds"},
+        {"nhs_number": "9737383206", "label": "Liverpool"},
+        {"nhs_number": "9737383230", "label": "London"},
+        {"nhs_number": "9737383192", "label": "Manchester"},
+        {"nhs_number": "9737873971", "label": "Middlesborough"},
+        {"nhs_number": "9737873947", "label": "Newcastle"},
+        {"nhs_number": "9737383311", "label": "Northwich"},
+        {"nhs_number": "9737383265", "label": "Nottingham"},
+        {"nhs_number": "9737873858", "label": "Sheffield"},
+        {"nhs_number": "9737383413", "label": "Streford"},
+        {"nhs_number": "9737873874", "label": "Sunderland"},
+        {"nhs_number": "9737383397", "label": "Tameside"},
+        {"nhs_number": "5900123170", "label": "Testbeaker"},
+        {"nhs_number": "9737383303", "label": "Warrington"},
+        {"nhs_number": "9737383257", "label": "Wrexham"},
+        {"nhs_number": "9737873866", "label": "York"},
+    ]
+
+    def nw_gmsa_test_patients(self):
+        """
+        Resolves NW_GMSA_TEST_PATIENTS' NHS numbers against this server,
+        one search_patients(nhs_number=...) call per entry (an exact
+        identifier match, same as the rest of this app's NHS-number
+        lookups — not a range scan, so no 413 risk here regardless of
+        server size). Returns a list of {"patient": <Patient resource>,
+        "label": <doc surname>} for every NHS number that actually
+        matched a Patient on this server; entries with no match are
+        simply not included (this app can only offer to delete a Patient
+        that exists here) — dedups by Patient id in case two entries
+        somehow resolved to the same patient.
+        """
+        found = []
+        seen_ids = set()
+        for entry in self.NW_GMSA_TEST_PATIENTS:
+            for patient in self.search_patients(nhs_number=entry["nhs_number"]):
+                if patient.get("id") and patient["id"] not in seen_ids:
+                    seen_ids.add(patient["id"])
+                    found.append({"patient": patient, "label": entry["label"]})
+        return found
+
+    def observations_for_patient(self, patient_id, max_pages=10):
+        """Every Observation resource system-wide for one patient
+        (`Observation?patient=<id>`) — patient-scoped, so unbounded is
+        safe here the same way audit_events_for_patient()'s is (not the
+        413 risk an unfiltered system-wide search carries). Used by the
+        NW GMSA test-patient clear-down, which (unlike clear_down_patient()
+        above) is meant to remove a synthetic identity's Observations
+        too, not just its genomic test data."""
+        return self._search_all("Observation", {"patient": patient_id, "_count": 100}, max_pages=max_pages)
+
+    def related_persons_for_patient(self, patient_id, max_pages=10):
+        """Every RelatedPerson resource for one patient
+        (`RelatedPerson?patient=<id>`) — same patient-scoped-so-unbounded-
+        is-safe reasoning as observations_for_patient()/
+        audit_events_for_patient()."""
+        return self._search_all("RelatedPerson", {"patient": patient_id, "_count": 100}, max_pages=max_pages)
+
+    def clear_down_patient_full(self, patient_id):
+        """
+        A fuller purge than clear_down_patient()/clear_down_patient_and_
+        record(): deletes everything those do (Specimen, DiagnosticReport,
+        ServiceRequest, AuditEvent) *plus* every Observation and
+        RelatedPerson for the patient, plus the Patient resource itself.
+
+        clear_down_patient() deliberately leaves Observation (and,
+        without _and_record, Patient) alone — appropriate for resetting
+        a demo patient's genomic test data between runs while keeping the
+        identity around. The NW GMSA test-patient roster
+        (NW_GMSA_TEST_PATIENTS) is a different case: these are specific
+        named synthetic identities that should be removable completely,
+        which is what this app was asked to support them for — so this
+        method goes further on purpose, rather than reusing
+        clear_down_patient_and_record() and leaving Observations/
+        RelatedPersons behind.
+
+        Order: reports/orders/specimens/audit events first (via
+        clear_down_patient(), which already orders those so a
+        referencing resource goes before what it references), then
+        Observations (also potentially referenced by a report's `result`
+        or an order's `supportingInfo` — both already gone by this
+        point), then RelatedPersons, then the Patient record itself last.
+        Returns {"deleted": [...], "failed": [...]} like
+        clear_down_patient().
+        """
+        result = self.clear_down_patient(patient_id)
+
+        def attempt(ref):
+            (result["deleted"] if self._delete(ref) else result["failed"]).append(ref)
+
+        for obs in self.observations_for_patient(patient_id):
+            if obs.get("id"):
+                attempt(f"Observation/{obs['id']}")
+        for rp in self.related_persons_for_patient(patient_id):
+            if rp.get("id"):
+                attempt(f"RelatedPerson/{rp['id']}")
+        attempt(f"Patient/{patient_id}")
+
+        return result
+
     def orphaned_service_requests(self):
         """
         Every ServiceRequest resource system-wide with no `subject`
