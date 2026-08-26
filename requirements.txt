@@ -19,3 +19,4 @@ reportlab==4.2.5
 # either, install straight from InterSystems' own package index instead.
 intersystems-irispython
 intersystems-iris
+python-dotenv
