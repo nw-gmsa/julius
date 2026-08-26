@@ -1598,6 +1598,14 @@ def work_orders():
     unconfirmed territory (see resolve_task_focus_order()'s docstring) —
     the Filler ID column falls back to the Task's focus ServiceRequest's
     own `identifier` wherever the Task itself doesn't carry one directly.
+
+    The Business Status column reads Task.businessStatus (the workflow
+    status a lab attaches to a piece of work, distinct from Task.status'
+    fixed FHIR request-lifecycle state) — this deployment doesn't
+    populate it yet, so it initially falls back to showing the Genomic
+    Test Directory code instead (from the Task's own `code`, or the
+    focus order's), as a placeholder until real business-status values
+    exist to show.
     """
     end = request.args.get("end") or date.today().isoformat()
     start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
@@ -1617,12 +1625,20 @@ def work_orders():
                 identifier_source = t if t.get("identifier") else (focus_order or {})
                 requester_source = t if t.get("requester") else (focus_order or {})
                 patient = client.patient_for(t) or (client.patient_for(focus_order) if focus_order else None)
+                code = t.get("code") or (focus_order.get("code") if focus_order else None)
+                business_status_source = t.get("businessStatus") or code
+                business_status = (
+                    FhirClient.test_directory_code(business_status_source)
+                    or code_text(business_status_source)
+                    or "—"
+                )
                 rows.append({
                     "id": t.get("id"),
                     "focus_order_id": focus_order.get("id") if focus_order else None,
                     "patient_id": patient.get("id") if patient else None,
                     "patient_name": human_name(patient) if patient else "Unknown",
                     "status": t.get("status") or "—",
+                    "business_status": business_status,
                     "intent": t.get("intent") or "—",
                     "ordered": t.get("authoredOn") or "—",
                     "requested_by": client.requester_display(requester_source),

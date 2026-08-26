@@ -8,6 +8,9 @@
     <code>Task.authoredOn</code> within the date range. Each row falls
     back to the Task's originating <code>ServiceRequest</code> (via
     <code>Task.focus</code>) for any field the Task itself doesn't carry.
+    <strong>Business Status</strong> reads <code>Task.businessStatus</code>
+    — not yet populated on this deployment, so it currently shows the
+    Genomic Test Directory code instead, as a placeholder.
   </p>
 
   {% if error %}
@@ -43,7 +46,7 @@
     {% set next_sort = 'ordered_desc' if sort == 'ordered_asc' else 'ordered_asc' %}
     <table>
       <tr>
-        <th>Patient</th><th>Status</th><th>Intent</th>
+        <th>Patient</th><th>Status</th><th>Business Status</th><th>Intent</th>
         <th><a href="{{ url_for('work_orders', start=start, end=end, owner=owner_ods, status=selected_status, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
         <th>Requested by</th><th>Owner</th><th>Filler ID</th><th>Order Placer Group Number</th><th>Task ID</th>
       </tr>
@@ -57,6 +60,7 @@
             {% endif %}
           </td>
           <td>{{ row.status }}</td>
+          <td>{{ row.business_status }}</td>
           <td>{{ row.intent }}</td>
           <td>{{ row.ordered }}</td>
           <td>{{ row.requested_by }}</td>
