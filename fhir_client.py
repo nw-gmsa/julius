@@ -47,6 +47,16 @@ SERVICE_REQUEST_INCLUDES = ["ServiceRequest:requester", "ServiceRequest:specimen
 SERVICE_REQUEST_ITERATE_INCLUDES = ["PractitionerRole:practitioner", "PractitionerRole:organization"]
 DIAGNOSTIC_REPORT_INCLUDES = ["DiagnosticReport:result", "DiagnosticReport:specimen"]
 
+# _include params for the Task-based work orders screen (see
+# active_filler_tasks()) — pulls back the patient (Task.for), the
+# fulfilled ServiceRequest (Task.focus, whose own fields are used as a
+# fallback wherever this deployment's Task doesn't carry a value itself
+# — see resolve_task_focus_order()), the owner, and the requester, plus
+# one further hop for a PractitionerRole owner/requester's own
+# Practitioner/Organization.
+TASK_INCLUDES = ["Task:patient", "Task:focus", "Task:owner", "Task:requester"]
+TASK_ITERATE_INCLUDES = SERVICE_REQUEST_ITERATE_INCLUDES + ["ServiceRequest:specimen"]
+
 # ServiceRequest.status values (FHIR R4's request-status value set) other
 # than "completed", comma-joined for FHIR search OR semantics — used by
 # ctdna_orders() to fetch the "outstanding" bucket without pulling in every
@@ -603,10 +613,13 @@ class FhirClient:
 
     def _active_orders_with_intent(self, intent, start, end):
         """
-        Shared implementation behind active_filler_orders()/
-        active_placer_orders(): active genomic test orders (ServiceRequest)
-        whose `intent` matches, system-wide, for the work orders/test
-        orders screens. `intent` is a single value, or several comma-joined
+        Implementation behind active_placer_orders(): active genomic test
+        orders (ServiceRequest) whose `intent` matches, system-wide, for
+        the test orders screen (the work orders screen moved to
+        Task-based active_filler_tasks(), which doesn't share this
+        implementation — Task's search params/`_include` shape differ
+        enough that reuse wasn't worth it). `intent` is a single value,
+        or several comma-joined
         into one string for FHIR search's OR semantics — a repeated
         `intent=` *parameter name* means AND instead (as used elsewhere in
         this file for date ranges), which no single resource's one `intent`
@@ -655,19 +668,111 @@ class FhirClient:
         }
         return list(orders_by_id.values())
 
-    def active_filler_orders(self, start, end):
-        """All active genomic test orders with `intent=filler-order` — i.e.
-        orders as seen from the filler/lab system's side. Used by the work
-        orders screen. See _active_orders_with_intent()."""
-        return self._active_orders_with_intent("filler-order", start, end)
-
     def active_placer_orders(self, start, end):
         """All active genomic test orders with `intent` of "order" or
         "original-order" — i.e. orders as seen from the placer/requesting
-        system's side, as opposed to active_filler_orders()'s filler-order
-        orders. Used by the test orders screen. See
-        _active_orders_with_intent()."""
+        system's side. Used by the test orders screen (the work orders
+        screen's filler-order side moved to Task — see
+        active_filler_tasks() — so there's no more ServiceRequest-based
+        filler-order counterpart here). See _active_orders_with_intent()."""
         return self._active_orders_with_intent("order,original-order", start, end)
+
+    #: The work orders screen's default Task.owner — the North West GLH's
+    #: Liverpool site. Distinct from ORDER_MESSAGE_DESTINATION_ODS
+    #: ("699X0", the umbrella NW GLH code used for outbound order
+    #: messages) — this identifies the specific lab site that owns/works
+    #: these filler-order Tasks. Neither the ODS code nor the display
+    #: name is confirmed against a real server; supplied by whoever's
+    #: standing up this screen.
+    DEFAULT_TASK_OWNER_ODS_CODE = "K1S6S"
+    DEFAULT_TASK_OWNER_DISPLAY = "Liverpool GLH"
+
+    #: FHIR R4's own fixed "task-status" ValueSet — hardcoded rather than
+    #: deployment-specific, same reasoning as AUDIT_EVENT_ACTIONS. Used by
+    #: the work orders screen's status filter.
+    TASK_STATUS_VALUES = [
+        "draft", "requested", "received", "accepted", "rejected", "ready",
+        "cancelled", "in-progress", "on-hold", "failed", "completed",
+        "entered-in-error",
+    ]
+    #: The work orders screen's default status filter.
+    DEFAULT_TASK_STATUS = "requested"
+
+    def resolve_task_focus_order(self, task):
+        """
+        Task.focus resolved to the ServiceRequest it's fulfilling, when it
+        resolves to one — None if there's no `focus` at all, it doesn't
+        resolve, or it resolves to something other than a ServiceRequest.
+
+        This deployment's use of Task for filler-order work items is new,
+        unconfirmed territory (no real example to check field population
+        against, unlike most of the rest of this file — see CLAUDE.md's
+        "Things that are unverified against a real server"): it's not
+        known whether a Task here duplicates the underlying order's own
+        fields (code, reasonCode, identifiers, encounter) directly, or
+        leaves them only on the ServiceRequest it's fulfilling. Used by
+        active_filler_tasks()'s caller to fall back to the focus order's
+        fields wherever the Task itself doesn't carry them.
+        """
+        focus_ref = task.get("focus")
+        if not focus_ref:
+            return None
+        resource = self.resolve_reference(focus_ref)
+        return resource if resource and resource.get("resourceType") == "ServiceRequest" else None
+
+    def active_filler_tasks(self, owner_organization_id, status=DEFAULT_TASK_STATUS, start=None, end=None, max_pages=10):
+        """
+        Task resources with `intent=filler-order`, owned by
+        `owner_organization_id` (an Organization's internal FHIR id —
+        resolve one from an ODS code via search_organizations() first) —
+        the Task-based replacement for the work orders screen, which
+        previously used active_filler_orders() (removed) against
+        ServiceRequest directly.
+
+        `status` defaults to DEFAULT_TASK_STATUS ("requested") but can be
+        any single TASK_STATUS_VALUES entry, or falsy (None/"") for no
+        status filter at all — owner-scoping (see below) is what keeps
+        this query bounded regardless of how broad the status filter is.
+
+        Scoped by `owner` rather than fetched system-wide and filtered
+        client-side, for the same reason every other system-wide query in
+        this file is scoped somehow (see "413s on unfiltered system-wide
+        searches" in CLAUDE.md) — an unscoped
+        `Task?intent=filler-order` query would be exactly that shape of
+        risk on this CDR. Task has had no traffic on this server before
+        this screen, so there's no existing evidence either way;
+        owner-scoping is the same precautionary stance this file takes
+        everywhere else. `start`/`end` (bounding `authored-on`) are
+        optional extra narrowing on top of that, unlike
+        _active_orders_with_intent()'s required bound — the owner scope
+        already does the job a date bound plays elsewhere.
+
+        Each Task's patient/focus order/owner/requester come back in the
+        same query via `_include` (TASK_INCLUDES/TASK_ITERATE_INCLUDES),
+        and results are identified by `resourceType` across
+        `matches + included` combined rather than by trusting
+        `Bundle.entry.search.mode` — same real quirk documented under
+        _active_orders_with_intent()/ctdna_orders().
+        """
+        params = {
+            "intent": "filler-order",
+            "owner": f"Organization/{owner_organization_id}",
+            "_count": 100,
+            "_include": TASK_INCLUDES,
+            "_include:iterate": TASK_ITERATE_INCLUDES,
+        }
+        if status:
+            params["status"] = status
+        if start and end:
+            params["authored-on"] = [f"ge{start}", f"le{end}"]
+        matches, included = self._search_all_split("Task", params, max_pages=max_pages)
+        self._cache_included(matches + included)
+
+        tasks_by_id = {
+            t["id"]: t for t in (matches + included)
+            if t.get("resourceType") == "Task" and t.get("id")
+        }
+        return list(tasks_by_id.values())
 
     # ---- Genomic test reports (DiagnosticReport + Observation) --------
 
@@ -971,6 +1076,28 @@ class FhirClient:
         [...]} like clear_down_patient()."""
         return self._delete_resources("AuditEvent", self.audit_events_in_range(start, end))
 
+    def tasks_last_updated_before(self, cutoff, max_pages=10):
+        """
+        Every Task resource system-wide whose `meta.lastUpdated` is before
+        `cutoff` (a "YYYY-MM-DD" date) — used by the admin screen's stale-
+        Task clear-down. Uses the standard `_lastUpdated` search param with
+        the `lt` prefix; deliberately one-sided (no lower bound) rather than
+        a [start, end] range like audit_events_in_range() — the whole point
+        of this action is "everything old", and there's no natural lower
+        bound to narrow it by. If Task turns out to be a large table on a
+        real server, this could hit the same 413 risk documented under
+        "413s on unfiltered system-wide searches" in CLAUDE.md; untested,
+        since this app had no Task-resource handling before this.
+        """
+        params = {"_lastUpdated": f"lt{cutoff}", "_count": 100}
+        return self._search_all("Task", params, max_pages=max_pages)
+
+    def clear_down_tasks_last_updated_before(self, cutoff):
+        """DELETE every Task system-wide last updated before `cutoff` (see
+        tasks_last_updated_before()). Returns {"deleted": [...], "failed":
+        [...]} like clear_down_patient()."""
+        return self._delete_resources("Task", self.tasks_last_updated_before(cutoff))
+
     #: Cepheid GeneXpert BCR-ABL1 quantitative monitoring test code. Unlike
     #: ctDNA (no confirmed code at all, so text-matched) or the Genomic Test
     #: Directory code (a confirmed system, so system-matched), this is a
@@ -1036,7 +1163,7 @@ class FhirClient:
         `_include:iterate`, in case a server attaches specimen there
         instead of on the report.
 
-        Like ctdna_orders()/active_filler_orders(), reports are identified
+        Like ctdna_orders()/_active_orders_with_intent(), reports are identified
         by `resourceType` across `matches + included` combined rather than
         by trusting `Bundle.entry.search.mode`.
         """
@@ -1946,6 +2073,17 @@ class FhirClient:
         assigned by the fulfilling/lab system."""
         return cls._identifier_by_type(order, cls.FILLER_IDENTIFIER_TYPE)
 
+    @staticmethod
+    def task_group_identifier(task):
+        """Task.groupIdentifier's value — the Order Placer Group Number
+        linking this Task back to the order(s) it was created from. Unlike
+        placer_identifier()/filler_identifier() above, this isn't one
+        entry inside `resource.identifier[]` matched by a v2-0203 type
+        code — Task.groupIdentifier is its own single Identifier element
+        (0..1) directly on the Task, per FHIR R4. Used by the work orders
+        screen's "Order Placer Group Number" column."""
+        return (task.get("groupIdentifier") or {}).get("value")
+
     #: HL7 v2-0203 identifier-type codes for the two Hospital Spell
     #: Identifier flavours NHS England's guidance describes — "AN"
     #: (Account Number) and "VN" (Visit Number). A real example
@@ -2150,8 +2288,10 @@ class FhirClient:
 
     def patient_for(self, resource):
         """Resolve the Patient a ServiceRequest/DiagnosticReport's `subject`
-        (or `patient`) reference points to."""
-        ref = resource.get("subject") or resource.get("patient")
+        (or `patient`) reference points to — or, for a Task, its `for`
+        reference (the field FHIR R4 actually uses for "who this is
+        about"; Task has no `subject`/`patient` element of its own)."""
+        ref = resource.get("subject") or resource.get("patient") or resource.get("for")
         return self.resolve_reference(ref) if ref else None
 
     def patient_ics(self, patient):
@@ -2681,8 +2821,8 @@ class FhirClient:
 
     def orders_with_unknown_patient(self, orders):
         """
-        Filters `orders` (e.g. from active_placer_orders()/
-        active_filler_orders()) down to the ones whose patient can't be
+        Filters `orders` (e.g. from active_placer_orders()) down to the
+        ones whose patient can't be
         resolved via patient_for() — either `subject` is missing entirely,
         or it's a reference present but not resolvable to an actual
         Patient (deleted, dangling, cross-server, etc.). Broader than
@@ -2946,34 +3086,36 @@ class FhirClient:
         registration_code = self._reference_identifier_code(practitioner_ref)
         return f"{display} ({registration_code})" if registration_code else display
 
-    def requester_display(self, order):
+    def _actor_reference_display(self, actor_ref):
         """
-        Resolve ServiceRequest.requester (PractitionerRole | Practitioner |
-        Organization — the IG's own examples use PractitionerRole, but FHIR
-        R4 allows a direct Practitioner reference too, and at least one real
-        server's data uses it) into a human-readable "Dr X (GMC 1234567)
-        (Org Y)" style string — the GMC/GMP registration number (see
+        Resolve a PractitionerRole | Practitioner | Organization reference
+        (the IG's own examples use PractitionerRole, but FHIR R4 allows a
+        direct Practitioner reference too, and at least one real server's
+        data uses it) into a human-readable "Dr X (GMC 1234567) (Org Y)"
+        style string — the GMC/GMP registration number (see
         _practitioner_registration_code()) is appended in brackets right
         after the clinician's name, before the organisation, only when the
-        underlying Practitioner resource actually carries one.
+        underlying Practitioner resource actually carries one. Shared by
+        requester_display() (ServiceRequest.requester / Task.requester)
+        and owner_display() (Task.owner) — both point at the same set of
+        actor resource types.
         """
-        requester_ref = order.get("requester")
-        if not requester_ref:
+        if not actor_ref:
             return "—"
 
-        resource = self.resolve_reference(requester_ref)
+        resource = self.resolve_reference(actor_ref)
         if resource is None:
             # Couldn't dereference it (auth, deleted, cross-server ref, etc).
             # Fall back to whatever display text was inlined on the reference.
-            return requester_ref.get("display") or requester_ref.get("reference", "—")
+            return actor_ref.get("display") or actor_ref.get("reference", "—")
 
         rtype = resource.get("resourceType")
 
         if rtype == "Organization":
-            return resource.get("name") or requester_ref.get("display") or "—"
+            return resource.get("name") or actor_ref.get("display") or "—"
 
         if rtype == "Practitioner":
-            return self._practitioner_display_name(resource) or requester_ref.get("display") or "—"
+            return self._practitioner_display_name(resource) or actor_ref.get("display") or "—"
 
         if rtype == "PractitionerRole":
             practitioner_name = self._resolve_practitioner_display(resource.get("practitioner"))
@@ -2987,10 +3129,23 @@ class FhirClient:
 
             if practitioner_name and org_name:
                 return f"{practitioner_name} ({org_name})"
-            return practitioner_name or org_name or requester_ref.get("display") or "—"
+            return practitioner_name or org_name or actor_ref.get("display") or "—"
 
         # Unexpected resource type — show what we can.
-        return requester_ref.get("display") or resource.get("id", "—")
+        return actor_ref.get("display") or resource.get("id", "—")
+
+    def requester_display(self, order):
+        """Display string for ServiceRequest.requester / Task.requester —
+        see _actor_reference_display()."""
+        return self._actor_reference_display(order.get("requester"))
+
+    def owner_display(self, task):
+        """Display string for Task.owner — the individual/organisation
+        currently responsible for performing the task (the Task-based
+        work orders screen's replacement for filtering by requesting
+        organisation; see active_filler_tasks()). Same resolution as
+        requester_display() — see _actor_reference_display()."""
+        return self._actor_reference_display(task.get("owner"))
 
     def requesting_clinician_display(self, order):
         """

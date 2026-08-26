@@ -2,12 +2,12 @@
 {% block content %}
   <h1>Work orders</h1>
   <p class="muted">
-    Active genomic test orders with <code>ServiceRequest.intent</code> =
-    "filler-order" — i.e. orders as seen from the filler/lab system's side —
-    across all patients, bounded to <code>ServiceRequest.authored</code>
-    within the date range below. Same layout as the "Genomic test orders"
-    table on a patient's page, plus a Patient column since this spans
-    multiple patients.
+    <code>Task</code> resources with <code>intent</code> = "filler-order" —
+    i.e. work items as seen from the filler/lab system's side — owned by
+    the organisation below, filtered by status, and bounded to
+    <code>Task.authoredOn</code> within the date range. Each row falls
+    back to the Task's originating <code>ServiceRequest</code> (via
+    <code>Task.focus</code>) for any field the Task itself doesn't carry.
   </p>
 
   {% if error %}
@@ -18,18 +18,13 @@
     <p>
       From <input type="date" name="start" value="{{ start }}">
       to <input type="date" name="end" value="{{ end }}">
-      Requested by:
-      <select name="org">
-        <option value="" {% if not selected_org %}selected{% endif %}>All</option>
-        {% for org in organisations %}
-          <option value="{{ org }}" {% if org == selected_org %}selected{% endif %}>{{ org }}</option>
-        {% endfor %}
-      </select>
-      Test:
-      <select name="test">
-        <option value="" {% if not selected_test %}selected{% endif %}>All</option>
-        {% for t in tests %}
-          <option value="{{ t }}" {% if t == selected_test %}selected{% endif %}>{{ t }}</option>
+      Owner (ODS code):
+      <input type="text" name="owner" value="{{ owner_ods }}" size="8">
+      Status:
+      <select name="status">
+        <option value="" {% if not selected_status %}selected{% endif %}>All</option>
+        {% for s in statuses %}
+          <option value="{{ s }}" {% if s == selected_status %}selected{% endif %}>{{ s }}</option>
         {% endfor %}
       </select>
       {% if sort %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
@@ -37,66 +32,54 @@
     </p>
   </form>
 
-  {% macro render_order_chain(nodes, depth=0) %}
-    {% for node in nodes %}
-      <tr>
-        <td>
-          {% set p = order_patient.get(node.order.id) %}
-          {% if p and p.id %}
-            <a href="{{ request.script_root }}/patient/{{ p.id }}">{{ p.name }}</a>
-          {% else %}
-            {{ p.name if p else "Unknown" }}
-          {% endif %}
-        </td>
-        <td style="padding-left: {{ depth * 24 }}px">
-          {% if depth %}↳ {% endif %}{{ (node.order.code|test_directory_code) or "—" }}
-        </td>
-        <td>{{ node.order.status or "—" }}</td>
-        <td>{{ node.order.intent or "—" }}</td>
-        <td>{{ node.order.authoredOn or "—" }}</td>
-        <td>{{ order_requester.get(node.order.id, "—") }}</td>
-        <td>{{ order_performer.get(node.order.id, "—") }}</td>
-        <td>
-          {% set placer_id = (node.order|placer_identifier) or "—" %}
-          {% if placer_id.startswith('T') and '-' in placer_id %}
-            <a href="{{ request.script_root }}/order/{{ node.order.id }}">{{ placer_id }}</a>
-          {% else %}
-            {{ placer_id }}
-          {% endif %}
-        </td>
-        <td>
-          {% set filler_id = (node.order|filler_identifier) or "—" %}
-          {% if filler_id != "—" %}
-            <a href="{{ request.script_root }}/order/{{ node.order.id }}">{{ filler_id }}</a>
-          {% else %}
-            {{ filler_id }}
-          {% endif %}
-        </td>
-        <td>{{ node.order|reason_code_reference }}</td>
-        <td>{{ (node.order|encounter_identifier) or "—" }}</td>
-        <td class="muted">{{ node.order.id }}</td>
-      </tr>
-      {{ render_order_chain(node.children, depth + 1) }}
-    {% endfor %}
-  {% endmacro %}
+  {% if owner_found %}
+    <p class="muted">Owner: <strong>{{ owner_display_name }}</strong></p>
+  {% else %}
+    <div class="error">No organisation found for ODS code "{{ owner_ods }}".</div>
+  {% endif %}
 
-  <h2>Active work orders ({{ orders|length }})</h2>
-  {% if orders %}
+  <h2>Active work orders ({{ rows|length }})</h2>
+  {% if rows %}
     {% set next_sort = 'ordered_desc' if sort == 'ordered_asc' else 'ordered_asc' %}
     <table>
       <tr>
-        <th>Patient</th><th>Test</th><th>Status</th><th>Intent</th>
-        <th><a href="{{ url_for('work_orders', start=start, end=end, org=selected_org, test=selected_test, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
-        <th>Requested by</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>Hospital Spell ID</th><th>ID</th>
+        <th>Patient</th><th>Status</th><th>Intent</th>
+        <th><a href="{{ url_for('work_orders', start=start, end=end, owner=owner_ods, status=selected_status, sort=next_sort) }}">Ordered{% if sort == 'ordered_asc' %} &#9650;{% elif sort == 'ordered_desc' %} &#9660;{% endif %}</a></th>
+        <th>Requested by</th><th>Owner</th><th>Filler ID</th><th>Order Placer Group Number</th><th>Task ID</th>
       </tr>
-      {{ render_order_chain(order_chains) }}
+      {% for row in rows %}
+        <tr>
+          <td>
+            {% if row.patient_id %}
+              <a href="{{ request.script_root }}/patient/{{ row.patient_id }}">{{ row.patient_name }}</a>
+            {% else %}
+              {{ row.patient_name }}
+            {% endif %}
+          </td>
+          <td>{{ row.status }}</td>
+          <td>{{ row.intent }}</td>
+          <td>{{ row.ordered }}</td>
+          <td>{{ row.requested_by }}</td>
+          <td>{{ row.owner }}</td>
+          <td>
+            {% if row.focus_order_id and row.filler_id != "—" %}
+              <a href="{{ request.script_root }}/order/{{ row.focus_order_id }}">{{ row.filler_id }}</a>
+            {% else %}
+              {{ row.filler_id }}
+            {% endif %}
+          </td>
+          <td>
+            {% if row.focus_order_id and row.group_identifier != "—" %}
+              <a href="{{ request.script_root }}/order/{{ row.focus_order_id }}">{{ row.group_identifier }}</a>
+            {% else %}
+              {{ row.group_identifier }}
+            {% endif %}
+          </td>
+          <td class="muted">{{ row.id }}</td>
+        </tr>
+      {% endfor %}
     </table>
-    <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
   {% else %}
-    {% if selected_org or selected_test %}
-      <p class="muted">No active work orders match the selected filter.</p>
-    {% else %}
-      <p class="muted">No active filler-order test orders found.</p>
-    {% endif %}
+    <p class="muted">No active filler-order Tasks found for this owner{% if selected_status %} with status "{{ selected_status }}"{% endif %}.</p>
   {% endif %}
 {% endblock %}

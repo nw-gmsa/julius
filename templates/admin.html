@@ -126,6 +126,20 @@
     </p>
   </form>
 
+  <h2>Task clear-down</h2>
+  <p class="muted">
+    Deletes <code>Task</code> resources system-wide whose
+    <code>meta.lastUpdated</code> is before a given date. One-sided (no
+    lower bound) — this deletes everything older than the cutoff, not a
+    range. Irreversible.
+  </p>
+  <form method="post" action="{{ request.script_root }}/admin/tasks/confirm">
+    <p>
+      Last updated before <input type="date" name="cutoff" value="{{ tasks_cutoff }}">
+      <button type="submit" class="danger">Preview deletion</button>
+    </p>
+  </form>
+
   <h2>econcur import — NHS ODS Hospital Consultants</h2>
   <p class="muted">
     Imports/updates <code>Practitioner</code> + <code>PractitionerRole</code>

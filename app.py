@@ -335,10 +335,14 @@ def audit_message_id_short(message_id):
 
 
 def reason_code_reference(order):
-    """Raw code(s) behind ServiceRequest.reasonCode — e.g. a Genomic
-    Clinical Indication reference number — ignoring display text (see
-    code_value()); joined with "; " for multiple reasonCode entries."""
-    codes = [code_value(rc) for rc in order.get("reasonCode", [])]
+    """Raw code(s) behind reasonCode — e.g. a Genomic Clinical Indication
+    reference number — ignoring display text (see code_value()); joined
+    with "; " for multiple entries. ServiceRequest.reasonCode is 0..*
+    (a list); Task.reasonCode is 0..1 (a single CodeableConcept) — this
+    normalizes either shape into a list before formatting."""
+    reason = order.get("reasonCode") or []
+    reasons = reason if isinstance(reason, list) else [reason]
+    codes = [code_value(rc) for rc in reasons]
     codes = [c for c in codes if c and c != "—"]
     return "; ".join(codes) if codes else "—"
 
@@ -1184,6 +1188,7 @@ def admin():
         nw_gmsa_patients=nw_gmsa_patients, nw_gmsa_error=nw_gmsa_error,
         nw_gmsa_total=len(FhirClient.NW_GMSA_TEST_PATIENTS),
         audit_events_start=audit_events_start, audit_events_end=audit_events_end,
+        tasks_cutoff=date.today().isoformat(),
     )
 
 
@@ -1435,6 +1440,43 @@ def admin_audit_events_all_clear_down():
     )
 
 
+@app.route("/admin/tasks/confirm", methods=["POST"])
+def admin_tasks_confirm():
+    """
+    Confirmation page for deleting Task resources system-wide whose
+    `meta.lastUpdated` is before the given cutoff date — counts what's
+    there (client.tasks_last_updated_before()) before showing a delete
+    button. Nothing is deleted here.
+    """
+    cutoff = request.form.get("cutoff") or date.today().isoformat()
+    error = None
+    task_count = 0
+    try:
+        task_count = len(client.tasks_last_updated_before(cutoff))
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_tasks_confirm.html", cutoff=cutoff, task_count=task_count, error=error,
+    )
+
+
+@app.route("/admin/tasks/clear-down", methods=["POST"])
+def admin_tasks_clear_down():
+    """Actually deletes every Task system-wide last updated before the
+    confirmed cutoff (client.clear_down_tasks_last_updated_before())."""
+    cutoff = request.form.get("cutoff", "")
+    error = None
+    result = {"deleted": [], "failed": []}
+    try:
+        result = client.clear_down_tasks_last_updated_before(cutoff)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "admin_clear_down_result.html", title="Task clear-down result",
+        deleted=result["deleted"], failed=result["failed"], error=error,
+    )
+
+
 # econcur import job state — a single in-memory slot, same simplicity as
 # _session_clients (no job queue in this app). Only one import can run at
 # a time; the background thread below is the only writer, the two routes
@@ -1543,33 +1585,66 @@ def _order_worklist(fetch_orders):
 
 @app.route("/work-orders")
 def work_orders():
+    """
+    Active filler-order work items — moved from ServiceRequest to Task
+    (Task.status=requested, Task.intent=filler-order), owned by a given
+    Organization (Task.owner) rather than filtered by a "Requested by"
+    organisation dropdown the way the old ServiceRequest-based version
+    was: the fetch itself is now scoped by owner (see
+    client.active_filler_tasks()), defaulting to
+    FhirClient.DEFAULT_TASK_OWNER_ODS_CODE ("K1S6S", "Liverpool GLH").
+
+    This deployment's Task usage for filler-order work items is new,
+    unconfirmed territory (see resolve_task_focus_order()'s docstring) —
+    the Filler ID column falls back to the Task's focus ServiceRequest's
+    own `identifier` wherever the Task itself doesn't carry one directly.
+    """
     end = request.args.get("end") or date.today().isoformat()
     start = request.args.get("start") or (date.today() - timedelta(days=30)).isoformat()
-
-    orders, order_chains, order_requester, order_performer, order_patient, error = _order_worklist(
-        lambda: client.active_filler_orders(start, end))
-
-    order_organisation = {o["id"]: (client.order_organisation(o) or "Unknown") for o in orders}
-    order_test = {o["id"]: (FhirClient.test_directory_code(o.get("code")) or "—") for o in orders}
-    organisations = sorted(set(order_organisation.values()))
-    tests = sorted(set(order_test.values()))
-
-    selected_org = request.args.get("org", "")
-    selected_test = request.args.get("test", "")
+    owner_ods = request.args.get("owner") or FhirClient.DEFAULT_TASK_OWNER_ODS_CODE
+    selected_status = request.args.get("status", FhirClient.DEFAULT_TASK_STATUS)
     sort = request.args.get("sort", "")
 
-    filtered_orders = _filter_orders_by_org_and_test(orders, order_organisation, order_test, selected_org, selected_test)
-    order_chains = client.build_order_chains(filtered_orders)
+    error = None
+    owner_org = None
+    rows = []
+    try:
+        owner_matches = client.search_organizations(ods_code=owner_ods)
+        owner_org = owner_matches[0] if owner_matches else None
+        if owner_org:
+            for t in client.active_filler_tasks(owner_org["id"], status=selected_status, start=start, end=end):
+                focus_order = client.resolve_task_focus_order(t)
+                identifier_source = t if t.get("identifier") else (focus_order or {})
+                requester_source = t if t.get("requester") else (focus_order or {})
+                patient = client.patient_for(t) or (client.patient_for(focus_order) if focus_order else None)
+                rows.append({
+                    "id": t.get("id"),
+                    "focus_order_id": focus_order.get("id") if focus_order else None,
+                    "patient_id": patient.get("id") if patient else None,
+                    "patient_name": human_name(patient) if patient else "Unknown",
+                    "status": t.get("status") or "—",
+                    "intent": t.get("intent") or "—",
+                    "ordered": t.get("authoredOn") or "—",
+                    "requested_by": client.requester_display(requester_source),
+                    "owner": client.owner_display(t),
+                    "filler_id": FhirClient.filler_identifier(identifier_source) or "—",
+                    "group_identifier": FhirClient.task_group_identifier(t) or "—",
+                })
+    except Exception as e:
+        error = str(e)
+
     if sort in ("ordered_asc", "ordered_desc"):
-        _sort_order_chains(order_chains, reverse=(sort == "ordered_desc"))
+        rows.sort(key=lambda r: r["ordered"] or "", reverse=(sort == "ordered_desc"))
+
+    owner_name = owner_org.get("name") if owner_org else None
+    owner_display_name = (_org_display_name(owner_name, owner_ods) if owner_name else owner_ods) if owner_org else None
 
     return render_template(
-        "work_orders.html", orders=filtered_orders, order_chains=order_chains,
-        order_requester=order_requester, order_performer=order_performer,
-        order_patient=order_patient,
-        organisations=organisations, tests=tests,
-        selected_org=selected_org, selected_test=selected_test, sort=sort,
-        start=start, end=end, error=error,
+        "work_orders.html", rows=rows, sort=sort,
+        start=start, end=end, owner_ods=owner_ods, owner_display_name=owner_display_name,
+        owner_found=bool(owner_org),
+        statuses=FhirClient.TASK_STATUS_VALUES, selected_status=selected_status,
+        error=error,
     )
 
 
