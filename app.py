@@ -13,6 +13,7 @@ import plotly.express as px
 from fhir_client import FhirClient
 from iris_client import IrisClient
 from pdf_report import quality_report_pdf_bytes
+from epic_client import EpicClient, EPIC_FHIR_BASE_URL_DEFAULT
 
 app = Flask(__name__)
 # Falls back to a random key if SECRET_KEY isn't set, which works fine for
@@ -2760,6 +2761,50 @@ def report_pdf(report_id):
     return Response(
         data, mimetype=content_type or "application/pdf",
         headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@app.route("/epic")
+def epic_status():
+    """Connectivity status page for epic_client.py's EpicClient —
+    deliberately decoupled from the NW GMSA `client` this app otherwise
+    uses throughout (see CLAUDE.md's "Epic FHIR connectivity" section):
+    this route never touches `g.client`/the FhirClient session, only
+    EpicClient's own environment-variable config. Shows what's
+    configured (base URL, client id, scope, JWT kid — never the private
+    key itself) and, only when explicitly requested via ?test=1 (not on
+    every page load — this hits Epic's real server), the result of
+    EpicClient.verify_connection(). There's still no registered sandbox
+    app as of this route's introduction, so "not configured"/a failed
+    test are the expected results until EPIC_CLIENT_ID/
+    EPIC_PRIVATE_KEY_PATH/EPIC_SCOPE are actually set."""
+    try:
+        base_url, client_id, _private_key_pem, kid, scope, _verify_ssl = EpicClient.config()
+        configured = True
+        config_error = None
+    except RuntimeError as e:
+        configured = False
+        config_error = str(e)
+        base_url = os.environ.get("EPIC_FHIR_BASE_URL") or EPIC_FHIR_BASE_URL_DEFAULT
+        client_id = os.environ.get("EPIC_CLIENT_ID")
+        kid = os.environ.get("EPIC_JWT_KID")
+        scope = os.environ.get("EPIC_SCOPE")
+
+    tested = request.args.get("test") == "1"
+    test_result = None
+    test_error = None
+    if tested:
+        try:
+            fhir_version, software_name = EpicClient.verify_connection()
+            test_result = {"fhir_version": fhir_version, "software_name": software_name}
+        except Exception as e:
+            test_error = str(e)
+
+    return render_template(
+        "epic.html",
+        configured=configured, config_error=config_error,
+        base_url=base_url, client_id=client_id, kid=kid, scope=scope,
+        tested=tested, test_result=test_result, test_error=test_error,
     )
 
 

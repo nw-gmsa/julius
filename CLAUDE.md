@@ -1883,6 +1883,104 @@ haven't been exercised against a live NHS North West Genomics IG server:
     value — `audit_event_entity_display()` checks all of them in that
     order but was written without a real example to check against.
 
+### Epic FHIR connectivity (`epic_client.py`)
+
+A second, separate FHIR integration alongside `fhir_client.py`'s
+`FhirClient` — **deliberately decoupled from the rest of this app during
+development**: nothing here cross-references a NW GMSA `Patient`/order/
+report id, and no existing route calls into this module. Where
+`FhirClient` authenticates per-user via HTTP Basic against the NW GMSA
+server this whole app is otherwise built around, `EpicClient`
+authenticates as a registered **backend application** (no user session,
+no username/password) against an Epic FHIR R4 endpoint, via SMART
+Backend Services (OAuth2 JWT-bearer client-credentials — a JWT signed
+with a private key registered on fhir.epic.com is traded for a bearer
+token; no client secret is ever sent). The plan is to start linking the
+two once there's a real **Manchester Foundation Trust (MFT)
+non-production/test Epic instance** to develop against — the initial
+target in the meantime is **Epic's own public non-production sandbox**
+(`EPIC_FHIR_BASE_URL_DEFAULT` =
+`https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4`, per
+https://fhir.epic.com/Documentation?docId=testingguide — confirmed
+directly, this app's one hardcoded Epic default since it's a stable
+public URL, not a secret or deployment-specific value). Every other
+value comes from environment variables with no default
+(`EPIC_CLIENT_ID`/`EPIC_PRIVATE_KEY_PATH` or `EPIC_PRIVATE_KEY`/
+`EPIC_SCOPE`; `EPIC_TOKEN_URL`/`EPIC_JWT_KID`/`EPIC_VERIFY_SSL` are
+optional — see `epic_client.py`'s `EpicClient.config()` docstring for
+all of them). Needs `pyjwt[crypto]` (RS384 JWT signing; Python's
+standard library can't do RSA signing on its own) — added to
+`requirements.txt`.
+
+**The JWKS Epic verifies these JWTs against is hosted from this GitHub
+project, not served by the Flask app** —
+`scripts/generate_epic_jwks.py` generates an RSA key pair, writes the
+private key to a local git-ignored PEM file (`*.pem`/
+`/epic_private_key*` in `.gitignore` — never commit it), and
+adds/updates its public half as a JWK in `epic/jwks.json` (which *is*
+committed). That file's GitHub raw URL
+(`https://raw.githubusercontent.com/nw-gmsa/julius/main/epic/jwks.json`)
+is what gets registered as this app's JWKS URL on fhir.epic.com, keyed
+by `--kid`/`EPIC_JWT_KID` — supports key rotation (re-run with a new
+`--kid` to add a second key rather than replacing the first; `--replace`
+to actually replace one). Verified directly: a JWT signed with a
+generated private key decodes correctly against the matching public key
+pulled from the generated `epic/jwks.json`, using the same `RSAAlgorithm.
+from_jwk()`/`RS384` verification path Epic's own authorization server
+would use. **Not yet confirmed: whether this repo (or at least this one
+file, e.g. via GitHub Pages) is actually publicly fetchable** — Epic's
+servers need to reach that URL over the open internet to verify a token
+request; check this before registering it.
+
+`EpicClient.verify_connection()` is the one thing worth running today
+against the sandbox: fetches the server's `CapabilityStatement`
+(`/metadata`, unauthenticated per spec, so this alone confirms
+`EPIC_FHIR_BASE_URL` is reachable) and then acquires an access token
+(confirming the client id/key/scope are accepted) — still needs a real
+`EPIC_CLIENT_ID` from registering this app on fhir.epic.com's sandbox
+first. `EpicClient.get(path, params=None)` is a generic authenticated
+FHIR GET behind everything else here.
+
+**Genomic reports** — `diagnostic_reports_for_patient(patient_id,
+category=DIAGNOSTIC_REPORT_GENETICS_CATEGORY)` searches `DiagnosticReport`
+by the same HL7 v2-0074 `"GE"` category `fhir_client.py` uses for NW
+GMSA, falling back to an unfiltered patient search if the categorized
+one comes back empty (same try-then-fall-back pattern as
+`fhir_client.py`'s category searches) — a real HL7-standard code, but
+*not* confirmed against Epic specifically, since the public sandbox has
+no genomics test data to check it against. `observations_for_report(report)`
+resolves the report's `result[]` Observation references, skipping (not
+raising on) any one that fails to resolve. Epic's specification portal
+separately confirms a dedicated `Observation.Search`/`.Read (Genomics)
+(R4)` operation exists, but the exact category/profile it expects
+couldn't be confirmed from the (JS-rendered, not scrapable) public docs
+site — not implemented as its own method yet; extend
+`diagnostic_reports_for_patient`'s pattern once that's confirmed against
+a real sandbox session.
+
+**Family history / pedigree** — `family_history_for_patient(patient_id)`
+is a plain `FamilyMemberHistory?patient=<id>` search (Epic confirms
+Search/Read support for this resource in R4). Standard
+`FamilyMemberHistory` has **no extension linking one entry to another as
+a pedigree "parent"** — each entry just describes one relative's history
+relative to the *patient*, via a `relationship` code from HL7's
+v3-RoleCode `FamilyMember` value set (confirmed directly against
+`terminology.hl7.org`'s own 107-code expansion, e.g. `"MGRFTH"` =
+maternal grandfather, `"PAUNT"` = paternal aunt) — and those codes
+already encode the relative's tree position, so a browsable family view
+doesn't need a separate pedigree resource. `relationship_info(fmh)`
+returns `(label, generation, side)` for one resource (generation:
+positive = ancestor generations, e.g. 1 = parent, 2 = grandparent;
+negative = descendant generations, e.g. -1 = child/niece/nephew; 0 =
+same generation as the patient — siblings, cousins, spouse, in-laws;
+side: `"maternal"`/`"paternal"` where the code itself encodes which side,
+else `None`) via `FAMILY_RELATIONSHIP_INFO`, a code -> (generation, side)
+table covering the full confirmed value set.
+`group_family_history(family_member_histories)` buckets a patient's list
+by `{generation_or_"other": {side_or_"unspecified": [...]}}` — an
+unrecognised relationship code lands in `"other"` rather than being
+dropped. No `app.py` route/template renders this yet.
+
 ## Maintenance scripts (`scripts/`)
 
 Standalone, run-manually scripts — not wired into the Flask app or its

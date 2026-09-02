@@ -1,4 +1,15 @@
 /.idea/
 /julius.iml
 /.venv/
+/venv/
+__pycache__/
 /.env
+
+# epic_client.py's SMART Backend Services private key(s) — never
+# committed. The matching *public* key lives in epic/jwks.json, which IS
+# committed (see scripts/generate_epic_jwks.py) — the JWKS is meant to be
+# hosted from this GitHub project so Epic's authorization server can
+# fetch it, but the private key that signs client-assertion JWTs must
+# never leave local/deployment-secret storage.
+*.pem
+/epic_private_key*

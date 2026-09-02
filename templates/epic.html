@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Epic FHIR connectivity</h1>
+  <p class="muted">
+    A separate integration from the rest of this app — see
+    <code>epic_client.py</code>. Deliberately decoupled from the NW GMSA
+    FHIR server you're signed into above; nothing on this page reads or
+    writes any NW GMSA data. Currently points at
+    {% if base_url == "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4" %}
+      Epic's own public non-production sandbox, the initial development
+      target before a real Manchester Foundation Trust (MFT) test
+      environment exists.
+    {% else %}
+      a non-default <code>EPIC_FHIR_BASE_URL</code>.
+    {% endif %}
+  </p>
+
+  <h2>Configuration</h2>
+  <table>
+    <tr><th>FHIR base URL</th><td><code>{{ base_url }}</code></td></tr>
+    <tr><th>Client ID</th><td>{% if client_id %}<code>{{ client_id }}</code>{% else %}<span class="muted">not set</span>{% endif %}</td></tr>
+    <tr><th>JWT key id (kid)</th><td>{% if kid %}<code>{{ kid }}</code>{% else %}<span class="muted">not set</span>{% endif %}</td></tr>
+    <tr><th>Scope</th><td>{% if scope %}<code>{{ scope }}</code>{% else %}<span class="muted">not set</span>{% endif %}</td></tr>
+  </table>
+
+  {% if configured %}
+    <p>All required environment variables are set.</p>
+  {% else %}
+    <div class="error">
+      <strong>Not fully configured:</strong> {{ config_error }}
+    </div>
+    <p class="muted">
+      Set these once this app has a registered backend-system app on
+      fhir.epic.com (see <code>scripts/generate_epic_jwks.py</code> for
+      generating and hosting the JWKS Epic needs to verify this app's
+      signed JWTs).
+    </p>
+  {% endif %}
+
+  <h2>Connection test</h2>
+  <p>
+    <a href="{{ request.script_root }}/epic?test=1">Test connection</a>
+    <span class="muted">— fetches the server's CapabilityStatement and, if configured, acquires an access token. Not run automatically on page load.</span>
+  </p>
+
+  {% if tested %}
+    {% if test_result %}
+      <p>
+        Connected. FHIR version <code>{{ test_result.fhir_version or "—" }}</code>,
+        server software <code>{{ test_result.software_name or "—" }}</code>.
+      </p>
+    {% elif test_error %}
+      <div class="error"><strong>Connection test failed:</strong> {{ test_error }}</div>
+    {% endif %}
+  {% endif %}
+{% endblock %}
