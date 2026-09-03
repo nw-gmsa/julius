@@ -8,7 +8,10 @@
 
   {% if patient %}
     <div class="patient-banner">
-      <h2>{{ patient|human_name }}</h2>
+      <h2>{{ patient|human_name }}
+        <button type="button" onclick="showFhirResource('patient-data', 'Patient/{{ patient_id }}')">View FHIR</button>
+      </h2>
+      <script type="application/json" id="patient-data">{{ patient|tojson }}</script>
       <div class="demographics">
         <span><span class="label">DOB:</span> {{ patient.birthDate or "—" }}</span>
         <span><span class="label">Gender:</span> {{ patient.gender or "—" }}</span>
@@ -31,6 +34,8 @@
         <strong>{{ r.code|code_text }}</strong>
         <span class="muted">— {{ r.status or "—" }}, {{ r.effectiveDateTime or r.issued or "no date" }}</span>
         <span class="muted">— Category: {{ r.category|map('code_text')|join(", ") if r.category else "—" }}</span>
+        <button type="button" onclick="showFhirResource('report-data-{{ loop.index }}', 'DiagnosticReport/{{ r.id }}')">View FHIR</button>
+        <script type="application/json" id="report-data-{{ loop.index }}">{{ r|tojson }}</script>
         {% set obs_list = report_observations.get(r.id, []) %}
         {% if obs_list %}
           <table>
@@ -57,5 +62,46 @@
     {% endfor %}
   {% else %}
     <p class="muted">No reports found.</p>
+  {% endif %}
+
+  <h2>Orders ({{ service_requests|length }})</h2>
+  {% if service_requests %}
+    <table>
+      <tr><th>Code</th><th>Status</th><th>Intent</th><th>Authored</th><th></th></tr>
+      {% for sr in service_requests %}
+        <tr>
+          <td>{{ sr.code|code_text }}</td>
+          <td>{{ sr.status or "—" }}</td>
+          <td>{{ sr.intent or "—" }}</td>
+          <td>{{ sr.authoredOn or "—" }}</td>
+          <td>
+            <button type="button" onclick="showFhirResource('sr-data-{{ loop.index }}', 'ServiceRequest/{{ sr.id }}')">View FHIR</button>
+            <script type="application/json" id="sr-data-{{ loop.index }}">{{ sr|tojson }}</script>
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No orders found.</p>
+  {% endif %}
+
+  <h2>Documents ({{ document_references|length }})</h2>
+  {% if document_references %}
+    <table>
+      <tr><th>Type</th><th>Status</th><th>Date</th><th></th></tr>
+      {% for doc in document_references %}
+        <tr>
+          <td>{{ doc.type|code_text }}</td>
+          <td>{{ doc.status or "—" }}</td>
+          <td>{{ doc.date or "—" }}</td>
+          <td>
+            <button type="button" onclick="showFhirResource('doc-data-{{ loop.index }}', 'DocumentReference/{{ doc.id }}')">View FHIR</button>
+            <script type="application/json" id="doc-data-{{ loop.index }}">{{ doc|tojson }}</script>
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No documents found.</p>
   {% endif %}
 {% endblock %}

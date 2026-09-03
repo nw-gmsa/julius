@@ -560,6 +560,42 @@ class EpicClient:
         return observations
 
     # ------------------------------------------------------------------
+    # Orders and documents (ServiceRequest + DocumentReference)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def service_requests_for_patient(cls, patient_id):
+        """ServiceRequest resources for `patient_id` — orders, as
+        opposed to diagnostic_reports_for_patient()'s results. A plain
+        `ServiceRequest?patient=<id>` search, no category filter (unlike
+        diagnostic_reports_for_patient()'s default) since there's no
+        equivalent confirmed genetics-only category to narrow by here.
+        `system/ServiceRequest.read` is granted for this app's client
+        even though it isn't listed in EPIC_SCOPE in .env — confirmed
+        directly from a real token response, so no scope change is
+        needed for this to work. Returns a plain list of resources, not
+        a Bundle."""
+        bundle = cls.get("ServiceRequest", params={"patient": patient_id})
+        return cls._entries(bundle, "ServiceRequest")
+
+    @classmethod
+    def document_references_for_patient(cls, patient_id):
+        """DocumentReference resources for `patient_id` — clinical
+        documents (e.g. scanned reports, letters), distinct from
+        DiagnosticReport's structured results. A plain
+        `DocumentReference?patient=<id>` search; same granted-scope note
+        as service_requests_for_patient() above (`system/
+        DocumentReference.read` is granted without being in EPIC_SCOPE).
+        Returns a plain list of resources, not a Bundle. Note: a
+        DocumentReference can carry its document's content inline as
+        base64 in `content[].attachment.data` — potentially large — so
+        callers pretty-printing the raw resource (e.g. the Pathology
+        Explorer's "View FHIR" dialog) may show a sizeable blob for
+        these; nothing here strips or truncates it."""
+        bundle = cls.get("DocumentReference", params={"patient": patient_id})
+        return cls._entries(bundle, "DocumentReference")
+
+    # ------------------------------------------------------------------
     # Family history / pedigree (FamilyMemberHistory)
     # ------------------------------------------------------------------
     #

@@ -85,5 +85,36 @@
     </div>
   {% endif %}
   {% block content %}{% endblock %}
+
+  <!-- Shared "View FHIR" resource dialog — see fhir_resource_link() /
+       fhir_resource_data() below and templates/pathology_patient.html
+       for how a page wires a resource into this. Native <dialog>, no
+       framework, same minimal-vanilla-JS convention as the AOE
+       show/hide logic on order_new.html. -->
+  <dialog id="fhir-dialog" style="width: min(900px, 92vw); max-height: 82vh; border: 1px solid #ccc; border-radius: 6px; padding: 0;">
+    <form method="dialog" style="margin: 0; display: flex; flex-direction: column; max-height: 82vh;">
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #eee;">
+        <strong id="fhir-dialog-title">FHIR resource</strong>
+        <span>
+          <button type="button" onclick="fhirDialogCopy()">📋 Copy</button>
+          <button type="submit">Close</button>
+        </span>
+      </div>
+      <pre id="fhir-dialog-content" style="margin: 0; padding: 12px 14px; overflow: auto; background: #f7f7f7; font-size: .82rem;"></pre>
+    </form>
+  </dialog>
+  <script>
+    function showFhirResource(sourceId, title) {
+      var source = document.getElementById(sourceId);
+      var obj = JSON.parse(source.textContent);
+      document.getElementById('fhir-dialog-title').textContent = title || 'FHIR resource';
+      document.getElementById('fhir-dialog-content').textContent = JSON.stringify(obj, null, 2);
+      document.getElementById('fhir-dialog').showModal();
+    }
+    function fhirDialogCopy() {
+      var text = document.getElementById('fhir-dialog-content').textContent;
+      navigator.clipboard.writeText(text);
+    }
+  </script>
 </body>
 </html>

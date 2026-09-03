@@ -2818,22 +2818,29 @@ def pathology_patient(patient_id):
     Epic has for this patient (category=None, not just
     DIAGNOSTIC_REPORT_GENETICS_CATEGORY — this screen deliberately
     covers pathology as well as genomics, unlike the NW Genomics side),
-    plus each report's resolvable Observation results."""
+    each report's resolvable Observation results, plus ServiceRequest
+    (orders) and DocumentReference (clinical documents)."""
     error = None
     patient = None
     reports = []
     report_observations = {}
+    service_requests = []
+    document_references = []
     try:
         patient = EpicClient.get_patient(patient_id)
         reports = EpicClient.diagnostic_reports_for_patient(patient_id, category=None)
         for report in reports:
             if report.get("id"):
                 report_observations[report["id"]] = EpicClient.observations_for_report(report)
+        service_requests = EpicClient.service_requests_for_patient(patient_id)
+        document_references = EpicClient.document_references_for_patient(patient_id)
     except Exception as e:
         error = str(e)
     return render_template(
         "pathology_patient.html", patient_id=patient_id, patient=patient,
-        reports=reports, report_observations=report_observations, error=error,
+        reports=reports, report_observations=report_observations,
+        service_requests=service_requests, document_references=document_references,
+        error=error,
     )
 
 

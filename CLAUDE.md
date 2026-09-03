@@ -2067,6 +2067,46 @@ into a route yet — see "Family history / pedigree" below).
   same data, `reports`/`report_observations`) follows directly below the
   banner, each report card still showing its resolved Observation
   results table as before.
+- **Orders and Documents** — two more sections below "Diagnostic
+  reports", backed by `EpicClient.service_requests_for_patient()`
+  (`ServiceRequest?patient=<id>`) and `document_references_for_patient()`
+  (`DocumentReference?patient=<id>`), both plain unfiltered-by-category
+  searches (there's no confirmed genetics-only category to narrow
+  `ServiceRequest` by the way `diagnostic_reports_for_patient()` can for
+  reports). **Both search scopes are granted for this app's client even
+  though `EPIC_SCOPE` in `.env` doesn't list them** — confirmed directly
+  from a real token response, which came back with a broader scope
+  (`Binary`, `Condition`, `ServiceRequest`, `DocumentReference`, ...)
+  than what was actually requested; Epic's sandbox appears to grant
+  whatever the app's own registration allows, regardless of the
+  `scope` value sent on the token request. Verified end-to-end for
+  Camila Lopez: 21 ServiceRequests, 6 DocumentReferences. A
+  `DocumentReference` can carry its document inline as base64 in
+  `content[].attachment.data` — potentially large — which the "View
+  FHIR" dialog (below) shows as-is, nothing strips or truncates it.
+- **"View FHIR" — a shared dialog for viewing any resource's raw,
+  pretty-printed JSON, with a Copy button** (`templates/base.html`: a
+  native `<dialog id="fhir-dialog">`, no framework/polyfill, same
+  minimal-vanilla-JS convention as `order_new.html`'s AOE show/hide
+  logic). Any page can wire a resource into it: embed the resource as
+  `{{ resource|tojson }}` inside a `<script type="application/json"
+  id="...">` block (Flask's built-in `tojson` filter — not a custom
+  one — since it's specifically pre-escaped safe for embedding inside a
+  `<script>` block, unlike dumping raw JSON into an HTML attribute like
+  `onclick`, which its `</`/quote escaping isn't meant for), then call
+  `showFhirResource('that-id', 'Title shown in the dialog')` from a
+  button's `onclick`. `showFhirResource()` re-parses that JSON and
+  re-serializes it with `JSON.stringify(obj, null, 2)` for the pretty
+  (indented) display — deliberately re-stringified client-side rather
+  than trying to pretty-print server-side, so the exact same helper
+  works for a resource of any shape/size with zero server changes.
+  `fhirDialogCopy()` copies the dialog's current pretty-printed text via
+  `navigator.clipboard.writeText()`. `pathology_patient.html` wires this
+  up for the Patient (banner), every DiagnosticReport, ServiceRequest,
+  and DocumentReference row — reuse the same `showFhirResource()`/embed
+  pattern rather than a bespoke viewer if another screen needs "show me
+  the raw resource" (the dialog markup/JS lives in `base.html`
+  specifically so it's available everywhere, not just `/pathology*`).
 
 **Genomic reports** — `diagnostic_reports_for_patient(patient_id,
 category=DIAGNOSTIC_REPORT_GENETICS_CATEGORY)` searches `DiagnosticReport`
