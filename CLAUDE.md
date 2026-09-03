@@ -2107,7 +2107,15 @@ into a route yet — see "Family history / pedigree" below).
   reuse the same `showFhirResource()`/embed pattern rather than a
   bespoke viewer if another screen needs "show me the raw resource"
   (the dialog markup/JS lives in `base.html` specifically so it's
-  available everywhere, not just `/pathology*`).
+  available everywhere, not just `/pathology*`). Both the `<dialog>`
+  itself and its scrollable `<pre>` set `overscroll-behavior: contain`
+  — without it, scrolling a resource too tall for the dialog's
+  `max-height` would hit the `<pre>`'s scroll boundary and chain the
+  rest of the scroll gesture through to the page behind (a real bug hit
+  directly on a large resource, e.g. one of the ServiceRequests with a
+  long `note`/`supportingInfo`), which reads as "the popup scrolled the
+  background" — `contain` stops a scroll from propagating past the
+  element that's actually being scrolled once it runs out of room.
 - **"View document"** (`/pathology/document/<document_id>?index=N`,
   `app.py`) — streams one of a DocumentReference's actual attachments
   (not its FHIR JSON — that's "View FHIR" above), the Pathology
