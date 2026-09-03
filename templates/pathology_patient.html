@@ -36,10 +36,11 @@
         <span class="muted">— Category: {{ r.category|map('code_text')|join(", ") if r.category else "—" }}</span>
         <button type="button" onclick="showFhirResource('report-data-{{ loop.index }}', 'DiagnosticReport/{{ r.id }}')">View FHIR</button>
         <script type="application/json" id="report-data-{{ loop.index }}">{{ r|tojson }}</script>
+        {% set report_idx = loop.index %}
         {% set obs_list = report_observations.get(r.id, []) %}
         {% if obs_list %}
           <table>
-            <tr><th>Result</th><th>Value</th><th>Reference range</th><th>Flag</th></tr>
+            <tr><th>Result</th><th>Value</th><th>Reference range</th><th>Flag</th><th></th></tr>
             {% for o in obs_list %}
               <tr>
                 <td>{{ o.code|code_text }}</td>
@@ -52,6 +53,10 @@
                   {% else %}—{% endif %}
                 </td>
                 <td>{{ o.interpretation[0]|code_text if o.interpretation else "—" }}</td>
+                <td>
+                  <button type="button" onclick="showFhirResource('obs-data-{{ report_idx }}-{{ loop.index }}', 'Observation/{{ o.id }}')">View FHIR</button>
+                  <script type="application/json" id="obs-data-{{ report_idx }}-{{ loop.index }}">{{ o|tojson }}</script>
+                </td>
               </tr>
             {% endfor %}
           </table>
