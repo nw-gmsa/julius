@@ -2102,11 +2102,35 @@ into a route yet — see "Family history / pedigree" below).
   works for a resource of any shape/size with zero server changes.
   `fhirDialogCopy()` copies the dialog's current pretty-printed text via
   `navigator.clipboard.writeText()`. `pathology_patient.html` wires this
-  up for the Patient (banner), every DiagnosticReport, ServiceRequest,
-  and DocumentReference row — reuse the same `showFhirResource()`/embed
-  pattern rather than a bespoke viewer if another screen needs "show me
-  the raw resource" (the dialog markup/JS lives in `base.html`
-  specifically so it's available everywhere, not just `/pathology*`).
+  up for the Patient (banner), every DiagnosticReport (and each of its
+  Observation result rows), ServiceRequest, and DocumentReference row —
+  reuse the same `showFhirResource()`/embed pattern rather than a
+  bespoke viewer if another screen needs "show me the raw resource"
+  (the dialog markup/JS lives in `base.html` specifically so it's
+  available everywhere, not just `/pathology*`).
+- **"View document"** (`/pathology/document/<document_id>?index=N`,
+  `app.py`) — streams one of a DocumentReference's actual attachments
+  (not its FHIR JSON — that's "View FHIR" above), the Pathology
+  Explorer's counterpart to `/report/<report_id>/pdf`. Doesn't need a
+  `patient_id` on the URL: `EpicClient.get_document_reference(document_id)`
+  is a direct `Read`, unlike the `Search`-based methods elsewhere in
+  this module that need a patient to scope by (Epic's search-requires-
+  a-parameter business rule — see above — doesn't apply to a plain
+  id-based `Read`). One link per `content[]` entry (usually just one),
+  labelled with that attachment's content type.
+  `EpicClient.fetch_attachment_bytes(attachment)` mirrors
+  `FhirClient.fetch_attachment_bytes()` exactly: inlined base64 `.data`,
+  or a `.url` pointing at a **Binary** resource, requested as `Accept:
+  application/fhir+json` and decoded (falling back to raw bytes if a
+  server ignores the Accept header). **Confirmed directly: one of
+  Camila Lopez's own documents (an `application/pdf` attachment) fails
+  server-side on Epic's own sandbox** — `400`, `"Unknown error occurred
+  formatting binary content."` — regardless of `Accept` header tried
+  (`application/fhir+json` or the attachment's own `application/pdf`);
+  a sibling `text/html` attachment on the same patient resolves fine
+  either way, so this isn't a request-format bug on this app's side.
+  Not swallowed — surfaces as a `502` with Epic's own error text, same
+  "surface it" stance as `/report/<report_id>/pdf`'s failure handling.
 
 **Genomic reports** — `diagnostic_reports_for_patient(patient_id,
 category=DIAGNOSTIC_REPORT_GENETICS_CATEGORY)` searches `DiagnosticReport`

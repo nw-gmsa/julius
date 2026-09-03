@@ -100,6 +100,14 @@
           <td>{{ doc.status or "—" }}</td>
           <td>{{ doc.date or "—" }}</td>
           <td>
+            {% for c in doc.content or [] %}
+              <a href="{{ request.script_root }}/pathology/document/{{ doc.id }}?index={{ loop.index0 }}" target="_blank">
+                📄 View document{% if (doc.content|length) > 1 %} ({{ loop.index }}){% endif %}{% if c.attachment and c.attachment.contentType %} ({{ c.attachment.contentType }}){% endif %}
+              </a>
+              {% if not loop.last %}<br>{% endif %}
+            {% else %}
+              <span class="muted">No attachment</span>
+            {% endfor %}
             <button type="button" onclick="showFhirResource('doc-data-{{ loop.index }}', 'DocumentReference/{{ doc.id }}')">View FHIR</button>
             <script type="application/json" id="doc-data-{{ loop.index }}">{{ doc|tojson }}</script>
           </td>

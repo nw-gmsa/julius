@@ -54,6 +54,7 @@ signature, matching by the "kid" header
 repo (or at least that file, e.g. via GitHub Pages) to be publicly
 fetchable — not verified from here which this repo currently is.
 """
+import base64
 import os
 import time
 import uuid
@@ -594,6 +595,74 @@ class EpicClient:
         these; nothing here strips or truncates it."""
         bundle = cls.get("DocumentReference", params={"patient": patient_id})
         return cls._entries(bundle, "DocumentReference")
+
+    @classmethod
+    def get_document_reference(cls, document_id):
+        """Fetch a single DocumentReference resource by id — a direct
+        `Read`, not a `Search`, so (unlike search_patients()/
+        diagnostic_reports_for_patient()) it doesn't need a patient id
+        alongside it; used by the Pathology Explorer's "View document"
+        link, which only has the DocumentReference id on the URL."""
+        return cls.get(f"DocumentReference/{document_id}")
+
+    @classmethod
+    def fetch_attachment_bytes(cls, attachment):
+        """Resolve a FHIR Attachment (e.g. one entry of a
+        DocumentReference's `content[].attachment`) to raw bytes +
+        content type — the Pathology Explorer's counterpart to
+        `FhirClient.fetch_attachment_bytes()`, same two shapes: inlined
+        base64 in `.data`, or a `.url` pointing at a FHIR **Binary**
+        resource (e.g. "Binary/abc123"), requested as `Accept:
+        application/fhir+json` (reliably returns a Binary resource — a
+        JSON object with `contentType` and base64 `data`) and decoded,
+        falling back to raw bytes if a server ignores the Accept header
+        — same convention `FhirClient.fetch_attachment_bytes()` uses.
+        One retry with a forced token refresh on a 401, same as `get()`.
+
+        Note: at least one real Binary behind an Epic sandbox
+        DocumentReference (an `application/pdf` attachment, on Camila
+        Lopez's own document list) has been seen to fail server-side
+        regardless of `Accept` header — a `400` from Epic itself
+        ("Unknown error occurred formatting binary content."), confirmed
+        not a request-format issue on this app's side since a sibling
+        `text/html` attachment on the same patient resolves fine either
+        way. Not swallowed here — raised like any other
+        `requests.HTTPError` for the caller to surface, same
+        "surface it, don't swallow it" stance as the rest of this app.
+        """
+        if attachment.get("data"):
+            content_type = attachment.get("contentType", "application/octet-stream")
+            return base64.b64decode(attachment["data"]), content_type
+
+        url = attachment.get("url")
+        if not url:
+            return None, None
+        base_url, _, _, _, _, verify_ssl = cls.config()
+        full_url = url if url.startswith("http") else f"{base_url}/{url.lstrip('/')}"
+
+        def _do_get(token):
+            return requests.get(
+                full_url,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/fhir+json"},
+                timeout=30, verify=verify_ssl,
+            )
+
+        resp = _do_get(cls.access_token())
+        if resp.status_code == 401:
+            resp = _do_get(cls.access_token(force_refresh=True))
+        resp.raise_for_status()
+
+        ctype_header = resp.headers.get("Content-Type", "")
+        if "json" in ctype_header or "fhir" in ctype_header:
+            binary_resource = resp.json()
+            data_b64 = binary_resource.get("data")
+            if not data_b64:
+                return None, None
+            content_type = binary_resource.get("contentType") or attachment.get("contentType", "application/octet-stream")
+            return base64.b64decode(data_b64), content_type
+
+        content_type = ctype_header or attachment.get("contentType", "application/octet-stream")
+        return resp.content, content_type
 
     # ------------------------------------------------------------------
     # Family history / pedigree (FamilyMemberHistory)

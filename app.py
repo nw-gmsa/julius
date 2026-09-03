@@ -2844,6 +2844,38 @@ def pathology_patient(patient_id):
     )
 
 
+@app.route("/pathology/document/<document_id>")
+def pathology_document(document_id):
+    """Streams one attachment off an Epic DocumentReference — the
+    Pathology Explorer's counterpart to /report/<report_id>/pdf.
+    document_id is enough on its own (no patient_id needed) since
+    EpicClient.get_document_reference() is a direct Read, not a
+    Search."""
+    index = int(request.args.get("index", 0))
+    try:
+        document = EpicClient.get_document_reference(document_id)
+    except Exception as e:
+        return f"Could not load document: {e}", 502
+
+    contents = document.get("content") or []
+    if index >= len(contents):
+        abort(404, description="This document has no attachment at that index.")
+    attachment = contents[index].get("attachment") or {}
+
+    try:
+        data, content_type = EpicClient.fetch_attachment_bytes(attachment)
+    except Exception as e:
+        return f"Could not fetch attachment: {e}", 502
+    if data is None:
+        abort(404, description="Attachment had neither inline data nor a URL.")
+
+    filename = attachment.get("title") or f"{document_id}-{index}"
+    return Response(
+        data, mimetype=content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
 @app.route("/epic")
 def epic_status():
     """Connectivity status page for epic_client.py's EpicClient —
