@@ -820,6 +820,30 @@ class FhirClient:
         rather than kept in server state between requests."""
         return self._get(f"ServiceRequest/{order_id}")
 
+    def documents_for_patient(self, patient_id):
+        """DocumentReference resources for `patient_id` — clinical
+        documents (e.g. scanned reports, referral letters), distinct from
+        a DiagnosticReport's own `presentedForm` attachment. No category
+        filter — unlike lab_orders_for_patient()/lab_reports_for_patient(),
+        there's no IG-documented category to narrow DocumentReference by
+        here, so (mirroring EpicClient.document_references_for_patient(),
+        the Pathology Explorer's counterpart) this is a plain
+        `DocumentReference?patient=<id>` search. Patient-scoped, so
+        unbounded is fine — not the system-wide-413 risk this file's
+        other unfiltered searches are (see "413s on unfiltered
+        system-wide searches" in CLAUDE.md)."""
+        bundle = self._get("DocumentReference", {"patient": patient_id, "_sort": "-date", "_count": 50})
+        matches, included = self._split_bundle(bundle)
+        self._cache_included(included)
+        return matches
+
+    def get_document_reference(self, document_id):
+        """Fetch a single DocumentReference by ID — used to re-fetch a
+        document's attachment when streaming it (same pattern as
+        get_report()'s presentedForm re-fetch above), since search
+        results aren't kept in server state between requests."""
+        return self._get(f"DocumentReference/{document_id}")
+
     # ---- AuditEvent (audit trail) -------------------------------------
 
     #: FHIR R4's own "audit-event-action" ValueSet — not deployment-

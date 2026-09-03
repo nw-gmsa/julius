@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1>Patient {{ patient_id }}</h1>
+  <h1>Patient {{ patient_id }}
+    {% if patient %}
+      <button type="button" onclick="showFhirResource('patient-data', 'Patient/{{ patient_id }}')">View FHIR/V2</button>
+      <script type="application/json" id="patient-data">{{ patient|tojson }}</script>
+    {% endif %}
+  </h1>
   <p><a href="{{ request.script_root }}/patient/{{ patient_id }}/audit-trail">🕵 View Audit Trail</a></p>
   {% if is_production %}
     <p class="muted">🗑 Clear down patient data — disabled on this server (<code>FHIR_BASE_URL</code> looks like production).</p>
@@ -85,7 +90,7 @@
   <h2>Specimens ({{ specimens|length }})</h2>
   {% if specimens %}
     <table>
-      <tr><th>Type</th><th>Date collected</th><th>Date received</th><th>Specimen identifier</th><th>ID</th></tr>
+      <tr><th>Type</th><th>Date collected</th><th>Date received</th><th>Specimen identifier</th><th>ID</th><th></th></tr>
       {% for s in specimens %}
         <tr>
           <td>{{ s.type|code_text }}</td>
@@ -93,6 +98,10 @@
           <td>{{ s|specimen_received }}</td>
           <td>{{ (s|specimen_identifier) or "—" }}</td>
           <td class="muted">{{ s.id }}</td>
+          <td>
+            <button type="button" onclick="showFhirResource('specimen-data-{{ s.id }}', 'Specimen/{{ s.id }}')">View FHIR/V2</button>
+            <script type="application/json" id="specimen-data-{{ s.id }}">{{ s|tojson }}</script>
+          </td>
         </tr>
       {% endfor %}
     </table>
@@ -131,6 +140,10 @@
         <td>{{ node.order|reason_code_reference }}</td>
         <td>{{ (node.order|encounter_identifier) or "—" }}</td>
         <td class="muted">{{ node.order.id }}</td>
+        <td>
+          <button type="button" onclick="showFhirResource('order-data-{{ node.order.id }}', 'ServiceRequest/{{ node.order.id }}')">View FHIR/V2</button>
+          <script type="application/json" id="order-data-{{ node.order.id }}">{{ node.order|tojson }}</script>
+        </td>
       </tr>
       {{ render_order_chain(node.children, depth + 1) }}
     {% endfor %}
@@ -142,7 +155,7 @@
   {% endif %}
   {% if orders %}
     <table>
-      <tr><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th><th>Requesting clinician</th><th>Requesting organisation</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>Hospital Spell ID</th><th>ID</th></tr>
+      <tr><th>Test</th><th>Status</th><th>Intent</th><th>Ordered</th><th>Requesting clinician</th><th>Requesting organisation</th><th>Performer</th><th>Placer ID</th><th>Filler ID</th><th>Reason Code Ref#</th><th>Hospital Spell ID</th><th>ID</th><th></th></tr>
       {{ render_order_chain(order_chains) }}
     </table>
     <p class="muted">↳ indicates a reanalysis/cascade-testing request based on the row above it.</p>
@@ -155,6 +168,8 @@
     {% for r in reports %}
       <div class="card">
         <strong><a href="{{ request.script_root }}/report/{{ r.id }}">{{ (r.code|test_directory_code) or "—" }}</a></strong>
+        <button type="button" onclick="showFhirResource('report-data-{{ r.id }}', 'DiagnosticReport/{{ r.id }}')">View FHIR/V2</button>
+        <script type="application/json" id="report-data-{{ r.id }}">{{ r|tojson }}</script>
         <span class="muted">— {{ r.status or "—" }}, {{ r.effectiveDateTime or r.issued or "no date" }}</span>
         <span class="muted">— Report ID: {{ (r|report_identifier) or "—" }}</span>
         <span class="muted">— Conclusion code: {{ r|conclusion_code_reference }}</span>
@@ -181,7 +196,7 @@
         {% set obs_list = report_obs.get(r.id, []) %}
         {% if obs_list %}
           <table>
-            <tr><th>Result</th><th>Value</th><th>Reference range</th><th>Flag</th></tr>
+            <tr><th>Result</th><th>Value</th><th>Reference range</th><th>Flag</th><th></th></tr>
             {% for o in obs_list %}
               <tr>
                 <td>{{ o.code|code_text }}</td>
@@ -194,6 +209,10 @@
                   {% else %}—{% endif %}
                 </td>
                 <td>{{ o.interpretation[0]|code_text if o.interpretation else "—" }}</td>
+                <td>
+                  <button type="button" onclick="showFhirResource('obs-data-{{ o.id }}', 'Observation/{{ o.id }}')">View FHIR/V2</button>
+                  <script type="application/json" id="obs-data-{{ o.id }}">{{ o|tojson }}</script>
+                </td>
               </tr>
             {% endfor %}
           </table>
@@ -204,5 +223,40 @@
     {% endfor %}
   {% else %}
     <p class="muted">No lab reports found.</p>
+  {% endif %}
+
+  <h2>Documents ({{ document_references|length }})</h2>
+  <p class="muted">
+    <code>DocumentReference</code> resources for this patient (e.g. scanned
+    reports, referral letters) — distinct from a genomic test report's own
+    attached document above. Whether this server populates
+    <code>DocumentReference</code> at all is unconfirmed; an empty list
+    here may just mean it doesn't.
+  </p>
+  {% if document_references %}
+    <table>
+      <tr><th>Type</th><th>Status</th><th>Date</th><th></th></tr>
+      {% for doc in document_references %}
+        <tr>
+          <td>{{ doc.type|code_text }}</td>
+          <td>{{ doc.status or "—" }}</td>
+          <td>{{ doc.date or "—" }}</td>
+          <td>
+            {% for c in doc.content or [] %}
+              <a href="{{ request.script_root }}/patient/document/{{ doc.id }}?index={{ loop.index0 }}" target="_blank">
+                📄 View document{% if (doc.content|length) > 1 %} ({{ loop.index }}){% endif %}{% if c.attachment and c.attachment.contentType %} ({{ c.attachment.contentType }}){% endif %}
+              </a>
+              {% if not loop.last %}<br>{% endif %}
+            {% else %}
+              <span class="muted">No attachment</span>
+            {% endfor %}
+            <button type="button" onclick="showFhirResource('doc-data-{{ doc.id }}', 'DocumentReference/{{ doc.id }}')">View FHIR/V2</button>
+            <script type="application/json" id="doc-data-{{ doc.id }}">{{ doc|tojson }}</script>
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No documents found.</p>
   {% endif %}
 {% endblock %}

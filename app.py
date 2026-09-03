@@ -572,6 +572,7 @@ def patient_detail(patient_id):
     report_order = {}
     specimens_by_id = {}
     medical_record_numbers = []
+    document_references = []
     try:
         patient = client.get_patient(patient_id)
         medical_record_numbers = client.medical_record_numbers(patient)
@@ -596,6 +597,15 @@ def patient_detail(patient_id):
                 specimens_by_id[spec["id"]] = spec
     except Exception as e:
         error = str(e)
+    # Fetched separately from the block above, deliberately: whether
+    # this server's DocumentReference support even exists is unconfirmed
+    # (no IG-documented category to check like lab_orders_for_patient()/
+    # lab_reports_for_patient() have), so a failure here shouldn't take
+    # down the whole page — it just shows no documents.
+    try:
+        document_references = client.documents_for_patient(patient_id)
+    except Exception:
+        document_references = []
     specimens = list(specimens_by_id.values())
     order_chains = client.build_order_chains(orders)
     # Hospital Spell section: distinct Encounters referenced by this
@@ -624,7 +634,8 @@ def patient_detail(patient_id):
         report_order=report_order,
         order_organisation=order_organisation, order_clinician=order_clinician,
         order_performer=order_performer,
-        specimens=specimens, error=error, is_production=client.is_production(),
+        specimens=specimens, document_references=document_references,
+        error=error, is_production=client.is_production(),
     )
 
 
@@ -2831,6 +2842,37 @@ def report_pdf(report_id):
     filename = attachment.get("title") or f"{report_id}-{index}.pdf"
     return Response(
         data, mimetype=content_type or "application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@app.route("/patient/document/<document_id>")
+def patient_document(document_id):
+    """Streams one attachment off a NW GMSA DocumentReference — this
+    side's counterpart to /report/<report_id>/pdf and (on the Epic side)
+    /pathology/document/<document_id>. document_id alone is enough (no
+    patient_id needed) since get_document_reference() is a direct Read."""
+    index = int(request.args.get("index", 0))
+    try:
+        document = client.get_document_reference(document_id)
+    except Exception as e:
+        return f"Could not load document: {e}", 502
+
+    contents = document.get("content") or []
+    if index >= len(contents):
+        abort(404, description="This document has no attachment at that index.")
+    attachment = contents[index].get("attachment") or {}
+
+    try:
+        data, content_type = client.fetch_attachment_bytes(attachment)
+    except Exception as e:
+        return f"Could not fetch attachment: {e}", 502
+    if data is None:
+        abort(404, description="Attachment had neither inline data nor a URL.")
+
+    filename = attachment.get("title") or f"{document_id}-{index}"
+    return Response(
+        data, mimetype=content_type or "application/octet-stream",
         headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
 

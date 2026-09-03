@@ -43,6 +43,10 @@
                                     box-shadow: 0 2px 6px rgba(0,0,0,.12); }
     .nav-dropdown .dropdown-menu a { display: block; padding: 6px 12px; white-space: nowrap; }
     .nav-dropdown .dropdown-menu a:hover { background: #f2f2f2; text-decoration: none; }
+    .fhir-tab-btn { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+                    padding: 8px 10px; font-size: .85rem; color: #555; cursor: pointer; }
+    .fhir-tab-btn:hover { color: #1a1a1a; }
+    .fhir-tab-btn.active { border-bottom-color: #2b5fad; color: #2b5fad; font-weight: 600; }
   </style>
   {% block head %}{% endblock %}
 </head>
@@ -86,34 +90,268 @@
   {% endif %}
   {% block content %}{% endblock %}
 
-  <!-- Shared "View FHIR" resource dialog — see fhir_resource_link() /
+  <!-- Shared "View FHIR/V2" resource dialog — see fhir_resource_link() /
        fhir_resource_data() below and templates/pathology_patient.html
        for how a page wires a resource into this. Native <dialog>, no
        framework, same minimal-vanilla-JS convention as the AOE
-       show/hide logic on order_new.html. -->
-  <dialog id="fhir-dialog" style="width: min(900px, 92vw); max-height: 82vh; border: 1px solid #ccc; border-radius: 6px; padding: 0; overscroll-behavior: contain;">
-    <form method="dialog" style="margin: 0; display: flex; flex-direction: column; max-height: 82vh;">
-      <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #eee;">
+       show/hide logic on order_new.html. Two tabs share one dialog rather
+       than being two separate panes (an earlier version showed both JSON
+       and HL7 v2 stacked at once) — the HL7 v2 tab is a field-level
+       table (field number e.g. "PID-3", field description, value)
+       rather than a raw pipe-delimited segment dump: fhirToHl7v2()
+       below returns an array of {key, label, value} field rows (one
+       per HL7 v2 field this app maps something onto), not a segment
+       string — an earlier version rendered one row per *segment*, which
+       wasn't granular enough to answer "what's in field 3". -->
+  <dialog id="fhir-dialog" style="width: min(900px, 92vw); max-height: 82vh; border: 1px solid #ccc; border-radius: 6px; padding: 0; overflow: hidden; overscroll-behavior: contain;">
+    <form method="dialog" style="margin: 0; display: flex; flex-direction: column; max-height: 82vh; overflow: hidden;">
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #eee; flex: none;">
         <strong id="fhir-dialog-title">FHIR resource</strong>
         <span>
           <button type="button" onclick="fhirDialogCopy()">📋 Copy</button>
           <button type="submit">Close</button>
         </span>
       </div>
-      <pre id="fhir-dialog-content" style="margin: 0; padding: 12px 14px; overflow: auto; overscroll-behavior: contain; background: #f7f7f7; font-size: .82rem;"></pre>
+      <div style="display: flex; gap: 4px; padding: 0 10px; border-bottom: 1px solid #eee; flex: none;">
+        <button type="button" id="fhir-tab-btn-fhir" class="fhir-tab-btn" onclick="fhirDialogShowTab('fhir')">FHIR</button>
+        <button type="button" id="fhir-tab-btn-v2" class="fhir-tab-btn" onclick="fhirDialogShowTab('v2')">HL7 V2</button>
+      </div>
+      <pre id="fhir-dialog-content" style="margin: 0; padding: 12px 14px; overflow: auto; overscroll-behavior: contain; background: #f7f7f7; font-size: .82rem; flex: 1 1 auto;"></pre>
+      <div id="fhir-dialog-v2-wrap" style="overflow: auto; overscroll-behavior: contain; flex: 1 1 auto;">
+        <p class="muted" style="margin: 0; padding: 10px 14px 0;">Best-effort, per the IG's own
+          <a href="https://nw-gmsa.github.io/en/hl7v2.html" target="_blank">FHIR &harr; HL7 v2 mapping</a>
+          — not a validated/certified HL7 v2 message.</p>
+        <table style="margin: 8px 14px 12px; width: calc(100% - 28px);">
+          <tr><th style="width: 5em;">Field</th><th style="width: 16em;">Description</th><th>Value</th></tr>
+          <tbody id="fhir-dialog-v2-body"></tbody>
+        </table>
+        <strong style="display: block; margin: 0 14px; font-size: .85rem;">Full segment(s)</strong>
+        <pre id="fhir-dialog-v2-segments" style="margin: 4px 14px 14px; padding: 10px 12px; background: #f7f7f7; font-size: .8rem; overflow: auto; overscroll-behavior: contain;"></pre>
+      </div>
     </form>
   </dialog>
   <script>
+    var fhirDialogActiveTab = 'fhir';
+    var fhirDialogHl7Rows = [];
+    var fhirDialogHl7Segments = [];
+    // Reassembles the field-level rows back into raw pipe-delimited
+    // segment lines (e.g. "PID|1||...") for the "Full segment(s)" block
+    // below the table — grouping by the segment code each row's key
+    // (e.g. "PID-3") starts with, in first-seen order, filling any
+    // field position this app doesn't map with an empty component.
+    function hl7RowsToSegments(rows) {
+      var bySeg = {}, order = [];
+      rows.forEach(function (r) {
+        var m = /^([A-Z0-9]+)-(\d+)$/.exec(r.key);
+        if (!m) return;
+        var seg = m[1], num = parseInt(m[2], 10);
+        if (!bySeg[seg]) { bySeg[seg] = {}; order.push(seg); }
+        bySeg[seg][num] = r.value;
+      });
+      return order.map(function (seg) {
+        var fields = bySeg[seg];
+        var maxIdx = Math.max.apply(null, Object.keys(fields).map(Number));
+        var arr = new Array(maxIdx + 1).fill('');
+        arr[0] = seg;
+        Object.keys(fields).forEach(function (k) { arr[parseInt(k, 10)] = fields[k] || ''; });
+        return arr.join('|');
+      });
+    }
+    function fhirDialogShowTab(tab) {
+      fhirDialogActiveTab = tab;
+      document.getElementById('fhir-dialog-content').style.display = tab === 'fhir' ? 'block' : 'none';
+      document.getElementById('fhir-dialog-v2-wrap').style.display = tab === 'v2' ? 'block' : 'none';
+      document.getElementById('fhir-tab-btn-fhir').classList.toggle('active', tab === 'fhir');
+      document.getElementById('fhir-tab-btn-v2').classList.toggle('active', tab === 'v2');
+    }
+    function fhirDialogRenderHl7v2(rows) {
+      var tbody = document.getElementById('fhir-dialog-v2-body');
+      tbody.innerHTML = '';
+      rows.forEach(function (row) {
+        var tr = document.createElement('tr');
+        var tdKey = document.createElement('td'); tdKey.textContent = row.key; tdKey.style.fontFamily = 'monospace';
+        var tdLabel = document.createElement('td'); tdLabel.textContent = row.label;
+        var tdVal = document.createElement('td'); tdVal.textContent = row.value;
+        tdVal.style.fontFamily = 'monospace'; tdVal.style.fontSize = '.8rem'; tdVal.style.wordBreak = 'break-all';
+        tr.appendChild(tdKey); tr.appendChild(tdLabel); tr.appendChild(tdVal);
+        tbody.appendChild(tr);
+      });
+    }
     function showFhirResource(sourceId, title) {
       var source = document.getElementById(sourceId);
       var obj = JSON.parse(source.textContent);
       document.getElementById('fhir-dialog-title').textContent = title || 'FHIR resource';
       document.getElementById('fhir-dialog-content').textContent = JSON.stringify(obj, null, 2);
+      fhirDialogHl7Rows = fhirToHl7v2(obj);
+      fhirDialogRenderHl7v2(fhirDialogHl7Rows);
+      fhirDialogHl7Segments = hl7RowsToSegments(fhirDialogHl7Rows);
+      document.getElementById('fhir-dialog-v2-segments').textContent = fhirDialogHl7Segments.join('\n') || '—';
+      fhirDialogShowTab('fhir');
       document.getElementById('fhir-dialog').showModal();
     }
     function fhirDialogCopy() {
-      var text = document.getElementById('fhir-dialog-content').textContent;
-      navigator.clipboard.writeText(text);
+      if (fhirDialogActiveTab === 'v2') {
+        var table = fhirDialogHl7Rows.map(function (r) { return [r.key, r.label, r.value].join('\t'); }).join('\n');
+        var text = table + '\n\nFull segment(s):\n' + fhirDialogHl7Segments.join('\n');
+        navigator.clipboard.writeText(text);
+        return;
+      }
+      navigator.clipboard.writeText(document.getElementById('fhir-dialog-content').textContent);
+    }
+
+    // Best-effort FHIR -> HL7 v2 field rendering for the "View FHIR/V2"
+    // dialog above, per https://nw-gmsa.github.io/en/hl7v2.html (segment
+    // list + the ORC/OBR/OBX/SPM field numbers and CX/XCN/XON examples
+    // that page documents explicitly). Field numbers for segments that
+    // page doesn't spell out (PID, DG1, NK1, TXA) fall back to standard
+    // HL7 v2.5.1 positions — this is a rendering aid for eyeballing the
+    // resource in a familiar shape, not a certified HL7 v2 message: no
+    // MSH is built, and there's nothing this app can validate it against.
+    function hl7Escape(v) {
+      if (v === undefined || v === null) return '';
+      return String(v)
+        .replace(/\\/g, '\\E\\')
+        .replace(/\|/g, '\\F\\')
+        .replace(/\^/g, '\\S\\')
+        .replace(/~/g, '\\R\\')
+        .replace(/&/g, '\\T\\');
+    }
+    function hl7Date(dt, withTime) {
+      if (!dt) return '';
+      var m = String(dt).match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2}))?/);
+      if (!m) return '';
+      var out = m[1] + m[2] + m[3];
+      if (withTime && m[4]) out += m[4] + m[5] + (m[6] || '00');
+      return out;
+    }
+    // One row in the HL7 v2 tab's table: field number (e.g. "PID-3"),
+    // its description, and its value in normal HL7 component-separated
+    // shape (^/~ etc, still escaped via hl7Escape at the leaf level).
+    function hl7Field(segment, num, label, value) {
+      return { key: segment + '-' + num, label: label, value: value || '' };
+    }
+    // CE: code^display^system — see the mapping page's OBX-3/OBX-5 examples.
+    function hl7CE(cc) {
+      if (!cc) return '';
+      var coding = (cc.coding && cc.coding[0]) || {};
+      return [hl7Escape(coding.code), hl7Escape(coding.display || cc.text), hl7Escape(coding.system ? coding.system.split('/').pop() : '')].join('^');
+    }
+    // CX: value^^^system^type — see the mapping page's NHS number/MRN CX examples.
+    function hl7CX(id) {
+      if (!id) return '';
+      var typeCode = (id.type && id.type.coding && id.type.coding[0] && id.type.coding[0].code) || '';
+      var sysShort = id.system ? id.system.split('/').pop() : '';
+      return [hl7Escape(id.value), '', '', hl7Escape(sysShort), hl7Escape(typeCode)].join('^');
+    }
+    // XPN: family^given^^^prefix
+    function hl7XPN(name) {
+      if (!name) return '';
+      return [hl7Escape(name.family), hl7Escape((name.given || []).join(' ')), '', '', hl7Escape((name.prefix || []).join(' '))].join('^');
+    }
+    // XCN, from a bare Reference (resolved or logical) — see the mapping
+    // page's GMC XCN example ("C3456789^Darwin^Samuel^^^Dr^^^GMC").
+    function hl7XCNFromReference(ref) {
+      if (!ref) return '';
+      var idVal = (ref.identifier && ref.identifier.value) || '';
+      var parts = (ref.display || '').trim().split(/\s+/).filter(Boolean);
+      var prefix = '';
+      if (parts.length > 1 && /^(Dr|Mr|Mrs|Ms|Miss|Prof)\.?$/i.test(parts[0])) {
+        prefix = parts.shift();
+      }
+      var family = parts.length ? parts[parts.length - 1] : '';
+      var given = parts.slice(0, -1).join(' ');
+      return [hl7Escape(idVal), hl7Escape(family), hl7Escape(given), '', '', hl7Escape(prefix)].join('^');
+    }
+    var HL7V2_STATUS_MAP = { final: 'F', preliminary: 'P', corrected: 'C', amended: 'C', 'entered-in-error': 'W', cancelled: 'X' };
+
+    function hl7PID(p) {
+      var rows = [
+        hl7Field('PID', 1, 'Set ID – PID', '1'),
+        hl7Field('PID', 3, 'Patient Identifier List', (p.identifier || []).map(hl7CX).filter(Boolean).join('~')),
+        hl7Field('PID', 5, 'Patient Name', p.name && p.name[0] ? hl7XPN(p.name[0]) : ''),
+        hl7Field('PID', 7, 'Date/Time of Birth', hl7Date(p.birthDate)),
+        hl7Field('PID', 8, 'Administrative Sex', { male: 'M', female: 'F', other: 'O', unknown: 'U' }[p.gender] || '')
+      ];
+      if (p.address && p.address[0]) {
+        var a = p.address[0];
+        rows.push(hl7Field('PID', 11, 'Patient Address', [hl7Escape((a.line || []).join(' ')), '', hl7Escape(a.city), hl7Escape(a.state), hl7Escape(a.postalCode), hl7Escape(a.country)].join('^')));
+      }
+      return rows;
+    }
+    function hl7OrderSegments(sr) {
+      var placer = (sr.identifier || []).map(hl7CX).filter(Boolean)[0] || '';
+      var rows = [
+        hl7Field('ORC', 2, 'Placer Order Number', placer),
+        hl7Field('ORC', 12, 'Ordering Provider', hl7XCNFromReference(sr.requester)),
+        hl7Field('OBR', 4, 'Universal Service Identifier', hl7CE(sr.code)),
+        hl7Field('OBR', 31, 'Reason for Study', sr.reasonCode && sr.reasonCode[0] ? hl7CE(sr.reasonCode[0]) : '')
+      ];
+      return rows;
+    }
+    function hl7OBR_DiagnosticReport(dr) {
+      return [
+        hl7Field('OBR', 4, 'Universal Service Identifier', hl7CE(dr.code)),
+        hl7Field('OBR', 7, 'Observation Date/Time', hl7Date(dr.effectiveDateTime, true) || hl7Date(dr.issued, true)),
+        hl7Field('OBR', 22, 'Results Rpt/Status Chng Date/Time', hl7Date(dr.issued, true))
+      ];
+    }
+    function hl7OBX_Observation(o) {
+      var valueType = 'ST', value = '';
+      if (o.valueCodeableConcept) { valueType = 'CE'; value = hl7CE(o.valueCodeableConcept); }
+      else if (o.valueQuantity) { valueType = 'NM'; value = [o.valueQuantity.value != null ? o.valueQuantity.value : '', hl7Escape(o.valueQuantity.unit)].join('^'); }
+      else if (o.valueDateTime) { valueType = 'DT'; value = hl7Date(o.valueDateTime); }
+      else if (o.valueString) { valueType = 'ST'; value = hl7Escape(o.valueString); }
+      else if (o.valueBoolean !== undefined) { valueType = 'ST'; value = o.valueBoolean ? 'Y' : 'N'; }
+      return [
+        hl7Field('OBX', 2, 'Value Type', valueType),
+        hl7Field('OBX', 3, 'Observation Identifier', hl7CE(o.code)),
+        hl7Field('OBX', 5, 'Observation Value', value),
+        hl7Field('OBX', 11, 'Observation Result Status', HL7V2_STATUS_MAP[o.status] || '')
+      ];
+    }
+    function hl7SPM_Specimen(s) {
+      var placerId = (s.identifier || []).map(hl7CX).filter(Boolean)[0] || '';
+      return [
+        hl7Field('SPM', 2, 'Specimen ID', placerId),
+        hl7Field('SPM', 4, 'Specimen Type', hl7CE(s.type)),
+        hl7Field('SPM', 8, 'Specimen Source Site', s.collection && s.collection.bodySite ? hl7CE(s.collection.bodySite) : ''),
+        hl7Field('SPM', 30, 'Accession ID', s.accessionIdentifier ? hl7CX(s.accessionIdentifier) : '')
+      ];
+    }
+    function hl7DG1_Condition(c) {
+      return [
+        hl7Field('DG1', 3, 'Diagnosis Code – DG1', hl7CE(c.code)),
+        hl7Field('DG1', 5, 'Diagnosis Date/Time', hl7Date(c.onsetDateTime) || hl7Date(c.recordedDate))
+      ];
+    }
+    function hl7TXA_DocumentReference(doc) {
+      return [
+        hl7Field('TXA', 2, 'Document Type', doc.type ? hl7CE(doc.type) : ''),
+        hl7Field('TXA', 6, 'Origination Date/Time', hl7Date(doc.date, true)),
+        hl7Field('TXA', 17, 'Unique Document Number', (doc.identifier && doc.identifier[0] && doc.identifier[0].value) || ''),
+        hl7Field('TXA', 19, 'Document Completion Status', (doc.status || '').toUpperCase())
+      ];
+    }
+    function hl7NK1_FamilyMemberHistory(fmh) {
+      return [
+        hl7Field('NK1', 1, 'Set ID – NK1', '1'),
+        hl7Field('NK1', 2, 'Name', hl7Escape(fmh.name)),
+        hl7Field('NK1', 3, 'Relationship', fmh.relationship ? hl7CE(fmh.relationship) : '')
+      ];
+    }
+    function fhirToHl7v2(resource) {
+      if (!resource || !resource.resourceType) return [{ key: '—', label: '', value: 'No HL7 v2 mapping available.' }];
+      switch (resource.resourceType) {
+        case 'Patient': return hl7PID(resource);
+        case 'ServiceRequest': return hl7OrderSegments(resource);
+        case 'DiagnosticReport': return hl7OBR_DiagnosticReport(resource);
+        case 'Observation': return hl7OBX_Observation(resource);
+        case 'Specimen': return hl7SPM_Specimen(resource);
+        case 'Condition': return hl7DG1_Condition(resource);
+        case 'DocumentReference': return hl7TXA_DocumentReference(resource);
+        case 'FamilyMemberHistory': return hl7NK1_FamilyMemberHistory(resource);
+        default: return [{ key: '—', label: '', value: 'No HL7 v2 field mapping implemented yet for resource type "' + resource.resourceType + '".' }];
+      }
     }
   </script>
 </body>
