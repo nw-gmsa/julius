@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+  <p><a href="{{ request.script_root }}/pathology">← Back to Pathology Explorer search</a></p>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  {% if patient %}
+    <div class="patient-banner">
+      <h2>{{ patient|human_name }}</h2>
+      <div class="demographics">
+        <span><span class="label">DOB:</span> {{ patient.birthDate or "—" }}</span>
+        <span><span class="label">Gender:</span> {{ patient.gender or "—" }}</span>
+        {% for ident in patient|all_identifiers %}
+          <span><span class="label">ID:</span> {{ ident }}</span>
+        {% endfor %}
+        <span><span class="label">FHIR ID:</span> {{ patient_id }}</span>
+      </div>
+    </div>
+  {% else %}
+    <h1>Patient {{ patient_id }}</h1>
+    <p class="muted">Patient demographics unavailable.</p>
+  {% endif %}
+
+  <h2>Diagnostic reports ({{ reports|length }})</h2>
+  <p class="muted">Every DiagnosticReport Epic has for this patient — pathology and genomics alike — each with its resolvable Observation results below it.</p>
+  {% if reports %}
+    {% for r in reports %}
+      <div class="card">
+        <strong>{{ r.code|code_text }}</strong>
+        <span class="muted">— {{ r.status or "—" }}, {{ r.effectiveDateTime or r.issued or "no date" }}</span>
+        <span class="muted">— Category: {{ r.category|map('code_text')|join(", ") if r.category else "—" }}</span>
+        {% set obs_list = report_observations.get(r.id, []) %}
+        {% if obs_list %}
+          <table>
+            <tr><th>Result</th><th>Value</th><th>Reference range</th><th>Flag</th></tr>
+            {% for o in obs_list %}
+              <tr>
+                <td>{{ o.code|code_text }}</td>
+                <td>{{ o|obs_value }}</td>
+                <td>
+                  {% if o.referenceRange %}
+                    {{ o.referenceRange[0].text or
+                       (o.referenceRange[0].low.value ~ '–' ~ o.referenceRange[0].high.value
+                        if o.referenceRange[0].low and o.referenceRange[0].high else "—") }}
+                  {% else %}—{% endif %}
+                </td>
+                <td>{{ o.interpretation[0]|code_text if o.interpretation else "—" }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        {% else %}
+          <p class="muted">No resolvable Observation results for this report.</p>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="muted">No reports found.</p>
+  {% endif %}
+{% endblock %}

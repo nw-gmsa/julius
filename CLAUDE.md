@@ -1886,9 +1886,17 @@ haven't been exercised against a live NHS North West Genomics IG server:
 ### Epic FHIR connectivity (`epic_client.py`)
 
 A second, separate FHIR integration alongside `fhir_client.py`'s
-`FhirClient` — **deliberately decoupled from the rest of this app during
-development**: nothing here cross-references a NW GMSA `Patient`/order/
-report id, and no existing route calls into this module. Where
+`FhirClient`, surfaced in the app as the **Pathology Explorer** nav item
+(renamed from "Epic" — see "Pathology Explorer" further down this
+section) — nothing here cross-references a NW GMSA `Patient`/order/report
+id, and `app.py`'s `/pathology*` routes are the only ones that call into
+this module; every other route still only touches `g.client`/the NW
+GMSA `FhirClient` session. The nav's own home link was renamed too, from
+"Lab Explorer" to **"NW Genomic Explorer"** (`templates/base.html`,
+both the `<title>` and the nav's `&larr;` link back to `/`) — now that
+there's a second, unrelated FHIR-backed screen in the same nav, the
+original generic "Lab Explorer" name no longer clearly meant *this
+app's own NW Genomics server* specifically. Where
 `FhirClient` authenticates per-user via HTTP Basic against the NW GMSA
 server this whole app is otherwise built around, `EpicClient`
 authenticates as a registered **backend application** (no user session,
@@ -1910,7 +1918,26 @@ value comes from environment variables with no default
 optional — see `epic_client.py`'s `EpicClient.config()` docstring for
 all of them). Needs `pyjwt[crypto]` (RS384 JWT signing; Python's
 standard library can't do RSA signing on its own) — added to
-`requirements.txt`.
+`requirements.txt`. **`.env` is only actually read if something calls
+`load_dotenv()`** — `app.py` does this once, right after its imports
+(before `app = Flask(...)`), since every env var in this app (Epic's
+included) is read lazily inside a function/`__init__` rather than at
+import time, so it only needs to run before the first request, not
+before the other imports. This was missing for a while (the whole point
+of `python-dotenv` being in `requirements.txt`), which meant a fully
+filled-in `.env` had no effect at all unless the values were also
+`export`ed in the shell — the actual root cause the one time an "Epic
+login isn't working" report was debugged end-to-end, alongside two
+separate contributing issues that also had to be fixed before
+`EpicClient.verify_connection()` succeeded: `pyjwt` not actually
+installed in the venv despite being in `requirements.txt` (re-run `pip
+install -r requirements.txt`), and the local `epic_private_key.pem`
+(git-ignored, per `.gitignore`'s `*.pem`/`/epic_private_key*`) missing
+from a fresh checkout — regenerate it with
+`scripts/generate_epic_jwks.py --kid <matching EPIC_JWT_KID> --replace`
+*only* if the original truly can't be recovered, since replacing it
+invalidates whatever Epic already has registered until the new public
+half in `epic/jwks.json` is committed, pushed, and re-fetched by Epic.
 
 **The JWKS Epic verifies these JWTs against is hosted from this GitHub
 project, not served by the Flask app** —
@@ -1941,14 +1968,117 @@ against the sandbox: fetches the server's `CapabilityStatement`
 first. `EpicClient.get(path, params=None)` is a generic authenticated
 FHIR GET behind everything else here.
 
+**Pathology Explorer** (`/pathology`, `/pathology/search`,
+`/pathology/patient/<id>`, `app.py`) — the nav item renamed from "Epic"
+above, and the first thing in this app that actually calls into
+`epic_client.py` from a route. Deliberately
+broader than the NW Genomics side: Epic's `DiagnosticReport` set spans
+ordinary pathology/lab results as well as genomics, and this screen
+shows all of it for a patient (`diagnostic_reports_for_patient(patient_id,
+category=None)` — every category, not just genetics), not just the
+genomics-only slice the NW Genomics `/patient/<id>` page shows for its
+own server. Mirrors the NW Genomics side's search-then-browse shape
+(`/pathology` ~ `/`, `/pathology/search` ~ `/search`,
+`/pathology/patient/<id>` ~ `/patient/<id>`) but is much thinner — no
+orders, no specimens, no order chains, since `epic_client.py` doesn't
+read `ServiceRequest`/`Specimen` at all yet, only `Patient`/
+`DiagnosticReport`/`Observation` (plus `FamilyMemberHistory`, not wired
+into a route yet — see "Family history / pedigree" below).
+
+- **`EpicClient.search_patients(family=None, given=None, birthdate=None,
+  identifier=None, patient_id=None)`** / **`get_patient(patient_id)`** —
+  the Pathology Explorer's counterpart to `FhirClient.search_patients()`/
+  `get_patient()`. `identifier` takes priority over name/DOB fields if
+  both are given, rather than combining them into one query. Refuses to
+  run a fully unfiltered query (`[]` if nothing at all is given) — same
+  not-worth-the-risk stance `FhirClient.search_patients()`/
+  `search_organizations()` take against their own server (see "413s on
+  unfiltered system-wide searches" above), though as it turns out **Epic
+  enforces this itself anyway**: a bare `Patient?_count=20` with no
+  `_id`/demographic param, tried directly against the sandbox, comes
+  back `400` with `"This resource requires demographics or _id parameter
+  for searching."` (`DiagnosticReport` has the same guard: `"...requires
+  a patient or _id parameter for searching."`) — there's no wildcard/
+  browse-everything path on Epic's side to fall back to even if this
+  app wanted one.
+- **Name search (`family`/`given`) is confirmed *not* to find a patient
+  known to exist, on this backend client** — `family=Lopez,
+  given=Camila` against Epic's sandbox reliably comes back a genuine,
+  error-free zero-match for a patient (Camila Lopez) that direct id/MRN
+  lookup finds immediately. **`identifier` (MRN, with or without the
+  `urn:oid:1.2.840.114350.1.13.0.1.7.5.737384.14|` system prefix) and
+  direct `patient_id` (a FHIR id) both work, verified directly** against
+  several of the patients in `docs/epic-sandbox-test-patients.md`. Not
+  yet root-caused *why* name search comes back empty specifically for a
+  backend/system-level client (as opposed to Epic's interactive
+  patient-facing sandbox, which is what the well-known named test
+  patients like "Camila Lopez" are primarily documented for) — until
+  that's understood, `pathology_index.html`'s search form should keep
+  leading with identifier/patient-id fields rather than name, and anyone
+  extending this should reach for `docs/epic-sandbox-test-patients.md`'s
+  known-good MRNs/FHIR ids rather than guessing a name.
+- **`EpicClient._entries(bundle, resource_type)`** — every
+  `Bundle`-returning method (`search_patients()`,
+  `diagnostic_reports_for_patient()`, `family_history_for_patient()`)
+  goes through this rather than a bare `[e["resource"] for e in entries
+  if "resource" in e]`. Confirmed directly against Epic's sandbox: a
+  zero-match search doesn't come back with an empty `entry` list, it
+  bundles one entry wrapping an `OperationOutcome` ("Resource request
+  returns no results.", warning severity) — a naive filter treated that
+  as if it were a matched `Patient`/`DiagnosticReport`/etc, which was a
+  real bug hit directly while building the Pathology Explorer
+  (`search_patients(family="Smith")` returning one result with a blank
+  name and a dead `/pathology/patient/` link for a search that had
+  actually matched nobody). This also means
+  `diagnostic_reports_for_patient()`'s `not entries` fallback-to-
+  unfiltered-search check could never previously have triggered on a
+  real zero-match response, since `entries` was never actually empty —
+  fixed as part of the same change.
+- **`docs/epic-sandbox-test-patients.md`** lists the confirmed-real test
+  patients (name, FHIR id, external id, MRN, and which FHIR resource
+  types each one actually has data for) discovered while getting this
+  screen working end-to-end — Epic's own public testing-guide docs
+  name several of these patients but not their ids/MRNs, and the
+  dedicated sandbox-test-patients doc page is JS-rendered (not
+  scrapable). Of the seven listed, only **Camila Lopez** and **Warren
+  McGinnis** have `DiagnosticReport` data — verified end-to-end via
+  `/pathology` (Lopez: 7 reports including 2 Pharmacogenomic Panels;
+  McGinnis: Stress test + Cholesterol total) — the other five are
+  scoped to different resource types (conditions, medications,
+  immunizations, documents, ...) and will resolve as a patient but show
+  nothing under "Diagnostic reports".
+- **`epic_client.py`'s `KNOWN_SANDBOX_TEST_PATIENTS`** is that same
+  patient list as data (name/`fhir_id`/`external_id`/`mrn`/
+  `has_diagnostic_reports`), and `pathology_index.html` renders it as a
+  "Known sandbox test patients" quick-select table — a direct
+  `/pathology/patient/<fhir_id>` link per row — on both `/pathology`
+  and its `/pathology/search` results page. This exists specifically
+  *because* name search doesn't reliably work here (see above): without
+  a known-good id to jump straight to, there'd be no reliable way to
+  reach a real patient on this sandbox through the UI at all.
+- **The patient page's demographics render as a banner** (`.patient-banner`
+  in `templates/base.html`, a shaded card above "Diagnostic reports"
+  rather than a plain `<table>`) — name as the heading, then DOB/gender/
+  every identifier (via the new `all_identifiers` Jinja filter,
+  `app.py` — the same generic "show every identifier" formatter the
+  Cepheid Test Results screen already used internally, now also
+  registered as a filter) inline underneath, plus the FHIR id itself.
+  "Diagnostic reports" (renamed from "Pathology & genomics reports" —
+  same data, `reports`/`report_observations`) follows directly below the
+  banner, each report card still showing its resolved Observation
+  results table as before.
+
 **Genomic reports** — `diagnostic_reports_for_patient(patient_id,
 category=DIAGNOSTIC_REPORT_GENETICS_CATEGORY)` searches `DiagnosticReport`
 by the same HL7 v2-0074 `"GE"` category `fhir_client.py` uses for NW
 GMSA, falling back to an unfiltered patient search if the categorized
 one comes back empty (same try-then-fall-back pattern as
-`fhir_client.py`'s category searches) — a real HL7-standard code, but
-*not* confirmed against Epic specifically, since the public sandbox has
-no genomics test data to check it against. `observations_for_report(report)`
+`fhir_client.py`'s category searches) — a real HL7-standard code, still
+*not* confirmed as the exact category Epic's sandbox tags its genomics
+reports with (Camila Lopez's 2 "Pharmacogenomic Panel" reports, found via
+the Pathology Explorer's `category=None` search, haven't been checked
+for whether `category=DIAGNOSTIC_REPORT_GENETICS_CATEGORY` alone would
+have found them too). `observations_for_report(report)`
 resolves the report's `result[]` Observation references, skipping (not
 raising on) any one that fails to resolve. Epic's specification portal
 separately confirms a dedicated `Observation.Search`/`.Read (Genomics)

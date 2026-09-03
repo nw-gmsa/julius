@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Pathology Explorer</h1>
+  <p class="muted">
+    Patient search against Epic (<code>epic_client.py</code>) — a separate
+    connection from the NW Genomics server this app is otherwise built
+    around. Covers pathology orders/reports, plus genomics.
+    <a href="{{ request.script_root }}/epic">Connection status →</a>
+  </p>
+
+  <form action="{{ request.script_root }}/pathology/search" method="get">
+    <p>
+      <input type="text" name="family" placeholder="Family name" value="{{ searched_family or '' }}">
+      <input type="text" name="given" placeholder="Given name" value="{{ searched_given or '' }}">
+      <input type="text" name="birthdate" placeholder="DOB (YYYY-MM-DD)" value="{{ searched_birthdate or '' }}">
+      <button type="submit">Search</button>
+    </p>
+  </form>
+
+  <form action="{{ request.script_root }}/pathology/search" method="get">
+    <p>
+      <input type="text" name="identifier" placeholder="Identifier (e.g. MRN)" value="{{ searched_identifier or '' }}">
+      or
+      <input type="text" name="patient_id" placeholder="Patient ID" value="{{ searched_id or '' }}">
+      <button type="submit">Search</button>
+    </p>
+  </form>
+
+  {% if error %}
+    <div class="error"><strong>Request failed:</strong> {{ error }}</div>
+  {% endif %}
+
+  {% if test_patients %}
+    <h2>Known sandbox test patients</h2>
+    <p class="muted">
+      Name search doesn't reliably find these for this app's
+      backend-services client (see <code>docs/epic-sandbox-test-patients.md</code>)
+      — jump straight to one by id instead. Only
+      <strong>Camila Lopez</strong> and <strong>Warren McGinnis</strong>
+      have DiagnosticReport data to show.
+    </p>
+    <table>
+      <tr><th>Name</th><th>MRN</th><th>Has reports?</th><th></th></tr>
+      {% for p in test_patients %}
+        <tr>
+          <td>{{ p.name }}</td>
+          <td>{{ p.mrn }}</td>
+          <td>{{ "Yes" if p.has_diagnostic_reports else "—" }}</td>
+          <td><a href="{{ request.script_root }}/pathology/patient/{{ p.fhir_id }}">View pathology data →</a></td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+  {% if patients is defined %}
+    <h2>Results ({{ patients|length }})</h2>
+    {% if patients %}
+      <table>
+        <tr><th>Name</th><th>DOB</th><th>ID</th><th></th></tr>
+        {% for p in patients %}
+          <tr>
+            <td>{{ p|human_name }}</td>
+            <td>{{ p.birthDate or "—" }}</td>
+            <td>{{ p.id }}</td>
+            <td><a href="{{ request.script_root }}/pathology/patient/{{ p.id }}">View pathology data →</a></td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p class="muted">No matches.</p>
+    {% endif %}
+  {% endif %}
+{% endblock %}

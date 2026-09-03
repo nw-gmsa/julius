@@ -10,10 +10,19 @@ from werkzeug.local import LocalProxy
 import requests
 import pandas as pd
 import plotly.express as px
+from dotenv import load_dotenv
 from fhir_client import FhirClient
 from iris_client import IrisClient
 from pdf_report import quality_report_pdf_bytes
-from epic_client import EpicClient, EPIC_FHIR_BASE_URL_DEFAULT
+from epic_client import EpicClient, EPIC_FHIR_BASE_URL_DEFAULT, KNOWN_SANDBOX_TEST_PATIENTS
+
+# Loads .env into the process environment (FHIR_BASE_URL, ESB_*, EPIC_*, ...)
+# — every env var this app reads is read lazily inside a function/__init__,
+# not at import time, so it's enough for this to run before any request
+# comes in; it doesn't need to precede the imports above. Does not override
+# variables already set in the real environment (e.g. by a deployment's own
+# process manager), same as load_dotenv()'s own default behaviour.
+load_dotenv()
 
 app = Flask(__name__)
 # Falls back to a random key if SECRET_KEY isn't set, which works fine for
@@ -412,6 +421,7 @@ app.jinja_env.filters["audit_correlation_id"] = FhirClient.audit_event_correlati
 app.jinja_env.filters["audit_query_text"] = FhirClient.audit_event_query_text
 app.jinja_env.filters["audit_recorded_date"] = audit_recorded_date
 app.jinja_env.filters["audit_recorded_time"] = audit_recorded_time
+app.jinja_env.filters["all_identifiers"] = all_identifiers
 
 
 @app.route("/", methods=["GET"])
@@ -2761,6 +2771,69 @@ def report_pdf(report_id):
     return Response(
         data, mimetype=content_type or "application/pdf",
         headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@app.route("/pathology", methods=["GET"])
+def pathology_index():
+    """Landing/search page for the Pathology Explorer — epic_client.py's
+    EpicClient counterpart to the NW Genomics side's '/' search page.
+    Deliberately separate from `g.client`/the NW GMSA session (see
+    CLAUDE.md's "Epic FHIR connectivity" section) — this page and
+    everything under /pathology only ever talks to Epic."""
+    return render_template("pathology_index.html", test_patients=KNOWN_SANDBOX_TEST_PATIENTS)
+
+
+@app.route("/pathology/search", methods=["GET"])
+def pathology_search():
+    family = request.args.get("family", "").strip()
+    given = request.args.get("given", "").strip()
+    birthdate = request.args.get("birthdate", "").strip()
+    identifier = request.args.get("identifier", "").strip()
+    patient_id = request.args.get("patient_id", "").strip()
+    error = None
+    patients = []
+    try:
+        if patient_id:
+            patients = EpicClient.search_patients(patient_id=patient_id)
+        elif identifier:
+            patients = EpicClient.search_patients(identifier=identifier)
+        elif family or given or birthdate:
+            patients = EpicClient.search_patients(
+                family=family or None, given=given or None, birthdate=birthdate or None,
+            )
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "pathology_index.html", patients=patients, error=error,
+        searched_family=family, searched_given=given, searched_birthdate=birthdate,
+        searched_identifier=identifier, searched_id=patient_id,
+        test_patients=KNOWN_SANDBOX_TEST_PATIENTS,
+    )
+
+
+@app.route("/pathology/patient/<patient_id>")
+def pathology_patient(patient_id):
+    """Patient-scoped Pathology Explorer view — every DiagnosticReport
+    Epic has for this patient (category=None, not just
+    DIAGNOSTIC_REPORT_GENETICS_CATEGORY — this screen deliberately
+    covers pathology as well as genomics, unlike the NW Genomics side),
+    plus each report's resolvable Observation results."""
+    error = None
+    patient = None
+    reports = []
+    report_observations = {}
+    try:
+        patient = EpicClient.get_patient(patient_id)
+        reports = EpicClient.diagnostic_reports_for_patient(patient_id, category=None)
+        for report in reports:
+            if report.get("id"):
+                report_observations[report["id"]] = EpicClient.observations_for_report(report)
+    except Exception as e:
+        error = str(e)
+    return render_template(
+        "pathology_patient.html", patient_id=patient_id, patient=patient,
+        reports=reports, report_observations=report_observations, error=error,
     )
 
 

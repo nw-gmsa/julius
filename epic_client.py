@@ -92,6 +92,38 @@ EPIC_FHIR_BASE_URL_DEFAULT = "https://fhir.epic.com/interconnect-fhir-oauth/api/
 #: searches already use.
 DIAGNOSTIC_REPORT_GENETICS_CATEGORY = "http://terminology.hl7.org/CodeSystem/v2-0074|GE"
 
+#: Named patients on Epic's public non-production sandbox, confirmed
+#: directly (FHIR id verified via a real Patient/<id> read, MRN verified
+#: via a real Patient?identifier=<mrn> search returning the same id —
+#: see docs/epic-sandbox-test-patients.md for the full writeup) rather
+#: than guessed from Epic's own docs, which name several of these
+#: patients but don't publish their ids/MRNs anywhere scrapable. Backing
+#: data for the Pathology Explorer's "known test patients" quick-select
+#: (see /pathology in app.py) — name search doesn't reliably find these
+#: for a backend/system-level client (see search_patients()'s docstring),
+#: so a hardcoded list of known-good ids/MRNs is what actually makes the
+#: sandbox usable here, not a live directory lookup. `has_diagnostic_reports`
+#: is only True for the two patients confirmed (end-to-end, via
+#: /pathology) to actually have DiagnosticReport data — the other five
+#: resolve fine as a patient but the Pathology Explorer's report list
+#: comes back empty for them.
+KNOWN_SANDBOX_TEST_PATIENTS = [
+    {"name": "Camila Lopez", "fhir_id": "erXuFYUfucBZaryVksYEcMg3",
+     "external_id": "Z6129", "mrn": "203713", "has_diagnostic_reports": True},
+    {"name": "Derrick Lin", "fhir_id": "eq081-VQEgP8drUUqCWzHfw3",
+     "external_id": "Z6127", "mrn": "203711", "has_diagnostic_reports": False},
+    {"name": "Desiree Powell", "fhir_id": "eAB3mDIBBcyUKviyzrxsnAw3",
+     "external_id": "Z6130", "mrn": "203714", "has_diagnostic_reports": False},
+    {"name": "Elijah Davis", "fhir_id": "egqBHVfQlt4Bw3XGXoxVxHg3",
+     "external_id": "Z6125", "mrn": "203709", "has_diagnostic_reports": False},
+    {"name": "Linda Ross", "fhir_id": "eIXesllypH3M9tAA5WdJftQ3",
+     "external_id": "Z6128", "mrn": "203712", "has_diagnostic_reports": False},
+    {"name": "Olivia Roberts", "fhir_id": "eh2xYHuzl9nkSFVvV3osUHg3",
+     "external_id": "Z6131", "mrn": "203715", "has_diagnostic_reports": False},
+    {"name": "Warren McGinnis", "fhir_id": "e0w0LEDCYtfckT6N.CkJKCw3",
+     "external_id": "Z6126", "mrn": "203710", "has_diagnostic_reports": True},
+]
+
 #: The HL7 v3-RoleCode system FamilyMemberHistory.relationship is bound
 #: to by FHIR R4's own standard (extensible) binding — confirmed per
 #: spec, not confirmed against Epic's sandbox specifically (see
@@ -377,6 +409,84 @@ class EpicClient:
         resp.raise_for_status()
         return resp.json()
 
+    @staticmethod
+    def _entries(bundle, resource_type):
+        """Bundle.entry[].resource for entries whose resourceType matches
+        `resource_type` — every search method below goes through this
+        rather than a bare `[e["resource"] for e in entries if
+        "resource" in e]`. Confirmed directly against Epic's sandbox: a
+        zero-match search doesn't just come back with an empty `entry`
+        list, it bundles one entry wrapping an OperationOutcome
+        ("Resource request returns no results.", warning severity) —
+        the same style of quirk fhir_client.py has hit on its own server
+        (see CLAUDE.md's ctDNA summary section, "not by trusting
+        Bundle.entry.search.mode"), just via resource type instead. A
+        naive filter treats that OperationOutcome as if it were a
+        matched Patient/DiagnosticReport/etc — this was a real bug hit
+        directly (search_patients() returning one result with a blank
+        name/id for a search that actually matched nothing), not just a
+        theoretical one; also means diagnostic_reports_for_patient()'s
+        `not entries` fallback check couldn't previously trigger at all,
+        since `entries` was never actually empty on a real zero-match
+        response."""
+        entries = bundle.get("entry") or []
+        return [
+            e["resource"] for e in entries
+            if (e.get("resource") or {}).get("resourceType") == resource_type
+        ]
+
+    # ------------------------------------------------------------------
+    # Patient search (Pathology Explorer)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_patient(cls, patient_id):
+        """Fetch a single Patient resource by id — the Pathology
+        Explorer's counterpart to FhirClient.get_patient()."""
+        return cls.get(f"Patient/{patient_id}")
+
+    @classmethod
+    def search_patients(cls, family=None, given=None, birthdate=None, identifier=None, patient_id=None):
+        """Patient search against the Epic FHIR endpoint — the Pathology
+        Explorer's counterpart to FhirClient.search_patients(). Epic's
+        Patient.Search (R4) doesn't support a single free-text `name`
+        param the way the NW GMSA server does, so this takes
+        `family`/`given`/`birthdate` separately (a combination Epic's
+        own testing guide documents for a demographic search) or
+        `identifier` (e.g. an MRN) as an alternative, or `patient_id`
+        for a direct lookup by id (mirroring
+        FhirClient.search_patients()'s own patient_id shortcut — a 404
+        is swallowed into `[]` rather than raised, same as that method).
+        `identifier` takes priority if given alongside name/DOB fields,
+        rather than combining both into one query. Refuses to run a
+        completely unfiltered query (returns `[]` if nothing at all is
+        given) — same not-worth-the-risk stance FhirClient.search_patients()/
+        search_organizations() take against their own server (see
+        CLAUDE.md's "413s on unfiltered system-wide searches"), even
+        though Epic's sandbox hasn't shown the same 413 behaviour; there's
+        no reason to ever fire a fully unscoped Patient search against a
+        live FHIR server. Returns a plain list of resources
+        (Bundle.entry[].resource), not a Bundle."""
+        if patient_id:
+            try:
+                return [cls.get_patient(patient_id)]
+            except requests.HTTPError:
+                return []
+        params = {}
+        if identifier:
+            params["identifier"] = identifier
+        else:
+            if family:
+                params["family"] = family
+            if given:
+                params["given"] = given
+            if birthdate:
+                params["birthdate"] = birthdate
+        if not params:
+            return []
+        bundle = cls.get("Patient", params=params)
+        return cls._entries(bundle, "Patient")
+
     @classmethod
     def verify_connection(cls):
         """A minimal end-to-end check: fetches the server's
@@ -424,11 +534,11 @@ class EpicClient:
         if category:
             params["category"] = category
         bundle = cls.get("DiagnosticReport", params=params)
-        entries = bundle.get("entry") or []
-        if not entries and category:
+        reports = cls._entries(bundle, "DiagnosticReport")
+        if not reports and category:
             bundle = cls.get("DiagnosticReport", params={"patient": patient_id})
-            entries = bundle.get("entry") or []
-        return [e["resource"] for e in entries if "resource" in e]
+            reports = cls._entries(bundle, "DiagnosticReport")
+        return reports
 
     @classmethod
     def observations_for_report(cls, report):
@@ -472,7 +582,7 @@ class EpicClient:
         Observation — see module docstring). Returns a plain list of
         resources, not a Bundle."""
         bundle = cls.get("FamilyMemberHistory", params={"patient": patient_id})
-        return [e["resource"] for e in (bundle.get("entry") or []) if "resource" in e]
+        return cls._entries(bundle, "FamilyMemberHistory")
 
     @staticmethod
     def relationship_info(family_member_history):
