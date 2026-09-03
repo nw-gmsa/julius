@@ -213,6 +213,67 @@ def all_identifiers(resource):
     return entries
 
 
+#: Labels for epic_client.py's group_family_history() generation keys —
+#: only the common few generations get a specific name (matching the
+#: generations FAMILY_RELATIONSHIP_INFO's codes actually reach: parents/
+#: grandparents/great-grandparents, children/grandchildren), anything
+#: further out falls back to a generic "N generations up/down" label
+#: rather than needing this table extended for a code that's never come
+#: up in practice.
+FAMILY_GENERATION_LABELS = {
+    3: "Great-grandparents", 2: "Grandparents", 1: "Parents", 0: "Same generation",
+    -1: "Children", -2: "Grandchildren",
+}
+
+
+def family_generation_label(generation):
+    """Human label for one of group_family_history()'s top-level keys —
+    an int generation (positive = ancestors, negative = descendants, 0 =
+    same generation) or the literal string "other" for a relationship
+    code with no known generation (see FAMILY_RELATIONSHIP_INFO)."""
+    if generation == "other":
+        return "Other relatives"
+    if generation in FAMILY_GENERATION_LABELS:
+        return FAMILY_GENERATION_LABELS[generation]
+    if generation > 0:
+        return f"Ancestors ({generation} generations up)"
+    return f"Descendants ({-generation} generations down)"
+
+
+def family_generation_sort_key(generation):
+    """Sort key ordering group_family_history()'s generation keys oldest
+    ancestor first, down through descendants, with "other" last —
+    pedigree reading order, not the arbitrary dict/insertion order
+    group_family_history() itself builds."""
+    if generation == "other":
+        return (1, 0)
+    return (0, -generation)
+
+
+def family_side_sort_key(side):
+    """Sort key for group_family_history()'s per-generation side keys —
+    maternal before paternal before "unspecified", rather than whatever
+    order Python happened to insert them in."""
+    return ({"maternal": 0, "paternal": 1}.get(side, 2), side)
+
+
+def family_history_sections(family_member_histories):
+    """epic_client.py's group_family_history() output, reshaped into a
+    flat, display-ready ordering for the Pathology Explorer's Family
+    history section: a list of (generation_label, [(side, entries), ...])
+    tuples, generations oldest-ancestor-first then "Other relatives"
+    last, sides maternal/paternal/unspecified within each."""
+    groups = EpicClient.group_family_history(family_member_histories)
+    sections = []
+    for generation in sorted(groups.keys(), key=family_generation_sort_key):
+        sides = groups[generation]
+        side_entries = [
+            (side, sides[side]) for side in sorted(sides.keys(), key=family_side_sort_key)
+        ]
+        sections.append((family_generation_label(generation), side_entries))
+    return sections
+
+
 def obs_value(obs):
     """Pull whichever value[x] field is populated on an Observation."""
     if "valueQuantity" in obs:
@@ -2818,28 +2879,34 @@ def pathology_patient(patient_id):
     Epic has for this patient (category=None, not just
     DIAGNOSTIC_REPORT_GENETICS_CATEGORY — this screen deliberately
     covers pathology as well as genomics, unlike the NW Genomics side),
-    each report's resolvable Observation results, plus ServiceRequest
-    (orders) and DocumentReference (clinical documents)."""
+    each report's resolvable Observation results, Condition (problem
+    list), ServiceRequest (orders), DocumentReference (clinical
+    documents), and FamilyMemberHistory (family history/pedigree)."""
     error = None
     patient = None
     reports = []
     report_observations = {}
+    conditions = []
     service_requests = []
     document_references = []
+    family_history = []
     try:
         patient = EpicClient.get_patient(patient_id)
         reports = EpicClient.diagnostic_reports_for_patient(patient_id, category=None)
         for report in reports:
             if report.get("id"):
                 report_observations[report["id"]] = EpicClient.observations_for_report(report)
+        conditions = EpicClient.conditions_for_patient(patient_id)
         service_requests = EpicClient.service_requests_for_patient(patient_id)
         document_references = EpicClient.document_references_for_patient(patient_id)
+        family_history = EpicClient.family_history_for_patient(patient_id)
     except Exception as e:
         error = str(e)
     return render_template(
         "pathology_patient.html", patient_id=patient_id, patient=patient,
-        reports=reports, report_observations=report_observations,
+        reports=reports, report_observations=report_observations, conditions=conditions,
         service_requests=service_requests, document_references=document_references,
+        family_history=family_history, family_sections=family_history_sections(family_history),
         error=error,
     )
 

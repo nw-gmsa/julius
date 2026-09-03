@@ -597,6 +597,26 @@ class EpicClient:
         return cls._entries(bundle, "DocumentReference")
 
     @classmethod
+    def conditions_for_patient(cls, patient_id):
+        """Condition resources for `patient_id` — Epic's problem list,
+        distinct from a FamilyMemberHistory entry's own `condition[]`
+        (that's about a *relative's* condition, this is the patient's
+        own). A plain `Condition?patient=<id>` search; `system/
+        Condition.read` is granted for this app's client, same
+        already-granted-without-being-in-EPIC_SCOPE situation as
+        service_requests_for_patient()/document_references_for_patient()
+        above. Verified directly against Camila Lopez: 2 real Condition
+        resources, both category "Genomic Indicators"
+        (`https://open.epic.com/FHIR/StructureDefinition/condition-category`
+        code `"genomics"`) — pharmacogenomic metabolizer statuses
+        (e.g. "CYP2B6 Intermediate Metabolizer") tied via `.evidence[]`
+        back to the same Observation her Pharmacogenomic Panel
+        DiagnosticReports already surface, not a separate/unrelated
+        dataset. Returns a plain list of resources, not a Bundle."""
+        bundle = cls.get("Condition", params={"patient": patient_id})
+        return cls._entries(bundle, "Condition")
+
+    @classmethod
     def get_document_reference(cls, document_id):
         """Fetch a single DocumentReference resource by id — a direct
         `Read`, not a `Search`, so (unlike search_patients()/

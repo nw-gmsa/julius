@@ -69,6 +69,28 @@
     <p class="muted">No reports found.</p>
   {% endif %}
 
+  <h2>Conditions ({{ conditions|length }})</h2>
+  <p class="muted">Epic's problem list for this patient — includes genomic indicators (e.g. pharmacogenomic metabolizer status) as well as ordinary clinical conditions.</p>
+  {% if conditions %}
+    <table>
+      <tr><th>Condition</th><th>Category</th><th>Clinical status</th><th>Date</th><th></th></tr>
+      {% for c in conditions %}
+        <tr>
+          <td>{{ c.code|code_text }}</td>
+          <td>{{ c.category|map("code_text")|join(", ") if c.category else "—" }}</td>
+          <td>{{ c.clinicalStatus|code_text if c.clinicalStatus else "—" }}</td>
+          <td>{{ c.onsetDateTime or c.recordedDate or c.onsetString or "—" }}</td>
+          <td>
+            <button type="button" onclick="showFhirResource('cond-data-{{ loop.index }}', 'Condition/{{ c.id }}')">View FHIR</button>
+            <script type="application/json" id="cond-data-{{ loop.index }}">{{ c|tojson }}</script>
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="muted">No conditions found.</p>
+  {% endif %}
+
   <h2>Orders ({{ service_requests|length }})</h2>
   {% if service_requests %}
     <table>
@@ -116,5 +138,44 @@
     </table>
   {% else %}
     <p class="muted">No documents found.</p>
+  {% endif %}
+
+  <h2>Family history ({{ family_history|length }})</h2>
+  {% if family_sections %}
+    {% set ns = namespace(i=0) %}
+    {% for generation_label, side_entries in family_sections %}
+      <h3>{{ generation_label }}</h3>
+      {% for side, entries in side_entries %}
+        {% if side != "unspecified" %}<p class="muted">{{ side|capitalize }} side</p>{% endif %}
+        <table>
+          <tr><th>Relationship</th><th>Name</th><th>Conditions</th><th>Status</th><th></th></tr>
+          {% for entry in entries %}
+            {% set ns.i = ns.i + 1 %}
+            <tr>
+              <td>{{ entry.label }}</td>
+              <td>{{ entry.resource.name or "—" }}</td>
+              <td>{{ entry.resource.condition|map(attribute="code")|map("code_text")|join(", ") if entry.resource.condition else "—" }}</td>
+              <td>
+                {% if entry.resource.deceasedBoolean %}
+                  Deceased
+                {% elif entry.resource.deceasedAge %}
+                  Deceased ({{ entry.resource.deceasedAge.value }} {{ entry.resource.deceasedAge.unit or "" }})
+                {% elif entry.resource.deceasedDateTime %}
+                  Deceased ({{ entry.resource.deceasedDateTime }})
+                {% else %}
+                  {{ entry.resource.status or "—" }}
+                {% endif %}
+              </td>
+              <td>
+                <button type="button" onclick="showFhirResource('fh-data-{{ ns.i }}', 'FamilyMemberHistory/{{ entry.resource.id }}')">View FHIR</button>
+                <script type="application/json" id="fh-data-{{ ns.i }}">{{ entry.resource|tojson }}</script>
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% endfor %}
+    {% endfor %}
+  {% else %}
+    <p class="muted">No family history found.</p>
   {% endif %}
 {% endblock %}

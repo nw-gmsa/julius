@@ -2173,7 +2173,48 @@ table covering the full confirmed value set.
 `group_family_history(family_member_histories)` buckets a patient's list
 by `{generation_or_"other": {side_or_"unspecified": [...]}}` — an
 unrecognised relationship code lands in `"other"` rather than being
-dropped. No `app.py` route/template renders this yet.
+dropped. **Now rendered** by the Pathology Explorer's "Family history"
+section (`/pathology/patient/<id>`) — `app.py`'s
+`family_history_sections()` reshapes `group_family_history()`'s dict
+into a flat, ordered list of `(generation_label, [(side, entries), ...])`
+tuples (`family_generation_label()`/`family_generation_sort_key()`/
+`family_side_sort_key()`, all in `app.py`) so the template can just loop
+over it in reading order — oldest ancestor generation first, down
+through descendants, "Other relatives" last; maternal before paternal
+before unspecified within each generation — rather than the arbitrary
+dict/insertion order `group_family_history()` itself produces. Verified
+directly with synthetic multi-generation data (mother/father/sister/
+maternal grandmother/daughter/an "other"-bucket extended relative) since
+**none of the 7 patients in `docs/epic-sandbox-test-patients.md` have
+any real FamilyMemberHistory data** — the search itself succeeds
+cleanly (no error, no `_entries()` OperationOutcome-shaped surprise),
+it's a genuine zero for all seven. Each row shows the relative's name,
+relationship label, `condition[]` (joined via `code_text`), a
+deceased/status column (`deceasedBoolean`/`deceasedAge`/
+`deceasedDateTime`/`status`, checked in that order), and a "View FHIR"
+button.
+
+**Conditions** — `EpicClient.conditions_for_patient(patient_id)` is a
+plain `Condition?patient=<id>` search (`system/Condition.read` is
+granted for this client, same already-granted-without-being-in-
+EPIC_SCOPE situation as `service_requests_for_patient()`/
+`document_references_for_patient()` above), rendered as its own
+"Conditions" section on `/pathology/patient/<id>` between "Diagnostic
+reports" and "Orders" — Epic's problem list, distinct from a
+FamilyMemberHistory entry's own `condition[]` (that's about a
+*relative's* condition, this is the patient's own). **Verified directly
+against Camila Lopez: 2 real Condition resources, both category
+"Genomic Indicators"** (`https://open.epic.com/FHIR/StructureDefinition/
+condition-category` code `"genomics"`) — pharmacogenomic metabolizer
+statuses ("CYP2B6 Intermediate Metabolizer", "CYP2C9*6: AA (wildtype)")
+whose `.evidence[]` points back at the same Observation her
+Pharmacogenomic Panel DiagnosticReports already surface elsewhere on
+the page, not a separate/unrelated dataset — a real example of exactly
+the "pathology plus genomics" scope this whole screen was built for.
+Each row shows the condition, category, clinical status, and a date
+(`onsetDateTime`/`recordedDate`/`onsetString`, checked in that order,
+since which of these a given Condition populates varies), plus "View
+FHIR".
 
 ## Maintenance scripts (`scripts/`)
 
