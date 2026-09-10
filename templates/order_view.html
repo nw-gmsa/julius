@@ -60,7 +60,7 @@
     <h2>Samples</h2>
     {% if specimens %}
       <table>
-        <tr><th>Type</th><th>Collection date</th><th>Received date</th><th>Specimen identifier</th><th>ID</th></tr>
+        <tr><th>Type</th><th>Collection date</th><th>Received date</th><th>Specimen identifier</th><th>ID</th><th></th></tr>
         {% for s in specimens %}
           <tr>
             <td>{{ s.type|code_text }}</td>
@@ -68,6 +68,10 @@
             <td>{{ s|specimen_received }}</td>
             <td>{{ (s|specimen_identifier) or "—" }}</td>
             <td class="muted">{{ s.id }}</td>
+            <td>
+              <button type="button" onclick="showFhirResource('specimen-data-{{ loop.index }}', 'Specimen/{{ s.id }}')">View FHIR/V2</button>
+              <script type="application/json" id="specimen-data-{{ loop.index }}">{{ s|tojson }}</script>
+            </td>
           </tr>
         {% endfor %}
       </table>
@@ -75,7 +79,10 @@
       <p class="muted">No specimens found for this order.</p>
     {% endif %}
 
-    <h2>Test request</h2>
+    <h2>Test request
+      <button type="button" onclick="showFhirResource('order-data', 'ServiceRequest/{{ order.id }}')">View FHIR/V2</button>
+    </h2>
+    <script type="application/json" id="order-data">{{ order|tojson }}</script>
     <table>
       <tr><th>Test Directory Clinical Indication &amp; code</th><td>{{ (order.code|test_directory_code) or "—" }} — {{ order.code|code_text }}</td></tr>
       <tr><th>Reason for testing</th><td>{{ order|reason_code_reference }}</td></tr>
