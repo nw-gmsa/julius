@@ -59,7 +59,13 @@ import os
 import time
 import uuid
 import requests
-import jwt
+# Optional: pyjwt is only needed to sign Epic token requests, so a missing
+# install mustn't stop the rest of the app (which never touches Epic) from
+# starting — _build_client_assertion() raises a clear error instead.
+try:
+    import jwt
+except ImportError:
+    jwt = None
 from urllib3.exceptions import InsecureRequestWarning
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
@@ -280,8 +286,13 @@ class EpicClient:
             )
 
         if key_path:
-            with open(key_path, "r", encoding="utf-8") as f:
-                private_key_pem = f.read()
+            try:
+                with open(key_path, "r", encoding="utf-8") as f:
+                    private_key_pem = f.read()
+            except OSError as e:
+                raise RuntimeError(
+                    f"EpicClient is not configured — can't read EPIC_PRIVATE_KEY_PATH ({key_path}): {e}"
+                ) from e
         else:
             private_key_pem = key_inline
 
@@ -319,6 +330,11 @@ class EpicClient:
         client_id, aud=token endpoint, a fresh jti per request, exp a few
         minutes out). Raises jwt.InvalidKeyError if private_key_pem isn't
         a valid PEM-encoded RSA private key."""
+        if jwt is None:
+            raise RuntimeError(
+                "EpicClient needs the pyjwt package to sign token requests — "
+                "run `pip install -r requirements.txt`"
+            )
         now = int(time.time())
         claims = {
             "iss": client_id,

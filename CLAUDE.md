@@ -1918,7 +1918,12 @@ value comes from environment variables with no default
 optional — see `epic_client.py`'s `EpicClient.config()` docstring for
 all of them). Needs `pyjwt[crypto]` (RS384 JWT signing; Python's
 standard library can't do RSA signing on its own) — added to
-`requirements.txt`. **`.env` is only actually read if something calls
+`requirements.txt` — but imported optionally (`jwt = None` on
+`ImportError`), so the app still starts without it or any `EPIC_*`
+variable set: only an actual Epic call fails, with a `RuntimeError` the
+`/epic`/`/pathology*` routes already show as an error. `config()` also
+turns an unreadable `EPIC_PRIVATE_KEY_PATH` into a `RuntimeError` (not a
+bare `FileNotFoundError`) for the same reason. **`.env` is only actually read if something calls
 `load_dotenv()`** — `app.py` does this once, right after its imports
 (before `app = Flask(...)`), since every env var in this app (Epic's
 included) is read lazily inside a function/`__init__` rather than at
