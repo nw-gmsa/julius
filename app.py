@@ -62,6 +62,12 @@ LOGIN_EXEMPT_ENDPOINTS = {"login", "static"}
 #: directly for whoever knows to look" was the whole gate).
 ADMIN_USERNAMES = {"xKevin.Mayfield"}
 
+#: Password required to confirm a per-patient clear-down
+#: (/patient/<id>/clear-down) when client.is_production() — the extra
+#: gate that lets that screen be enabled on production at all.
+#: Hardcoded for now; move to an env var before this is relied on.
+CLEAR_DOWN_PASSWORD = "emis123admin"
+
 
 @app.before_request
 def _load_client():
@@ -1166,19 +1172,22 @@ def patient_clear_down(patient_id):
     clear_down_patient_and_record() (same, plus the Patient resource),
     the same distinction the admin screen's bulk clear-down makes.
 
-    Disabled entirely (both GET and POST) when client.is_production() —
-    the patient page also hides the link there, but that's just UI; this
-    is the actual gate, since a direct hit on this URL would otherwise
-    still work.
+    When client.is_production(), the POST additionally requires
+    CLEAR_DOWN_PASSWORD (a password field on the confirm form) — checked
+    here on the POST itself, not just shown in the UI, so a direct POST
+    without it still can't delete anything. A wrong password re-renders
+    the confirm page with an error rather than deleting.
     """
-    if client.is_production():
-        return render_template(
-            "patient_clear_down_confirm.html", patient_id=patient_id,
-            orders=[], reports=[], specimens=[], audit_events=[], error=None,
-            production_blocked=True,
-        ), 403
+    password_required = client.is_production()
 
-    if request.method == "POST":
+    if request.method == "POST" and password_required and not secrets.compare_digest(
+        request.form.get("password", "").encode(), CLEAR_DOWN_PASSWORD.encode()
+    ):
+        password_error = "Incorrect password — nothing was deleted."
+    else:
+        password_error = None
+
+    if request.method == "POST" and not password_error:
         error = None
         result = {"deleted": [], "failed": []}
         delete_patient_record = bool(request.form.get("delete_patient_record"))
@@ -1211,7 +1220,8 @@ def patient_clear_down(patient_id):
         "patient_clear_down_confirm.html", patient_id=patient_id,
         orders=orders, reports=reports, specimens=specimens,
         audit_events=audit_events, error=error,
-    )
+        password_required=password_required, password_error=password_error,
+    ), 403 if password_error else 200
 
 
 @app.route("/admin")

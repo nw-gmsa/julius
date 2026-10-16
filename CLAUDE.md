@@ -1354,7 +1354,14 @@ delete control (a link/crawler/back-button can trigger a GET but never a
 form POST), not something layered on afterward — don't "simplify" this
 into a single bare link.
 
-This route has **no auth, no CSRF token, and no rate limiting** — same as
+**On production (`client.is_production()`) it's enabled but
+password-gated** — it used to be blocked outright there. The confirm
+form adds a password field, and the POST is rejected (403, nothing
+deleted) unless it matches `app.CLEAR_DOWN_PASSWORD` (currently
+hardcoded, `secrets.compare_digest` comparison). Non-production servers
+need no password, same as before.
+
+This route has **no CSRF token and no rate limiting** — same as
 every other route in this app, but worth calling out specifically here
 since this one is destructive and irreversible rather than read-only. Only
 run this app somewhere trusted if the clear-down feature is reachable.

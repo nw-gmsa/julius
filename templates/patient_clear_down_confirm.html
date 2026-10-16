@@ -2,14 +2,9 @@
 {% block content %}
   <h1>Clear down patient {{ patient_id }}</h1>
 
-  {% if production_blocked %}
-    <div class="error">
-      <strong>Clear-down is disabled on this server.</strong>
-      <code>FHIR_BASE_URL</code> contains "prod", which this app treats as
-      a live production system — patient data can't be deleted from here.
-      <p><a href="{{ request.script_root }}/patient/{{ patient_id }}">Back to patient</a></p>
-    </div>
-  {% else %}
+  {% if password_error %}
+    <div class="error"><strong>{{ password_error }}</strong></div>
+  {% endif %}
 
   {% if error %}
     <div class="error"><strong>Request failed:</strong> {{ error }}</div>
@@ -97,10 +92,16 @@
         reports, specimens, and audit events above are deleted.
       </label>
     </p>
+    {% if password_required %}
+      <p>
+        <label>
+          Clear-down password (required on this production server):
+          <input type="password" name="password" required autocomplete="off">
+        </label>
+      </p>
+    {% endif %}
     <button type="submit" class="danger">Yes, permanently delete the above</button>
     &nbsp;
     <a href="{{ request.script_root }}/patient/{{ patient_id }}">Cancel</a>
   </form>
-
-  {% endif %}
 {% endblock %}
