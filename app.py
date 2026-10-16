@@ -66,7 +66,7 @@ ADMIN_USERNAMES = {"xKevin.Mayfield"}
 #: (/patient/<id>/clear-down) when client.is_production() — the extra
 #: gate that lets that screen be enabled on production at all.
 #: Hardcoded for now; move to an env var before this is relied on.
-CLEAR_DOWN_PASSWORD = "emis123admin"
+CLEAR_DOWN_PASSWORD = "Grosmont321admin"
 
 
 @app.before_request
