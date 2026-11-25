@@ -82,7 +82,7 @@ SMART_CONFIGURATION_PATH = "/.well-known/smart-configuration"
 
 #: Epic's own public non-production FHIR sandbox — a real, stable,
 #: publicly documented URL (not a secret, same reasoning as
-#: FhirClient.ESB_TOKEN_URL_DEFAULT having a hardcoded default), used as
+#: FhirClient.ESB_BASE_URL_DEFAULT having a hardcoded default), used as
 #: EPIC_FHIR_BASE_URL's default until a real MFT test endpoint replaces
 #: it. Confirmed directly (not guessed) — see
 #: https://fhir.epic.com/Documentation?docId=testingguide.

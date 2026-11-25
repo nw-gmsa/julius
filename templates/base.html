@@ -82,6 +82,15 @@
       </details>
       &nbsp;|&nbsp;
       <a href="{{ request.script_root }}/pathology">Pathology Explorer</a>
+      {% if not is_production %}
+        &nbsp;|&nbsp;
+        <details class="nav-dropdown">
+          <summary>Testing</summary>
+          <div class="dropdown-menu">
+            <a href="{{ request.script_root }}/testing/send-message">Send HL7 v2 / FHIR message</a>
+          </div>
+        </details>
+      {% endif %}
       {% if is_admin_user %}
         &nbsp;|&nbsp;
         <a href="{{ request.script_root }}/admin">Admin</a>

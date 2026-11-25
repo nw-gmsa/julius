@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block head %}
+  <style>
+    .code-editor { width: 100%; height: 480px; border: 1px solid #ccc; border-radius: 4px; display: none; }
+    .code-editor.small { height: 240px; }
+    .code-fallback { width: 100%; font-family: monospace; }
+    .response-pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 10px;
+                    border-radius: 4px; max-height: 480px; overflow: auto; overscroll-behavior: contain; }
+  </style>
+{% endblock %}
+{% block content %}
+  <h1>Send HL7 v2 / FHIR message</h1>
+  <p class="muted">
+    Test systems only. FHIR messages are POSTed to <code>{{ process_message_url }}</code>;
+    HL7 v2 messages are sent over MLLP to <code>{{ hl7v2_target }}</code>.
+  </p>
+
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+  {% if result %}
+    <div class="card">
+      <strong>Sent to <code>{{ result.target }}</code>.</strong>
+      {% if result.status %} HTTP {{ result.status }}.{% endif %}
+      {% if result.ack_code is defined %}
+        ACK code: <code>{{ result.ack_code or "—" }}</code>
+        {% if result.ack_code in ("AA", "CA") %}(accepted){% elif result.ack_code %}(<strong>not accepted</strong>){% endif %}
+      {% endif %}
+    </div>
+    {% if result.body %}
+      <h2>{% if result.ack_code is defined %}Acknowledgement{% else %}Raw ESB response{% endif %}</h2>
+      <pre class="response-pre">{{ result.body }}</pre>
+    {% endif %}
+    {% if result.hl7v2 %}
+      <h2>HL7 v2 message (from ESB response)</h2>
+      <pre class="response-pre">{{ result.hl7v2 }}</pre>
+    {% endif %}
+  {% endif %}
+
+  {% if message and message_type %}
+    <h2>{% if result or error %}Edit and resend{% else %}Preview{% endif %} —
+      {{ "FHIR" if message_type == "fhir" else "HL7 v2" }} message{% if filename %} ({{ filename }}){% endif %}</h2>
+    <form method="post" data-editor-form>
+      <input type="hidden" name="message_type" value="{{ message_type }}">
+      <input type="hidden" name="filename" value="{{ filename or '' }}">
+      <div class="code-editor" data-editor-for="message"
+           data-language="{{ 'json' if message_type == 'fhir' else 'plaintext' }}"></div>
+      <textarea id="message" name="message" rows="20" class="code-fallback">{{ message }}</textarea>
+      <p>
+        <button type="submit" name="action" value="send"
+                onclick="return confirm('Send this message to {{ process_message_url if message_type == 'fhir' else hl7v2_target }}?');">
+          {% if result or error %}Resend{% else %}Submit{% endif %}
+          {% if message_type == "fhir" %}to $process-message{% else %}to {{ hl7v2_target }} (MLLP){% endif %}
+        </button>
+        {% if message_type == "fhir" %}<button type="button" onclick="formatEditor('message')">Format JSON</button>{% endif %}
+        <a href="{{ request.script_root }}/testing/send-message">Start again with a new message</a>
+      </p>
+    </form>
+  {% else %}
+    <h2>Upload a message</h2>
+    <form method="post" enctype="multipart/form-data" data-editor-form>
+      <p><label>File (.json / .hl7 / .txt): <input type="file" name="message_file" accept=".json,.hl7,.txt,.er7,application/json,text/plain"></label></p>
+      <p class="muted">…or paste it:</p>
+      <div class="code-editor small" data-editor-for="message_text" data-language="auto"></div>
+      <textarea id="message_text" name="message_text" rows="10" class="code-fallback">{{ request.form.get('message_text', '') }}</textarea>
+      <p><button type="submit" name="action" value="upload">Upload</button></p>
+    </form>
+  {% endif %}
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
+  <script>
+    // Monaco upgrades each [data-editor-for] textarea in place; if the CDN
+    // can't be reached the plain textarea stays usable. On submit the
+    // editor's text is copied back into the textarea that's actually posted.
+    var editors = {};
+    function formatEditor(id) {
+      var ed = editors[id];
+      if (ed) { ed.getAction('editor.action.formatDocument').run(); return; }
+      var ta = document.getElementById(id);
+      try { ta.value = JSON.stringify(JSON.parse(ta.value), null, 2); } catch (e) { alert('Not valid JSON: ' + e.message); }
+    }
+    (function () {
+      if (typeof require === 'undefined') return;
+      var base = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min';
+      window.MonacoEnvironment = {
+        getWorkerUrl: function () {
+          return 'data:text/javascript;charset=utf-8,' + encodeURIComponent(
+            "self.MonacoEnvironment={baseUrl:'" + base + "/'};importScripts('" + base + "/vs/base/worker/workerMain.js');");
+        }
+      };
+      require.config({ paths: { vs: base + '/vs' } });
+      require(['vs/editor/editor.main'], function () {
+        document.querySelectorAll('[data-editor-for]').forEach(function (div) {
+          var ta = document.getElementById(div.dataset.editorFor);
+          var guess = function (text) { return /^\s*[{\[]/.test(text) ? 'json' : 'plaintext'; };
+          var lang = div.dataset.language === 'auto' ? guess(ta.value) : div.dataset.language;
+          div.style.display = 'block';
+          ta.style.display = 'none';
+          var ed = monaco.editor.create(div, {
+            value: ta.value, language: lang, automaticLayout: true, minimap: { enabled: false },
+            wordWrap: 'on', scrollBeyondLastLine: false, renderWhitespace: 'boundary'
+          });
+          if (div.dataset.language === 'auto') {
+            ed.onDidChangeModelContent(function () {
+              var l = guess(ed.getValue());
+              if (ed.getModel().getLanguageId() !== l) monaco.editor.setModelLanguage(ed.getModel(), l);
+            });
+          }
+          editors[ta.id] = ed;
+          ta.form.addEventListener('submit', function () { ta.value = ed.getValue(); });
+        });
+      });
+    })();
+  </script>
+{% endblock %}

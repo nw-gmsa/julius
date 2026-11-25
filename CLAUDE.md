@@ -30,9 +30,9 @@ export FHIR_BASE_URL="https://192.168.1.62/healthconnect/cdr/fhir/r4"
 # surfaces the server's own error_description), it likely requires an
 # explicit scope for this client:
 # export ESB_SCOPE="..."
-# ESB_TOKEN_URL/ESB_PROCESS_MESSAGE_URL default to this deployment's own
-# values (same host as FHIR_BASE_URL) and don't need setting unless
-# they change.
+# ESB_BASE_URL (e.g. https://192.168.1.56/healthconnect) is the base for
+# both ESB URLs: token = ESB_BASE_URL + "/oauth2/token", $process-message
+# = ESB_BASE_URL + "/ESB/$process-message".
 
 python3 app.py   # serves on http://localhost:5050 (override with PORT env var)
 ```
@@ -512,8 +512,10 @@ cache (`_esb_token_cache`, same reasoning as `_icb_boundary_cache`/
 `_genomic_test_directory_cache` above: not tied to who's logged in).
 
 - **Config is env-var only, read fresh on every call**
-  (`FhirClient.esb_config()`) — `ESB_TOKEN_URL`/`ESB_PROCESS_MESSAGE_URL`
-  default to this deployment's actual URLs (not secrets), but
+  (`FhirClient.esb_config()`) — both URLs are derived from
+  `ESB_BASE_URL` (`+ "/oauth2/token"` / `+ "/ESB/$process-message"`,
+  `ESB_TOKEN_PATH`/`ESB_PROCESS_MESSAGE_PATH`; `ESB_BASE_URL_DEFAULT` if
+  unset — not a secret), but
   `ESB_CLIENT_ID`/`ESB_CLIENT_SECRET` have **no default and are never
   hardcoded** — `esb_access_token()` raises a clear `RuntimeError` if
   they're unset, shown as-is on the result page. `verify_ssl` reuses
@@ -526,7 +528,8 @@ cache (`_esb_token_cache`, same reasoning as `_icb_boundary_cache`/
 - **Token flow**: client id/secret sent as HTTP Basic auth on the token
   request (`grant_type=client_credentials`, `scope` too if `ESB_SCOPE`
   is set), per this deployment's own setup — cached at class level
-  until 60s before `expires_in` runs out. A rejected token request
+  (keyed by token URL, so changing `ESB_BASE_URL` never reuses another
+  server's token) until 60s before `expires_in` runs out. A rejected token request
   raises `requests.HTTPError` with the authorization server's own
   `error`/`error_description` body (RFC 6749 §5.2) folded into the
   message — plain `response.raise_for_status()` only gives a generic
@@ -708,6 +711,25 @@ No expiry beyond the life of the process, same caveat as
 Reached from the nav ("Orders and Reports" → "New order"), or from a
 patient page's "Genomic test orders" section ("+ New order for this
 patient", pre-filling `patient_id` so that picker step is skipped).
+
+### Testing menu (`/testing`) — test systems only
+
+Nav "Testing" dropdown, hidden when `client.is_production()`; every
+`/testing*` path also 404s there (`_load_client()`).
+**`/testing/send-message`** — upload or paste a message, preview/edit it
+(type auto-detected by `FhirClient.detect_message_type()`: JSON resource
+→ FHIR, leading `MSH` → HL7 v2), then submit (JS `confirm()`):
+
+- **FHIR** → the same ESB `$process-message` as "Send to ESB"
+  (`send_fhir_message_to_esb()`, same token/401-retry, `ESB_BASE_URL`),
+  but the response body is surfaced on failure; an IIS HTML error page is
+  reduced to its headings. A 500 for every authenticated POST (even `{}`)
+  against 192.168.1.56 was server-side, not the message — tokens from
+  that host carry `iss: https://localhost/healthconnect/oauth2`.
+- **HL7 v2** → MLLP over TCP (`send_hl7v2_mllp()`: `<VT>msg<FS><CR>`,
+  line endings normalised to `\r`) to `HL7V2_HOST` (default:
+  `ESB_BASE_URL`'s host) : `HL7V2_PORT` (default 9980); shows the ACK and
+  its MSA-1 code.
 
 ### Reference resolution
 

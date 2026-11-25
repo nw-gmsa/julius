@@ -87,6 +87,10 @@ def _load_client():
     # orphaned clear-down, econcur import) in one check.
     if request.path.startswith("/admin") and session.get("username") not in ADMIN_USERNAMES:
         abort(403)
+    # Testing menu (/testing*) is for test systems only — 404 (not 403)
+    # on production, so it doesn't even advertise that it exists there.
+    if request.path.startswith("/testing") and fhir_client.is_production():
+        abort(404)
 
 
 # Existing routes/helpers below were all written against a module-level
@@ -1229,6 +1233,81 @@ def patient_clear_down(patient_id):
         audit_events=audit_events, error=error,
         password_required=password_required, password_error=password_error,
     ), 403 if password_error else 200
+
+
+@app.route("/testing")
+def testing_menu():
+    """Testing menu — test systems only (see _load_client())."""
+    return render_template("testing_menu.html")
+
+
+@app.route("/testing/send-message", methods=["GET", "POST"])
+def testing_send_message():
+    """Upload (or paste) an HL7 v2 or FHIR message, preview it, then
+    submit it to the test ESB — FHIR to $process-message, HL7 v2 over
+    MLLP. Two steps on one route: action=upload detects the type and
+    shows the preview; action=send actually sends (the only branch with
+    an external side effect). Nothing is written to the FHIR server."""
+    process_message_url, hl7v2_host, hl7v2_port = FhirClient.test_message_targets()
+    ctx = {
+        "process_message_url": process_message_url,
+        "hl7v2_target": f"{hl7v2_host}:{hl7v2_port}",
+        "message": None, "message_type": None, "filename": None,
+        "error": None, "result": None,
+    }
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "upload":
+            upload = request.files.get("message_file")
+            text = ""
+            if upload and upload.filename:
+                ctx["filename"] = upload.filename
+                raw = upload.read()
+                try:
+                    text = raw.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    text = raw.decode("latin-1")
+            else:
+                text = request.form.get("message_text", "")
+            if not text.strip():
+                ctx["error"] = "Choose a file or paste a message."
+            else:
+                ctx["message"] = text
+                ctx["message_type"] = FhirClient.detect_message_type(text)
+                if not ctx["message_type"]:
+                    ctx["error"] = ("Couldn't tell what kind of message this is — expected a FHIR JSON "
+                                    "resource (starting with '{') or an HL7 v2 message (starting with 'MSH').")
+        elif action == "send":
+            text = request.form.get("message", "")
+            # Re-detect from the (possibly edited) text, falling back to the
+            # type picked at upload so a half-edited message stays editable.
+            message_type = FhirClient.detect_message_type(text) or request.form.get("message_type")
+            ctx.update(message=text, message_type=message_type, filename=request.form.get("filename"))
+            try:
+                if message_type == "fhir":
+                    try:
+                        bundle = json.loads(text)
+                    except ValueError as e:
+                        raise ValueError(f"Message is not valid JSON — {e}") from None
+                    status, body = FhirClient.send_fhir_message_to_esb(bundle)
+                    hl7v2 = FhirClient.extract_hl7v2_message(body)
+                    ctx["result"] = {
+                        "target": process_message_url, "status": status,
+                        "hl7v2": hl7v2.replace("\r\n", "\n").replace("\r", "\n") if hl7v2 else None,
+                        "body": json.dumps(body, indent=2) if isinstance(body, (dict, list)) else body,
+                    }
+                elif message_type == "hl7v2":
+                    ack = FhirClient.send_hl7v2_mllp(text)
+                    ctx["result"] = {
+                        "target": ctx["hl7v2_target"],
+                        "ack_code": FhirClient.hl7v2_ack_code(ack),
+                        "body": ack.replace("\r\n", "\n").replace("\r", "\n"),
+                    }
+                else:
+                    ctx["error"] = "Unknown message type."
+            except Exception as e:
+                ctx["error"] = f"Send failed: {e}"
+    return render_template("testing_send_message.html", **ctx)
 
 
 @app.route("/admin")

@@ -5358,19 +5358,31 @@ class FhirClient:
     #: never hardcoded or committed. Same host as FHIR_BASE_URL's own
     #: default (192.168.1.62) — see esb_config() for why FHIR_VERIFY_SSL
     #: is reused for this endpoint's TLS verification too.
-    ESB_TOKEN_URL_DEFAULT = "https://192.168.1.62/healthconnect/oauth2/token"
-    ESB_PROCESS_MESSAGE_URL_DEFAULT = "https://192.168.1.62/healthconnect/ESB/$process-message"
+    #: Both ESB URLs are derived from ESB_BASE_URL (env var, else this
+    #: default): token = base + ESB_TOKEN_PATH, $process-message = base +
+    #: ESB_PROCESS_MESSAGE_PATH.
+    ESB_BASE_URL_DEFAULT = "https://192.168.1.62/healthconnect"
+    ESB_TOKEN_PATH = "/oauth2/token"
+    ESB_PROCESS_MESSAGE_PATH = "/ESB/$process-message"
 
     #: Class-level OAuth2 token cache — not per-request, since a client-
     #: credentials token is valid for every request until it expires
     #: regardless of who's using this app.
-    _esb_token_cache = {"access_token": None, "expires_at": 0}
+    #: Keyed by token URL, so changing ESB_BASE_URL never reuses a token
+    #: issued by a different authorization server.
+    _esb_token_cache = {}
+
+    @classmethod
+    def esb_base_url(cls):
+        """ESB_BASE_URL (e.g. https://192.168.1.56/healthconnect), without
+        a trailing slash."""
+        return os.environ.get("ESB_BASE_URL", cls.ESB_BASE_URL_DEFAULT).strip().rstrip("/")
 
     @classmethod
     def esb_config(cls):
         """(token_url, process_message_url, client_id, client_secret,
         verify_ssl, scope) — read fresh from the environment on every
-        call (ESB_TOKEN_URL/ESB_PROCESS_MESSAGE_URL/ESB_CLIENT_ID/
+        call (ESB_BASE_URL/ESB_CLIENT_ID/
         ESB_CLIENT_SECRET/ESB_SCOPE), same lazy-env-var pattern
         FhirClient.__init__ uses for FHIR_BASE_URL/FHIR_USER/
         FHIR_PASSWORD, rather than freezing them at import time.
@@ -5383,8 +5395,8 @@ class FhirClient:
         `invalid_scope`/`invalid_request` if no `scope` is sent at all,
         so this is opt-in per deployment rather than guessed at."""
         return (
-            os.environ.get("ESB_TOKEN_URL", cls.ESB_TOKEN_URL_DEFAULT),
-            os.environ.get("ESB_PROCESS_MESSAGE_URL", cls.ESB_PROCESS_MESSAGE_URL_DEFAULT),
+            cls.esb_base_url() + cls.ESB_TOKEN_PATH,
+            cls.esb_base_url() + cls.ESB_PROCESS_MESSAGE_PATH,
             os.environ.get("ESB_CLIENT_ID"),
             os.environ.get("ESB_CLIENT_SECRET"),
             os.environ.get("FHIR_VERIFY_SSL", "false").lower() == "true",
@@ -5420,7 +5432,7 @@ class FhirClient:
                 "ESB_CLIENT_ID / ESB_CLIENT_SECRET are not set as environment variables "
                 "— required to authenticate to the ESB before an order can be sent."
             )
-        cached = cls._esb_token_cache
+        cached = cls._esb_token_cache.get(token_url) or {"access_token": None, "expires_at": 0}
         if not force_refresh and cached["access_token"] and time.time() < cached["expires_at"]:
             return cached["access_token"]
         data = {"grant_type": "client_credentials"}
@@ -5447,7 +5459,8 @@ class FhirClient:
         token_data = resp.json()
         access_token = token_data["access_token"]
         expires_in = token_data.get("expires_in", 300)
-        cls._esb_token_cache = {"access_token": access_token, "expires_at": time.time() + max(expires_in - 60, 0)}
+        cls._esb_token_cache[token_url] = {
+            "access_token": access_token, "expires_at": time.time() + max(expires_in - 60, 0)}
         return access_token
 
     @staticmethod
@@ -5466,7 +5479,7 @@ class FhirClient:
     def send_order_to_esb(cls, bundle):
         """POSTs `bundle` (a build_order_message_bundle() message
         Bundle) to the ESB's $process-message endpoint
-        (ESB_PROCESS_MESSAGE_URL, see esb_config()), Bearer-authenticated
+        (ESB_BASE_URL + ESB_PROCESS_MESSAGE_PATH, see esb_config()), Bearer-authenticated
         via esb_access_token(). One retry with a forced token refresh on
         a 401 — the one client-credentials failure worth silently
         recovering from (a cached token that expired early or was
@@ -5492,6 +5505,109 @@ class FhirClient:
             return resp.json()
         except ValueError:
             return None
+
+    # --- Testing menu (/testing) — test systems only ---------------------
+
+    #: /testing/send-message sends FHIR to the same ESB as "Send to ESB"
+    #: (esb_config(), from ESB_BASE_URL). HL7 v2 goes over MLLP to
+    #: HL7V2_HOST (default: ESB_BASE_URL's host) on HL7V2_PORT.
+    HL7V2_PORT_DEFAULT = 9980
+
+    #: MLLP framing bytes (HL7 v2 over TCP).
+    MLLP_START = b"\x0b"
+    MLLP_END = b"\x1c\x0d"
+
+    @classmethod
+    def test_message_targets(cls):
+        """(process_message_url, hl7v2_host, hl7v2_port) for the testing
+        menu, read fresh from the environment each call."""
+        from urllib.parse import urlparse
+        return (
+            cls.esb_config()[1],
+            os.environ.get("HL7V2_HOST") or urlparse(cls.esb_base_url()).hostname,
+            int(os.environ.get("HL7V2_PORT", cls.HL7V2_PORT_DEFAULT)),
+        )
+
+    @staticmethod
+    def detect_message_type(text):
+        """"fhir" for a JSON FHIR Bundle, "hl7v2" for text starting with
+        an MSH segment, else None. `text` is the decoded upload."""
+        stripped = (text or "").lstrip("\ufeff \t\r\n")
+        if stripped.startswith("MSH"):
+            return "hl7v2"
+        if stripped.startswith("{"):
+            try:
+                body = json.loads(stripped)
+            except ValueError:
+                return None
+            if isinstance(body, dict) and body.get("resourceType"):
+                return "fhir"
+        return None
+
+    @classmethod
+    def send_fhir_message_to_esb(cls, bundle):
+        """POSTs `bundle` to the ESB's $process-message endpoint — same
+        flow and 401-retry as send_order_to_esb(), but surfaces the
+        response body on failure. Returns
+        (status_code, parsed JSON body or raw text)."""
+        _, url, _, _, verify_ssl, _ = cls.esb_config()
+        token = cls.esb_access_token()
+        resp = cls._post_bundle_to_esb(url, bundle, token, verify_ssl)
+        if resp.status_code == 401:
+            token = cls.esb_access_token(force_refresh=True)
+            resp = cls._post_bundle_to_esb(url, bundle, token, verify_ssl)
+        try:
+            body = resp.json() if resp.content else None
+        except ValueError:
+            body = resp.text
+        if not resp.ok:
+            detail = body if isinstance(body, str) else json.dumps(body, indent=2) if body else ""
+            if "<html" in detail.lower():
+                # IIS's own error page (it masks the backend's real error)
+                # — keep just its headings rather than the whole page.
+                headings = re.findall(r"<h[23][^>]*>(.*?)</h[23]>", detail, re.S | re.I)
+                detail = " — ".join(h.strip() for h in headings) or "HTML error page from the web server"
+                detail += (" (this is IIS's generic error page — the real error is in the "
+                           "HealthConnect/IIS logs on the ESB server)")
+            raise requests.HTTPError(
+                f"{resp.status_code} from {url}" + (f": {detail[:2000]}" if detail else ""), response=resp)
+        return resp.status_code, body
+
+    @classmethod
+    def send_hl7v2_mllp(cls, message, host=None, port=None, timeout=30):
+        """Sends one HL7 v2 message over MLLP (TCP, framed
+        <VT>message<FS><CR>) and returns the decoded acknowledgement
+        (segments \\r-separated). Line endings in `message` are
+        normalised to \\r, the HL7 v2 segment separator, since an
+        uploaded file usually has \\n or \\r\\n. Raises OSError/
+        socket.timeout on connection failure or no ACK in time."""
+        import socket
+        _, default_host, default_port = cls.test_message_targets()
+        host = host or default_host
+        port = port or default_port
+        segments = [seg for seg in re.split(r"\r\n|\n|\r", message.strip("\ufeff \t\r\n")) if seg.strip()]
+        payload = "\r".join(segments) + "\r"
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.sendall(cls.MLLP_START + payload.encode("utf-8") + cls.MLLP_END)
+            buf = b""
+            while cls.MLLP_END not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        if not buf:
+            raise ConnectionError(f"No acknowledgement received from {host}:{port}.")
+        ack = buf.split(cls.MLLP_END, 1)[0].lstrip(cls.MLLP_START)
+        return ack.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def hl7v2_ack_code(ack):
+        """MSA-1 (AA/AE/AR/CA/CE/CR) from an HL7 v2 ACK, or None."""
+        for seg in re.split(r"\r\n|\n|\r", ack or ""):
+            if seg.startswith("MSA"):
+                fields = seg.split(seg[3] if len(seg) > 3 else "|")
+                return fields[1] if len(fields) > 1 else None
+        return None
 
     @classmethod
     def parse_order_message_bundle(cls, bundle):
