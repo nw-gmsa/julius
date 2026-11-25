@@ -13,8 +13,9 @@ import pandas as pd
 import plotly.express as px
 from dotenv import load_dotenv
 from fhir_client import FhirClient
+import fhir_validator
 from iris_client import IrisClient
-from pdf_report import monthly_report_pdf_bytes, quality_report_pdf_bytes
+from pdf_report import monthly_report_pdf_bytes, quality_report_pdf_bytes, validation_report_pdf_bytes
 from epic_client import EpicClient, EPIC_FHIR_BASE_URL_DEFAULT, KNOWN_SANDBOX_TEST_PATIENTS
 
 # Loads .env into the process environment (FHIR_BASE_URL, ESB_*, EPIC_*, ...)
@@ -1241,20 +1242,132 @@ def testing_menu():
     return render_template("testing_menu.html")
 
 
+#: Background FHIR validation runs for /testing/send-message, keyed by a
+#: random token (same in-memory, no-expiry pattern as _session_clients;
+#: each validator run takes tens of seconds, too long to block a request
+#: on — behind IIS it would time out). Only the session that started a
+#: job can see it.
+_validation_jobs = {}
+
+
+def _is_message_bundle(resource):
+    return (isinstance(resource, dict) and resource.get("resourceType") == "Bundle"
+            and resource.get("type") == "message")
+
+
+def _fhir_validation_context(text):
+    """Validate-panel context for a FHIR preview: the validation targets
+    (whole resource, plus each Bundle entry) with their profile choices,
+    whether it's a message Bundle (the only thing that can be sent), and
+    anything stopping the validator from running at all."""
+    try:
+        resource = json.loads(text)
+    except ValueError as e:
+        return {"parse_error": f"Not valid JSON — {e}", "targets": [], "is_message_bundle": False}
+    if not isinstance(resource, dict) or not resource.get("resourceType"):
+        return {"parse_error": "Not a FHIR resource (no resourceType).", "targets": [],
+                "is_message_bundle": False}
+    targets = fhir_validator.validation_targets(resource)
+    choices = {}
+    for t in targets:
+        if t["resource_type"] not in choices:
+            choices[t["resource_type"]] = fhir_validator.profile_choices(t["resource_type"])
+        t["choices"] = choices[t["resource_type"]]
+    return {
+        "parse_error": None,
+        "targets": targets,
+        "is_message_bundle": _is_message_bundle(resource),
+        "bundle_rule_choices": fhir_validator.bundle_rule_choices(),
+        "default_bundle_rule": (fhir_validator.default_bundle_rule(resource)
+                                if _is_message_bundle(resource) else ""),
+        "message_event": (fhir_validator.message_event_code(resource)
+                          if _is_message_bundle(resource) else None),
+        "tx_options": fhir_validator.terminology_options(),
+        "setup_problems": fhir_validator.setup_problems(),
+    }
+
+
+def _run_validation_job(job):
+    try:
+        try:
+            source = json.loads(job["message"])
+        except ValueError:
+            source = None
+        bundle = source if isinstance(source, dict) and source.get("resourceType") == "Bundle" else None
+        # A run that adds individual resources to an earlier report
+        # carries that report's results over already validated.
+        to_run = [r for r in job["results"] if not r.get("validated")]
+        fhir_validator.validate(to_run, job["tx"])
+        for r in to_run:
+            r["validated"] = True
+        fhir_validator.annotate_profile_mismatches(job["results"], bundle)
+    except Exception as e:
+        job["error"] = str(e)
+    job["status"] = "done"
+    job["finished"] = time.time()
+
+
+def _validation_report_options():
+    """(include_information, ignore patterns) from the report's query
+    string — shared by the page and the PDF so they match. No `ignore`
+    param at all means the defaults (fhir_validator.DEFAULT_IGNORED_ISSUES)."""
+    ignore = request.args["ignore"].splitlines() if "ignore" in request.args else None
+    return request.args.get("info") == "1", ignore
+
+
+def _owned_validation_job(job_id):
+    job = _validation_jobs.get(job_id or "")
+    return job if job and job["sid"] == session.get("sid") else None
+
+
+@app.route("/testing/send-message/report.pdf")
+def testing_validation_report_pdf():
+    """The validation report as a PDF — same options (?info=, ?ignore=)
+    as the page's report section."""
+    job = _owned_validation_job(request.args.get("validation"))
+    if not job or job["status"] != "done":
+        abort(404)
+    include_information, ignore = _validation_report_options()
+    report = fhir_validator.build_report(job["results"], include_information, ignore)
+    pdf_bytes = validation_report_pdf_bytes(report, job)
+    stem = os.path.splitext(job.get("filename") or "")[0] or "fhir"
+    filename = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', stem)}-validation-report.pdf"
+    return Response(pdf_bytes, mimetype="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @app.route("/testing/send-message", methods=["GET", "POST"])
 def testing_send_message():
-    """Upload (or paste) an HL7 v2 or FHIR message, preview it, then
-    submit it to the test ESB — FHIR to $process-message, HL7 v2 over
-    MLLP. Two steps on one route: action=upload detects the type and
-    shows the preview; action=send actually sends (the only branch with
-    an external side effect). Nothing is written to the FHIR server."""
+    """Upload (or paste) an HL7 v2 or FHIR message, preview it, validate
+    it (FHIR only) and/or submit it to the test ESB — FHIR to
+    $process-message, HL7 v2 over MLLP. action=upload detects the type
+    and shows the preview; action=validate starts a background validator
+    run (fhir_validator.py — local validator_cli.jar, never the server's
+    $validate) and redirects to ?validation=<id>, which shows the results
+    and refreshes itself while running; action=send actually sends (the
+    only branch with an external side effect). A FHIR resource can be
+    validated whatever it is, but only a message Bundle can be sent.
+    Nothing is written to the FHIR server."""
     process_message_url, hl7v2_host, hl7v2_port = FhirClient.test_message_targets()
     ctx = {
         "process_message_url": process_message_url,
         "hl7v2_target": f"{hl7v2_host}:{hl7v2_port}",
         "message": None, "message_type": None, "filename": None,
-        "error": None, "result": None,
+        "error": None, "result": None, "validation": None, "validation_job": None,
+        "now_ts": time.time(), "report": None, "report_pdf_url": None, "entry_targets": None,
+        "pick_error": False,
     }
+    job_id = request.args.get("validation")
+    if request.method == "GET" and job_id:
+        job = _owned_validation_job(job_id)
+        if not job:
+            ctx["error"] = "That validation run isn't available (the app may have restarted)."
+        else:
+            ctx.update(message=job["message"], message_type="fhir", filename=job["filename"],
+                       validation_job=job, selected_tx=job["tx"],
+                       selected={r["key"]: r["choice"] for r in job["results"]},
+                       selected_bundle_rule=next((r.get("bundle_rule", "") for r in job["results"]
+                                                  if r["key"] == "all"), None))
     if request.method == "POST":
         action = request.form.get("action")
         if action == "upload":
@@ -1277,6 +1390,118 @@ def testing_send_message():
                 if not ctx["message_type"]:
                     ctx["error"] = ("Couldn't tell what kind of message this is — expected a FHIR JSON "
                                     "resource (starting with '{') or an HL7 v2 message (starting with 'MSH').")
+        elif action == "validate":
+            text = request.form.get("message", "")
+            ctx.update(message=text, message_type="fhir", filename=request.form.get("filename"))
+            try:
+                resource = json.loads(text)
+            except ValueError as e:
+                resource = None
+                ctx["error"] = f"Can't validate — message is not valid JSON: {e}"
+            if resource is not None:
+                if not isinstance(resource, dict) or not resource.get("resourceType"):
+                    ctx["error"] = "Can't validate — not a FHIR resource (no resourceType)."
+                else:
+                    # First run: the whole resource only — individual
+                    # Bundle entries are offered once its report is in.
+                    wanted = {"all"}
+                    results = []
+                    for t in fhir_validator.validation_targets(resource):
+                        if t["key"] not in wanted:
+                            continue
+                        choice = request.form.get(f"profile_{t['key']}") or t["default"]
+                        ig_key, profile = fhir_validator.parse_choice(choice)
+                        bundle_rule = ""
+                        if t["key"] == "all" and _is_message_bundle(resource):
+                            bundle_rule = request.form.get("bundle_rule", "")
+                            if bundle_rule not in fhir_validator.BUNDLE_RULES:
+                                bundle_rule = ""
+                            # The rule's profile is an NW one; the NW package
+                            # also pulls in Genomics Reporting (a dependency),
+                            # so a Genomics Reporting choice still resolves.
+                            if bundle_rule:
+                                ig_key = "nw-gmsa"
+                        results.append({
+                            "key": t["key"], "label": t["label"], "resource": t["resource"],
+                            "choice": choice, "ig": ig_key, "ig_label": fhir_validator.IGS[ig_key]["label"],
+                            "profile": profile, "bundle_rule": bundle_rule,
+                            "bundle_rule_text": (" ".join(["-bundle", fhir_validator.BUNDLE_RULES[bundle_rule]["rule"],
+                                                           fhir_validator.BUNDLE_RULES[bundle_rule]["profile"]])
+                                                 if bundle_rule else None),
+                        })
+                    if not results:
+                        ctx["error"] = "Tick at least one resource to validate."
+                    else:
+                        tx = request.form.get("tx") or fhir_validator.TX_FHIR_ORG
+                        job_id = secrets.token_urlsafe(16)
+                        job = {
+                            "sid": session.get("sid"), "status": "running", "error": None,
+                            "message": text, "filename": ctx["filename"], "tx": tx,
+                            "results": results, "started": time.time(), "finished": None,
+                        }
+                        _validation_jobs[job_id] = job
+                        threading.Thread(target=_run_validation_job, args=(job,), daemon=True).start()
+                        return redirect(url_for("testing_send_message", validation=job_id))
+        elif action == "validate_entries":
+            parent_id = request.form.get("validation")
+            parent = _owned_validation_job(parent_id)
+            if not parent or parent["status"] != "done":
+                ctx["error"] = "That validation report isn't available any more (the app may have restarted)."
+            else:
+                # The editor's current text (posted alongside by the page's
+                # JS), so edits made since the Bundle report count.
+                text = request.form.get("message") or parent["message"]
+                try:
+                    bundle = json.loads(text)
+                except ValueError as e:
+                    bundle = None
+                    ctx.update(message=text, message_type="fhir", filename=parent["filename"],
+                               error=f"Can't validate — message is not valid JSON: {e}")
+                if bundle is not None and not isinstance(bundle, dict):
+                    ctx.update(message=text, message_type="fhir", filename=parent["filename"],
+                               error="Can't validate — not a FHIR resource.")
+            if parent and parent["status"] == "done" and isinstance(bundle, dict):
+                all_targets = fhir_validator.validation_targets(bundle)
+                targets = {t["key"]: t for t in all_targets if t["key"] != "all"}
+                # Either one "Validate this resource" button (quick =
+                # "<entry key>|<ig>|<profile>") or the ticked entries.
+                picks = []
+                if request.form.get("quick"):
+                    key, _, choice = request.form["quick"].partition("|")
+                    picks.append((key, choice))
+                else:
+                    picks = [(key, request.form.get(f"profile_{key}") or "")
+                             for key in request.form.getlist("validate_entry")]
+                new = []
+                for key, choice in picks:
+                    t = targets.get(key)
+                    if not t:
+                        continue
+                    choice = choice or t["default"]
+                    ig_key, profile = fhir_validator.parse_choice(choice)
+                    new.append({
+                        "key": key, "label": t["label"], "resource": t["resource"], "choice": choice,
+                        "ig": ig_key, "ig_label": fhir_validator.IGS[ig_key]["label"], "profile": profile,
+                        "bundle_rule": "", "bundle_rule_text": None,
+                    })
+                if not new:
+                    return redirect(url_for("testing_send_message", validation=parent_id,
+                                            pick_error=1, _anchor="validate-entries"))
+                rerun = {(r["key"], r["choice"]) for r in new}
+                # Earlier results whose resource has since been edited are
+                # kept but flagged, so the report shows they're out of date.
+                current = {t["key"]: fhir_validator.canonical(t["resource"]) for t in all_targets}
+                kept = [{**r, "stale": r.get("stale") or current.get(r["key"]) != fhir_validator.canonical(r["resource"])}
+                        for r in parent["results"] if (r["key"], r["choice"]) not in rerun]
+                job_id = secrets.token_urlsafe(16)
+                _validation_jobs[job_id] = job = {
+                    "sid": session.get("sid"), "status": "running", "error": None,
+                    "message": text, "filename": parent["filename"],
+                    "tx": request.form.get("tx") or parent["tx"],
+                    "results": kept + new, "started": time.time(), "finished": None,
+                }
+                threading.Thread(target=_run_validation_job, args=(job,), daemon=True).start()
+                return redirect(url_for("testing_send_message", validation=job_id))
         elif action == "send":
             text = request.form.get("message", "")
             # Re-detect from the (possibly edited) text, falling back to the
@@ -1289,6 +1514,9 @@ def testing_send_message():
                         bundle = json.loads(text)
                     except ValueError as e:
                         raise ValueError(f"Message is not valid JSON — {e}") from None
+                    if not _is_message_bundle(bundle):
+                        raise ValueError("Only a FHIR message Bundle (resourceType Bundle, type "
+                                         "\"message\") can be sent — this can only be validated.")
                     status, body = FhirClient.send_fhir_message_to_esb(bundle)
                     hl7v2 = FhirClient.extract_hl7v2_message(body)
                     ctx["result"] = {
@@ -1307,6 +1535,47 @@ def testing_send_message():
                     ctx["error"] = "Unknown message type."
             except Exception as e:
                 ctx["error"] = f"Send failed: {e}"
+    if ctx["message"] and ctx["message_type"] == "fhir":
+        ctx["validation"] = _fhir_validation_context(ctx["message"])
+    if ctx["validation_job"] and ctx["validation_job"]["status"] == "done":
+        include_information, ignore = _validation_report_options()
+        ctx["report"] = fhir_validator.build_report(ctx["validation_job"]["results"], include_information, ignore)
+        pdf_args = {"validation": job_id}
+        if include_information:
+            pdf_args["info"] = "1"
+        if ignore is not None:
+            pdf_args["ignore"] = "\n".join(ignore)
+        ctx["report_pdf_url"] = url_for("testing_validation_report_pdf", **pdf_args)
+        # Individual Bundle entries can be validated once the report is in:
+        # suggested ones (referenced by "Unable to find a profile match")
+        # first, with the profile the reference wanted.
+        targets = [t for t in (ctx["validation"] or {}).get("targets", []) if t["key"] != "all"]
+        if targets:
+            sugs = fhir_validator.suggestions(ctx["validation_job"]["results"])
+            suggested = {}
+            for sug in sugs:
+                suggested.setdefault(sug["key"], sug)
+            for t in targets:
+                t["suggested"] = suggested.get(t["key"])
+                if t["suggested"] and t["resource_type"] not in fhir_validator.TYPE_DEFAULT_PROFILES:
+                    t["default"] = t["suggested"]["choice"]
+            targets.sort(key=lambda t: 0 if t["suggested"] else 1)
+            ctx["entry_targets"] = targets
+        ctx["pick_error"] = request.args.get("pick_error") == "1"
+    ctx["validation_job_id"] = job_id if ctx["validation_job"] else None
+    # Keep the validate panel's picks across a re-render (a validation
+    # run's own picks, else whatever was just posted, else defaults:
+    # only the whole resource ticked).
+    ctx.setdefault("selected", {k[len("profile_"):]: v for k, v in request.form.items()
+                                if k.startswith("profile_")})
+    ctx.setdefault("selected_tx", request.form.get("tx"))
+    ctx.setdefault("selected_bundle_rule", request.form.get("bundle_rule"))
+    if ctx["validation_job"]:
+        ctx["checked"] = {r["key"] for r in ctx["validation_job"]["results"]}
+    elif request.form.getlist("validate_target"):
+        ctx["checked"] = set(request.form.getlist("validate_target"))
+    else:
+        ctx["checked"] = {"all"}
     return render_template("testing_send_message.html", **ctx)
 
 

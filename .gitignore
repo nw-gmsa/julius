@@ -13,3 +13,6 @@ __pycache__/
 # never leave local/deployment-secret storage.
 *.pem
 /epic_private_key*
+
+# FHIR Validator CLI (~200MB) and cached IG packages — see fhir_validator.py
+/data/validator/

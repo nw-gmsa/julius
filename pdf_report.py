@@ -362,3 +362,104 @@ def monthly_report_pdf_bytes(report):
 
     doc.build(story)
     return buffer.getvalue()
+
+
+def validation_report_pdf_bytes(report, job):
+    """The /testing/send-message FHIR validation report
+    (fhir_validator.build_report()) as a landscape-A4 PDF: a summary
+    table, then one section per validated resource listing its errors and
+    warnings (and information, if included). All data goes through
+    escape() since every cell here is a wrapping Paragraph."""
+    import time as _time
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=_PAGE_MARGIN, rightMargin=_PAGE_MARGIN,
+                            topMargin=_PAGE_MARGIN, bottomMargin=_PAGE_MARGIN,
+                            title="FHIR validation report")
+
+    def p(text):
+        return Paragraph(escape(text or ""), _CELL_STYLE)
+
+    story = [_para("FHIR validation report", "Title")]
+    totals = report["totals"]
+    summary = (f"<b>{totals['error']} error(s)</b>, <b>{totals['warning']} warning(s)</b>"
+               + (f", {totals['information']} information" if report["include_information"] else "")
+               + f" across {len(report['sections'])} validated resource(s).")
+    story.append(_para(summary))
+    details = []
+    if job.get("filename"):
+        details.append(f"File: {job['filename']}")
+    details.append(f"Validated: {_time.strftime('%Y-%m-%d %H:%M', _time.localtime(job.get('started') or _time.time()))}")
+    details.append(f"Terminology server: {job.get('tx')}")
+    details.append("Shown: errors and warnings" + (" and information" if report["include_information"] else ""))
+    if report["ignore"]:
+        details.append(f"Ignored (message contains): {'; '.join(report['ignore'])}"
+                       f" — {report['ignored_total']} issue(s) left out")
+    story.append(_para("<br/>".join(escape(d) for d in details)))
+    story.append(Spacer(1, 6 * mm))
+
+    info = report["include_information"]
+    header = ["Resource", "Validated against", "Errors", "Warnings"] + (["Info"] if info else [])
+    rows = [header]
+    for s in report["sections"]:
+        label = s["label"] + (" (before later edits)" if s.get("stale") else "")
+        rows.append([p(label), p(s.get("profile") or "base resource + meta.profile"),
+                     "failed" if s.get("error") else str(s["counts"]["error"]), str(s["counts"]["warning"])]
+                    + ([str(s["counts"]["information"])] if info else []))
+    count_w = 45
+    widths = [_CONTENT_WIDTH * 0.45, _CONTENT_WIDTH - _CONTENT_WIDTH * 0.45 - count_w * (3 if info else 2)] \
+        + [count_w] * (3 if info else 2)
+    t = Table(rows, colWidths=widths, repeatRows=1)
+    t.setStyle(_TABLE_STYLE)
+    story.append(t)
+
+    sev_colours = {"fatal": "#b00020", "error": "#b00020", "warning": "#a15c00", "information": "#555555"}
+    main_story = story
+    for s in report["sections"]:
+        main_story.append(Spacer(1, 6 * mm))
+        story = []  # this section, kept with its heading (KeepTogether below)
+        story.append(_para(escape(s["label"]), "Heading3"))
+        meta = [f"Against {s.get('profile') or 'base resource + meta.profile'} ({s.get('ig_label') or ''})"]
+        if s.get("bundle_rule_text"):
+            meta.append(f"With {s['bundle_rule_text']}")
+        if s.get("stale"):
+            meta.append("NOTE: validated before later edits to this resource - re-validate for current results")
+        if s.get("ignored"):
+            meta.append(f"{s['ignored']} ignored issue(s) not shown")
+        story.append(Paragraph("<br/>".join(escape(m) for m in meta), _CELL_STYLE))
+        story.append(Spacer(1, 2 * mm))
+        if s.get("error"):
+            story.append(_para(f"<b>Validation failed:</b> {escape(s['error'])}"))
+            main_story.append(KeepTogether(story))
+            continue
+        if not s["groups"]:
+            story.append(_para("No issues."))
+            main_story.append(KeepTogether(story))
+            continue
+        has_entries = s.get("has_entries")
+        rows = [["Severity", "Location", "Message"] + (["Where"] if has_entries else [])]
+        for g in s["groups"]:
+            sev = Paragraph(f'<font color="{sev_colours.get(g["severity"], "#000000")}"><b>'
+                            f'{escape(g["severity"])}</b></font>', _CELL_STYLE)
+            location = g.get("location") or "(resource)"
+            if not has_entries and g["occurrences"][0].get("line"):
+                location += f" (line {g['occurrences'][0]['line']})"
+            message = escape(g.get("message") or "")
+            for sug in g.get("suggest") or []:
+                message += f"<br/>&gt;&gt; can be checked by validating {escape(sug['label'])} against {escape(sug['profile'])}"
+            if g.get("mismatch_note"):
+                message += f"<br/>&gt;&gt; {escape(g['mismatch_note'])}"
+            row = [sev, p(location), Paragraph(message, _CELL_STYLE)]
+            if has_entries:
+                row.append(Paragraph("<br/>".join(
+                    escape((o.get("entry_label") or o.get("location") or "(resource)")
+                           + (f" (line {o['line']})" if o.get("line") else ""))
+                    for o in g["occurrences"]), _CELL_STYLE))
+            rows.append(row)
+        sev_w, loc_w, where_w = 50, 170, (200 if has_entries else 0)
+        widths = [sev_w, loc_w, _CONTENT_WIDTH - sev_w - loc_w - where_w] + ([where_w] if has_entries else [])
+        t = Table(rows, colWidths=widths, repeatRows=1)
+        t.setStyle(_TABLE_STYLE)
+        story.append(t)
+        main_story.append(KeepTogether(story))
+    doc.build(main_story)
+    return buf.getvalue()

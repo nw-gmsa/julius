@@ -6,12 +6,31 @@
     .code-fallback { width: 100%; font-family: monospace; }
     .response-pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 10px;
                     border-radius: 4px; max-height: 480px; overflow: auto; overscroll-behavior: contain; }
+    .validate-table select { max-width: 520px; width: 100%; }
+    .sev-error, .sev-fatal { color: #b00020; font-weight: bold; }
+    .sev-warning { color: #a15c00; font-weight: bold; }
+    .sev-information { color: #555; }
+    .validation-result { margin-bottom: 1.2em; }
+    .validation-result summary { cursor: pointer; }
+    #vr-dialog { width: min(1000px, 94vw); max-height: 85vh; padding: 0; border: 1px solid #ccc; border-radius: 6px; overscroll-behavior: contain; }
+    #vr-dialog .vr-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #eee; }
+    #vr-code { margin: 0; max-height: calc(85vh - 50px); overflow: auto; overscroll-behavior: contain; background: #f7f7f7; font-size: .8rem; }
+    #vr-code div { white-space: pre; padding: 0 12px 0 0; }
+    #vr-code div span.ln { display: inline-block; width: 4.5em; text-align: right; padding-right: 1em; color: #999; user-select: none; }
+    #vr-code div.hit { background: #ffe08a; }
   </style>
+  {% if validation_job and validation_job.status == "running" %}
+    <meta http-equiv="refresh" content="4">
+  {% endif %}
 {% endblock %}
 {% block content %}
-  <h1>Send HL7 v2 / FHIR message</h1>
+  <h1>Validate / send HL7 v2 / FHIR message</h1>
   <p class="muted">
-    Test systems only. FHIR messages are POSTed to <code>{{ process_message_url }}</code>;
+    Test systems only. FHIR resources can be validated (any resource; for a Bundle, the whole
+    Bundle and/or individual entries) with the HL7 FHIR Validator run inside this app — against
+    the NW GMSA or HL7 Genomics Reporting profiles, as on the IG's
+    <a href="https://nw-gmsa.github.io/en/testing-resources.html" target="_blank">FHIR validation page</a>.
+    Only a FHIR <strong>message Bundle</strong> can be sent: it's POSTed to <code>{{ process_message_url }}</code>;
     HL7 v2 messages are sent over MLLP to <code>{{ hl7v2_target }}</code>.
   </p>
 
@@ -46,14 +65,216 @@
            data-language="{{ 'json' if message_type == 'fhir' else 'plaintext' }}"></div>
       <textarea id="message" name="message" rows="20" class="code-fallback">{{ message }}</textarea>
       <p>
-        <button type="submit" name="action" value="send"
-                onclick="return confirm('Send this message to {{ process_message_url if message_type == 'fhir' else hl7v2_target }}?');">
-          {% if result or error %}Resend{% else %}Submit{% endif %}
-          {% if message_type == "fhir" %}to $process-message{% else %}to {{ hl7v2_target }} (MLLP){% endif %}
-        </button>
+        {% if message_type == "hl7v2" or (validation and validation.is_message_bundle) %}
+          <button type="submit" name="action" value="send"
+                  onclick="return confirm('Send this message to {{ process_message_url if message_type == 'fhir' else hl7v2_target }}?');">
+            {% if result %}Resend{% else %}Submit{% endif %}
+            {% if message_type == "fhir" %}to $process-message{% else %}to {{ hl7v2_target }} (MLLP){% endif %}
+          </button>
+        {% elif message_type == "fhir" %}
+          <span class="muted">Sending is only available for a FHIR message Bundle (<code>Bundle.type = "message"</code>) —
+            this can be validated below.</span>
+        {% endif %}
         {% if message_type == "fhir" %}<button type="button" onclick="formatEditor('message')">Format JSON</button>{% endif %}
         <a href="{{ request.script_root }}/testing/send-message">Start again with a new message</a>
       </p>
+
+      {% if message_type == "fhir" %}
+        <h2>Validate</h2>
+        {% if validation.parse_error %}
+          <div class="error">{{ validation.parse_error }}</div>
+        {% else %}
+          {% for p in validation.setup_problems %}<div class="error">{{ p }}</div>{% endfor %}
+          <p class="muted">
+            {% if validation.targets|length > 1 %}
+              The whole Bundle is validated first. Once its report is in, you can choose individual entries to
+              validate on their own (e.g. one named in "Unable to find a profile match").
+            {% endif %}
+            Edits above are included.
+          </p>
+          {% set t = validation.targets[0] %}
+          {% set current = selected.get(t.key) or t.default %}
+          <input type="hidden" name="validate_target" value="all">
+          <table class="validate-table">
+            <tr><th>Resource</th><td><strong>{{ t.label }}</strong></td></tr>
+            <tr><th>Validate against</th>
+              <td>
+                <select name="profile_all">
+                  {% for group_label, options in t.choices %}
+                    <optgroup label="{{ group_label }}">
+                      {% for value, label in options %}
+                        <option value="{{ value }}" {% if value == current %}selected{% endif %}>{{ label }}</option>
+                      {% endfor %}
+                    </optgroup>
+                  {% endfor %}
+                </select>
+              </td></tr>
+            {% if validation.is_message_bundle %}
+              {% set rule = selected_bundle_rule if selected_bundle_rule is not none else validation.default_bundle_rule %}
+              <tr><th>Focal resource<br><span class="muted">(event {{ validation.message_event or "unknown" }})</span></th>
+                <td>
+                  <select name="bundle_rule">
+                    <option value="" {% if not rule %}selected{% endif %}>No -bundle rule</option>
+                    {% for value, label in validation.bundle_rule_choices %}
+                      <option value="{{ value }}" {% if value == rule %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                </td></tr>
+            {% endif %}
+            <tr><th>Terminology server</th>
+              <td>
+                <select name="tx">
+                  {% for value, label in validation.tx_options %}
+                    <option value="{{ value }}" {% if value == selected_tx %}selected{% endif %}>{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </td></tr>
+          </table>
+          <p>
+            <button type="submit" name="action" value="validate"
+                    {% if validation.setup_problems or (validation_job and validation_job.status == "running") %}disabled{% endif %}>
+              Validate {{ "Bundle" if validation.targets|length > 1 else t.resource_type }}
+            </button>
+          </p>
+        {% if validation_job %}
+          {% set job = validation_job %}
+          <h2 id="validation-results">Validation report</h2>
+          {% if job.status == "running" %}
+            <div class="card">
+              Validating… started {{ ((job.started and (now_ts - job.started)) or 0)|int }}s ago.
+              This page refreshes itself; each validator run (one per distinct profile) takes tens of seconds,
+              longer with a terminology server.
+            </div>
+          {% elif report %}
+            {% if job.error %}<div class="error">{{ job.error }}</div>{% endif %}
+            <div class="card">
+              <p style="margin-top: 0;">
+                <strong>{{ report.totals.error }} error(s)</strong>, <strong>{{ report.totals.warning }} warning(s)</strong>
+                {% if report.include_information %}, {{ report.totals.information }} information{% endif %}
+                across {{ report.sections|length }} validated resource(s)
+                {% if report.ignored_total %}· {{ report.ignored_total }} ignored issue(s) not shown{% endif %}
+                <br><span class="muted">{% if job.filename %}{{ job.filename }} · {% endif %}terminology server <code>{{ job.tx }}</code> ·
+                  took {{ (job.finished - job.started)|int }}s</span>
+              </p>
+              <p><label><input type="checkbox" name="info" value="1" form="report-filter"
+                               {% if report.include_information %}checked{% endif %}> Include information issues</label></p>
+              <p><label>Ignore issues whose message contains (one per line):<br>
+                <textarea name="ignore" form="report-filter" rows="3" style="width: 100%; max-width: 600px;">{{ report.ignore|join("\n") }}</textarea></label></p>
+              <p>
+                <button type="submit" form="report-filter">Update report</button>
+                <a href="{{ report_pdf_url }}">Download report as PDF</a>
+                {% if entry_targets %} · <a href="#validate-entries">Validate individual resources ↓</a>{% endif %}
+              </p>
+            </div>
+            {% if report.sections|length > 1 %}
+              <table>
+                <tr><th>Resource</th><th>Validated against</th><th>Errors</th><th>Warnings</th>
+                  {% if report.include_information %}<th>Info</th>{% endif %}</tr>
+                {% for s in report.sections %}
+                  <tr>
+                    <td><a href="#vr-section-{{ loop.index }}">{{ s.label }}</a>{% if s.stale %} <span class="sev-warning">(before later edits)</span>{% endif %}</td>
+                    <td class="muted">{{ s.profile or "base resource + meta.profile" }}</td>
+                    <td class="{{ 'sev-error' if s.counts.error or s.error }}">{{ "failed" if s.error else s.counts.error }}</td>
+                    <td class="{{ 'sev-warning' if s.counts.warning }}">{{ s.counts.warning }}</td>
+                    {% if report.include_information %}<td>{{ s.counts.information }}</td>{% endif %}
+                  </tr>
+                {% endfor %}
+              </table>
+            {% endif %}
+            {% for s in report.sections %}
+              {% set result_index = loop.index %}
+              <div class="validation-result card" id="vr-section-{{ loop.index }}">
+                <h3 style="margin-top: 0;">{{ s.label }}
+                  {% if s.error %}<span class="sev-error">— validation failed</span>
+                  {% elif not s.issues %}<span style="color: #1a7f37;">— no issues ✓</span>{% endif %}</h3>
+                {% if s.stale %}
+                  <p class="sev-warning" style="margin-top: 0;">Validated before later edits to this resource — these results may be out of date. Re-validate it to refresh.</p>
+                {% endif %}
+                <p class="muted" style="margin-top: 0;">
+                  Against {{ s.profile or "base resource + meta.profile" }} ({{ s.ig_label }})
+                  {% if s.bundle_rule_text %}<br>with <code>{{ s.bundle_rule_text }}</code>{% endif %}
+                  {% if s.ignored %}<br>{{ s.ignored }} ignored issue(s) not shown{% endif %}
+                </p>
+                {% if s.json %}
+                  <script type="application/json" id="vr-json-{{ loop.index }}">{{ s.json|tojson }}</script>
+                  <p><button type="button" onclick="showValidated({{ loop.index }}, null, {{ s.label|tojson|forceescape }})">View validated JSON</button>
+                    <span class="muted">— click an entry or location to jump to its line.</span></p>
+                {% endif %}
+                {% if s.error %}
+                  <pre class="response-pre">{{ s.error }}</pre>
+                {% elif s.groups %}
+                  <table>
+                    <tr><th>Severity</th><th>Location</th><th>Message</th>{% if s.has_entries %}<th>Where</th>{% endif %}</tr>
+                    {% for g in s.groups %}
+                      <tr>
+                        <td class="sev-{{ g.severity }}">{{ g.severity }}</td>
+                        <td>
+                          {% if s.has_entries %}<code>{{ g.location or "(resource)" }}</code>
+                          {% else %}
+                            {% set o = g.occurrences[0] %}
+                            <a href="#" onclick="showValidated({{ result_index }}, {{ o.line or 'null' }}, {{ s.label|tojson|forceescape }}); return false;"><code>{{ g.location or "(resource)" }}</code></a>
+                            {% if o.line %} <span class="muted">(line {{ o.line }})</span>{% endif %}
+                          {% endif %}
+                        </td>
+                        <td>{{ g.message }}
+                          {% for sug in g.suggest %}
+                            <br><button type="submit" form="entries-form" name="quick"
+                                        value="{{ sug.key }}|{{ sug.choice }}">Validate {{ sug.label }} against {{ sug.profile.rsplit('/', 1)[-1] }}</button>
+                          {% endfor %}
+                          {% if g.mismatch_note %}<br><span class="muted">{{ g.mismatch_note }}</span>{% endif %}
+                        </td>
+                        {% if s.has_entries %}
+                          <td>
+                            {% for o in g.occurrences %}
+                              <a href="#" onclick="showValidated({{ result_index }}, {{ o.line or 'null' }}, {{ s.label|tojson|forceescape }}); return false;">{{ o.entry_label or o.location or "(resource)" }}</a>{% if o.line %} <span class="muted">(line {{ o.line }})</span>{% endif %}{% if not loop.last %}<br>{% endif %}
+                            {% endfor %}
+                          </td>
+                        {% endif %}
+                      </tr>
+                    {% endfor %}
+                  </table>
+                {% endif %}
+                {% if s.log %}
+                  <details><summary class="muted">Validator output</summary><pre class="response-pre">{{ s.log }}</pre></details>
+                {% endif %}
+              </div>
+            {% endfor %}
+            {% if entry_targets %}
+              <div class="card" id="validate-entries">
+                <h3 style="margin-top: 0;">Validate individual resources</h3>
+                {% if pick_error %}<div class="error">Tick at least one resource.</div>{% endif %}
+                <p class="muted">Validates each ticked entry on its own against the chosen profile and adds it to this
+                  report. Entries named in "Unable to find a profile match" are listed first, with the profile the
+                  reference expected.</p>
+                <table class="validate-table">
+                  <tr><th></th><th>Resource</th><th>Validate against</th></tr>
+                  {% for t in entry_targets %}
+                    <tr>
+                      <td><input type="checkbox" form="entries-form" name="validate_entry" value="{{ t.key }}" id="ve-{{ t.key }}"></td>
+                      <td><label for="ve-{{ t.key }}">{{ t.label }}</label>
+                        {% if t.suggested %}<br><span class="sev-warning">suggested — unable to find a profile match</span>
+                          <br><span class="muted">reference expected {{ t.suggested.profile }}</span>{% endif %}</td>
+                      <td>
+                        <select form="entries-form" name="profile_{{ t.key }}">
+                          {% for group_label, options in t.choices %}
+                            <optgroup label="{{ group_label }}">
+                              {% for value, label in options %}
+                                <option value="{{ value }}" {% if value == t.default %}selected{% endif %}>{{ label }}</option>
+                              {% endfor %}
+                            </optgroup>
+                          {% endfor %}
+                        </select>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </table>
+                <p><button type="submit" form="entries-form">Validate ticked resources</button></p>
+              </div>
+            {% endif %}
+          {% endif %}
+        {% endif %}
+        {% endif %}
+      {% endif %}
     </form>
   {% else %}
     <h2>Upload a message</h2>
@@ -66,12 +287,72 @@
     </form>
   {% endif %}
 
+  {% if validation_job_id %}
+    <form id="report-filter" method="get" action="{{ request.script_root }}/testing/send-message#validation-results">
+      <input type="hidden" name="validation" value="{{ validation_job_id }}">
+    </form>
+    <form id="entries-form" method="post" action="{{ request.script_root }}/testing/send-message">
+      <input type="hidden" name="action" value="validate_entries">
+      <input type="hidden" name="message" id="entries-message">
+      <input type="hidden" name="validation" value="{{ validation_job_id }}">
+    </form>
+  {% endif %}
+  <dialog id="vr-dialog">
+    <div class="vr-head"><strong id="vr-title"></strong>
+      <form method="dialog" style="margin: 0;"><button>Close</button></form></div>
+    <pre id="vr-code"></pre>
+  </dialog>
+  <script>
+    // Shows the exact JSON that was validated (with line numbers) and
+    // highlights the line an issue points at.
+    function showValidated(index, line, title) {
+      var text = JSON.parse(document.getElementById('vr-json-' + index).textContent);
+      var pre = document.getElementById('vr-code');
+      pre.textContent = '';
+      var hit = null;
+      text.split('\n').forEach(function (src, i) {
+        var row = document.createElement('div');
+        var ln = document.createElement('span');
+        ln.className = 'ln'; ln.textContent = i + 1;
+        row.appendChild(ln); row.appendChild(document.createTextNode(src));
+        if (line && i + 1 === line) { row.className = 'hit'; hit = row; }
+        pre.appendChild(row);
+      });
+      document.getElementById('vr-title').textContent = title + (line ? ' — line ' + line : '');
+      document.getElementById('vr-dialog').showModal();
+      if (hit) hit.scrollIntoView({ block: 'center' }); else pre.scrollTop = 0;
+    }
+  </script>
+  {% if validation_job %}
+    <script>
+      // Results sit below the editor; jump to them (a refresh would
+      // otherwise keep the old scroll position).
+      var vr = document.getElementById('validation-results'); if (vr) vr.scrollIntoView();
+    </script>
+  {% endif %}
   <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
   <script>
     // Monaco upgrades each [data-editor-for] textarea in place; if the CDN
     // can't be reached the plain textarea stays usable. On submit the
     // editor's text is copied back into the textarea that's actually posted.
     var editors = {};
+    // "Validate individual resources" is its own form; send the editor's
+    // current text with it so edits since the Bundle report are included.
+    (function () {
+      var form = document.getElementById('entries-form');
+      if (!form) return;
+      form.addEventListener('submit', function (e) {
+        // Stop here rather than round-tripping (which would lose edits).
+        var quick = e.submitter && e.submitter.name === 'quick';
+        if (!quick && !document.querySelector('input[name=validate_entry]:checked')) {
+          e.preventDefault();
+          alert('Tick at least one resource to validate.');
+          return;
+        }
+        var ed = editors['message'], ta = document.getElementById('message');
+        document.getElementById('entries-message').value = ed ? ed.getValue() : (ta ? ta.value : '');
+      });
+    })();
     function formatEditor(id) {
       var ed = editors[id];
       if (ed) { ed.getAction('editor.action.formatDocument').run(); return; }

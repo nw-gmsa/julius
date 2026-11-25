@@ -731,6 +731,78 @@ Nav "Testing" dropdown, hidden when `client.is_production()`; every
   `ESB_BASE_URL`'s host) : `HL7V2_PORT` (default 9980); shows the ACK and
   its MSA-1 code.
 
+**Only a FHIR message Bundle (`Bundle.type = "message"`) can be sent** —
+any other FHIR resource can be uploaded/pasted but only validated; the
+send button is hidden and `action=send` rejects it server-side too.
+
+**FHIR validation** (same page, `action=validate`) runs the HL7 FHIR
+Validator CLI **inside the app** (`fhir_validator.py`, `validator_cli.jar`
+as a subprocess — same tool/flags as the IG's
+https://nw-gmsa.github.io/en/testing-resources.html), deliberately
+**not** the FHIR server's own `$validate`. For a Bundle, the whole Bundle
+and/or each entry (validated on its own, extracted from the Bundle) can
+be ticked, each with its own profile `<select>` built from the
+StructureDefinitions in two IG packages: NW GMSA
+(`https://nw-gmsa.github.io/package.tgz` — **not** `/en/package.tgz`,
+which the testing page's relative link suggests but 404s; re-downloaded
+after 24h since the IG is rebuilt often) and HL7 Genomics Reporting 3.0.0
+(packages.fhir.org). Defaults: the NW profile in `meta.profile`, else the
+NW profile named after the type (`BundleMessage`/`BundleDocument` for a
+Bundle). For a message Bundle's "Entire Bundle" row, an extra select adds the
+IG testing page's validator `-bundle` rule (`fhir_validator.BUNDLE_RULES`):
+O21 → `-bundle ServiceRequest:0 .../ServiceRequest`; R01 →
+`-bundle DiagnosticReport:0 .../LaboratoryReport` (default) or
+`.../TestResults` — defaulted to the first rule for the
+`MessageHeader.eventCoding.code`; a rule forces the NW package to be
+loaded (it depends on Genomics Reporting, so either profile resolves).
+Issues are labelled per entry (`describe_resource()`: type, id,
+code/value text) and the JSON is validated indented (`pretty()`) so
+reported line numbers are real; clicking an issue's location opens that
+exact JSON with the line highlighted.
+**The results are a human-readable report** (`fhir_validator.build_report()`,
+shared by the page and `/testing/send-message/report.pdf` —
+`pdf_report.validation_report_pdf_bytes()`, same `?info=`/`?ignore=`
+query string so they match): errors and warnings only unless "Include
+information" is ticked, minus any issue whose message contains a line of
+the "Ignore" box (default `DEFAULT_IGNORED_ISSUES` = `Constraint failed:
+dom-6`; the count left out is shown). Filtering happens at render time,
+so changing it doesn't re-run the validator. **Two stages**: after upload only the whole resource/Bundle is offered
+(profile, `-bundle` rule, terminology server). Individual Bundle entries
+are only offered once that report is in ("Validate individual
+resources", `action=validate_entries`) — validating every entry up front
+repeated the same issue across every Observation. Each such run is a
+new job that carries the earlier results over (`validated: True`, not
+re-run) and adds the new ones, so the report accumulates. The
+individual panel is its own `<form id="entries-form">`, so its submit
+handler copies the editor's current text into a hidden `message` field —
+edits made since the Bundle report are what gets validated, and become
+the job's message. Carried-over results whose resource has changed since
+(`fhir_validator.canonical()` comparison, per entry — or the whole
+message for the Bundle result) are flagged `stale` ("validated before
+later edits") on the page and in the PDF. Identical
+issues are grouped into one row (`_group_issues()`: same severity,
+message and location once `Bundle.entry[n].resource` is replaced by the
+entry's type) listing every entry it occurs in. **"Unable to find a
+profile match for <ref> among choices: <profiles>"** only says a
+reference target failed its targetProfile, not why —
+`annotate_profile_mismatches()` finds `<ref>` in the uploaded Bundle
+(fullUrl, Type/id, or `Bundle.entry[n]`) and the issue gets a "Validate
+<entry> against <profile>" button; those entries are also listed first,
+profile pre-selected, in the individual panel. Nothing is validated
+automatically. The message regex (`_PROFILE_MATCH_RE`) follows the
+validator's message text, not yet checked against a real run.
+Terminology server: tx.fhir.org (`-sct uk`), none (`-tx n/a`),
+or `FHIR_VALIDATOR_TX_URL`. One JVM run per distinct (IG, profile) — each
+is tens of seconds — so it runs as a background job (`_validation_jobs`,
+in-memory, owner-session only, same no-expiry caveat as
+`_session_clients`) and `?validation=<id>` refreshes itself until done.
+Needs Java 17+ and `data/validator/validator_cli.jar` (git-ignored;
+`FHIR_VALIDATOR_JAR`/`FHIR_VALIDATOR_JAVA`/`FHIR_VALIDATOR_JAVA_OPTS`/
+`FHIR_VALIDATOR_TIMEOUT` — see the module docstring); the page says what's
+missing instead of failing. The validator itself fetches the packages'
+dependencies (UK Core, EU Lab, ...) from the package registry, so it
+needs outbound internet on first run.
+
 ### Reference resolution
 
 `resolve_reference()` fetches whatever resource a FHIR `Reference` points to

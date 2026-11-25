@@ -3,7 +3,8 @@
   <h1>Testing</h1>
   <p class="muted">Tools for test systems only — this menu isn't available on production.</p>
   <ul>
-    <li><a href="{{ request.script_root }}/testing/send-message">Send HL7 v2 / FHIR message</a>
-      — upload a message and submit it to the test ESB.</li>
+    <li><a href="{{ request.script_root }}/testing/send-message">Validate / send HL7 v2 / FHIR message</a>
+      — upload or paste a FHIR resource or message and validate it against the NW GMSA / Genomics Reporting
+      profiles, or submit a message Bundle / HL7 v2 message to the test ESB.</li>
   </ul>
 {% endblock %}
