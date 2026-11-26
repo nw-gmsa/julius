@@ -5575,7 +5575,7 @@ class FhirClient:
         return cls.esb_base_url() + cls.ESB_VALIDATE_PATH
 
     @classmethod
-    def validate_with_esb(cls, body_text, timeout=600):
+    def validate_with_esb(cls, body_text, timeout=600, accept=("OperationOutcome",)):
         """POSTs `body_text` (a FHIR resource as JSON text — sent as-is so
         the validator's line numbers match what the caller shows) to the
         ESB's $validate and returns the OperationOutcome it replies with.
@@ -5583,8 +5583,8 @@ class FhirClient:
         The ESB doesn't require an OAuth2 token for $validate (RIE.FHIR.Server
         skips introspection for it), so a Bearer token is only sent when
         ESB_CLIENT_ID/ESB_CLIENT_SECRET are set — with the same one retry on
-        a 401 as send_fhir_message_to_esb(). Any OperationOutcome body is
-        returned whatever the HTTP status (a rejected message, e.g. a
+        a 401 as send_fhir_message_to_esb(). Any OperationOutcome (or other
+        `accept`ed resource type) body is returned whatever the HTTP status (a rejected message, e.g. a
         non-message Bundle, comes back as an error issue); anything else
         raises requests.HTTPError with the response detail."""
         url = cls.esb_validate_url()
@@ -5605,13 +5605,43 @@ class FhirClient:
             body = resp.json() if resp.content else None
         except ValueError:
             body = resp.text
-        if isinstance(body, dict) and body.get("resourceType") == "OperationOutcome":
+        if isinstance(body, dict) and body.get("resourceType") in accept:
             return body
         detail = cls._esb_error_detail(body)
         raise requests.HTTPError(
             f"{resp.status_code} from {url}" + (f": {detail[:2000]}" if detail
                                                  else " (no OperationOutcome returned)"),
             response=resp)
+
+    #: Content type an HL7 v2 message is sent to the ESB's $validate as,
+    #: inside a Binary (RIE.FHIR.Server.HL7v2FromBinary()).
+    HL7V2_CONTENT_TYPE = "x-application/hl7-v2+er7"
+
+    @classmethod
+    def validate_hl7v2_with_esb(cls, message, timeout=600):
+        """Sends an HL7 v2 message (text, segments \r-separated) to the
+        ESB's $validate as a Binary. The ESB converts it to a FHIR Message
+        with the same transform its HL7 v2 services use
+        (RIE.Transforms.HL7v2ToFHIRMessage, tagging each resource's
+        meta.source with its segments), validates that, and replies with a
+        Parameters: "return" = the OperationOutcome, "message" = the
+        converted Bundle. Returns (OperationOutcome, Bundle or None) — no
+        Bundle when the ESB replies with just an OperationOutcome (the
+        conversion failed, or the ESB predates HL7 v2 support in $validate
+        and validated the Binary itself)."""
+        binary = {"resourceType": "Binary", "contentType": cls.HL7V2_CONTENT_TYPE,
+                  "data": base64.b64encode(message.encode("utf-8")).decode("ascii")}
+        body = cls.validate_with_esb(json.dumps(binary), timeout=timeout,
+                                     accept=("OperationOutcome", "Parameters"))
+        if body.get("resourceType") == "OperationOutcome":
+            return body, None
+        outcome, bundle = None, None
+        for param in body.get("parameter") or []:
+            if param.get("name") == "return":
+                outcome = param.get("resource")
+            elif param.get("name") == "message":
+                bundle = param.get("resource")
+        return outcome or {"resourceType": "OperationOutcome", "issue": []}, bundle
 
     @staticmethod
     def _esb_error_detail(body):

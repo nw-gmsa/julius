@@ -74,7 +74,7 @@
       <div class="code-editor" data-editor-for="message"
            data-language="{{ 'json' if message_type == 'fhir' else 'plaintext' }}"></div>
       <textarea id="message" name="message" rows="20" class="code-fallback">{{ message }}</textarea>
-      {% set can_validate = message_type == "fhir" and validation and not validation.parse_error %}
+      {% set can_validate = message_type in ("fhir", "hl7v2") and validation and not validation.parse_error %}
       {% set running = validation_job and validation_job.status == "running" %}
       {% if can_validate %}
         {% for p in validation.setup_problems %}<div class="error">{{ p }}</div>{% endfor %}
@@ -100,7 +100,15 @@
       {% if can_validate %}
         {% set t = validation.targets[0] %}
         <input type="hidden" name="validate_target" value="all">
-        {% if validation.backend == "esb" %}
+        {% if validation.is_v2 %}
+          <p class="muted">
+            Validate sends the HL7 v2 message{% if validation.message_event %} (<code>{{ validation.message_event }}</code>){% endif %}
+            (with any edits above) to the ESB's <code>{{ validation.esb_validate_url }}</code>, which converts it to FHIR with
+            the same conversion live messages go through and validates the FHIR — nothing is routed or stored.
+            The report shows each issue against the HL7 v2 segment and field it comes from, alongside its FHIR location.
+            Resources named in "Unable to find a profile match" are then validated automatically (only the first Observation).
+          </p>
+        {% elif validation.backend == "esb" %}
           <p class="muted">
             Validate sends the {{ "message" if validation.is_message_bundle else "resource" }} (with any edits above) to the
             ESB's <code>{{ validation.esb_validate_url }}</code>.
@@ -232,17 +240,32 @@
                 </p>
                 {% if s.json %}
                   <script type="application/json" id="vr-json-{{ loop.index }}">{{ s.json|tojson }}</script>
-                  <p><button type="button" onclick="showValidated({{ loop.index }}, null, {{ s.label|tojson|forceescape }})">View validated JSON</button>
-                    <span class="muted">— click an entry or location to jump to its line.</span></p>
+                  {% set converted = v2_message and s.key == "all" %}
+                  <p><button type="button" onclick="showValidated({{ loop.index }}, null, {{ s.label|tojson|forceescape }})">{{ "View converted FHIR" if converted else "View validated JSON" }}</button>
+                    {% if v2_message %}<button type="button" onclick="showValidated('v2', null, 'HL7 v2 message')">View HL7 v2 message</button>{% endif %}
+                    <span class="muted">— click {% if v2_message %}an HL7 v2 line{% else %}an entry or location{% endif %} to jump to it.</span></p>
+                {% endif %}
+                {% if s.conversion_note %}
+                  <p class="sev-warning">{{ s.conversion_note }}</p>
                 {% endif %}
                 {% if s.error %}
                   <pre class="response-pre">{{ s.error }}</pre>
                 {% elif s.groups %}
                   <table>
-                    <tr><th>Severity</th><th>Location</th><th>Message</th>{% if s.has_entries %}<th>Where</th>{% endif %}</tr>
+                    <tr><th>Severity</th>{% if s.has_v2 %}<th>HL7 v2</th>{% endif %}<th>{% if s.has_v2 %}FHIR location{% else %}Location{% endif %}</th><th>Message</th>{% if s.has_entries %}<th>Where</th>{% endif %}</tr>
                     {% for g in s.groups %}
                       <tr>
                         <td class="sev-{{ g.severity }}">{{ g.severity }}</td>
+                        {% if s.has_v2 %}
+                          <td>
+                            {% if g.v2 %}
+                              {% if g.v2.conversion %}<em class="muted">{{ g.v2.text }}</em>{% else %}<strong>{{ g.v2.text }}</strong>{% endif %}
+                              {% for line in g.occurrences|map(attribute="v2")|select|map(attribute="line")|select|unique %}
+                                <br><a href="#" onclick="showValidated('v2', {{ line }}, 'HL7 v2 message'); return false;">line {{ line }}{% if v2_segments and v2_segments[line - 1] %} ({{ v2_segments[line - 1][:3] }}){% endif %}</a>
+                              {% endfor %}
+                            {% else %}—{% endif %}
+                          </td>
+                        {% endif %}
                         <td>
                           {% if s.has_entries %}<code>{{ g.location or "(resource)" }}</code>
                           {% else %}
@@ -340,6 +363,7 @@
       <input type="hidden" name="validation" value="{{ validation_job_id }}">
     </form>
   {% endif %}
+  {% if v2_message %}<script type="application/json" id="vr-json-v2">{{ v2_message|tojson }}</script>{% endif %}
   <dialog id="vr-dialog">
     <div class="vr-head"><strong id="vr-title"></strong>
       <form method="dialog" style="margin: 0;"><button>Close</button></form></div>

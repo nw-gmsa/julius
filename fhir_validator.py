@@ -549,6 +549,11 @@ def validate(jobs, tx):
         _validate_esb(jobs)
     else:
         _validate_local(jobs, tx)
+    return _finish(jobs)
+
+
+def _finish(jobs):
+    """Adds `json`, entry labels and `counts` to validated jobs."""
     for job in jobs:
         job["json"] = pretty(job["resource"])
         _annotate_bundle_entries(job)
@@ -558,6 +563,44 @@ def validate(jobs, tx):
             counts[sev] = counts.get(sev, 0) + 1
         job["counts"] = counts
     return jobs
+
+
+def validate_hl7v2(job, message):
+    """Validates an HL7 v2 message (ESB backend only): the ESB converts it
+    to a FHIR Message and validates that (FhirClient.validate_hl7v2_with_esb()).
+    `job` (the "all" result) gets the converted Bundle as its `resource`,
+    plus `issues`/`counts`/`error`. Issue line numbers are dropped — they
+    point into the ESB's unindented copy of the Bundle; issues are located
+    in the v2 message instead (hl7v2_mapping.annotate())."""
+    from fhir_client import FhirClient
+    started = time.time()
+    try:
+        outcome, bundle = FhirClient.validate_hl7v2_with_esb(
+            message, timeout=int(os.environ.get("FHIR_VALIDATOR_TIMEOUT", "600")))
+        issues = _issue_rows(outcome)
+        for issue in issues:
+            issue["line"] = None
+        job["resource"] = bundle or {}
+        job["issues"] = issues
+        if bundle is None:
+            job["conversion_note"] = ("The ESB returned no converted FHIR message — the HL7 v2 to FHIR conversion "
+                                      "failed (see the issues), or the ESB doesn't yet accept HL7 v2 in $validate.")
+            if not issues:
+                job["error"] = job["conversion_note"]
+        elif (len(issues) == 1 and issues[0]["severity"] == "information"
+                and "validation disabled" in issues[0]["message"].lower()):
+            job["error"], job["issues"] = ("FHIR validation is disabled on the ESB "
+                                           "(FHIR.Validate's FHIRValidatorEnabled setting)."), []
+        print(f"[fhir_validator] ESB $validate HL7 v2: {len(issues)} issue(s) "
+              f"in {time.time() - started:.0f}s", flush=True)
+    except requests.Timeout:
+        job["resource"], job["error"], job["issues"] = {}, "The ESB's $validate timed out.", []
+    except Exception as e:
+        print(f"[fhir_validator] ESB $validate HL7 v2: failed — {e}", flush=True)
+        job["resource"], job["error"], job["issues"] = {}, str(e), []
+    if job["resource"]:
+        job["profile"], job["bundle_rule_text"] = esb_validation_plan(job["resource"])
+    return _finish([job])[0]
 
 
 def _validate_local(jobs, tx):
@@ -747,7 +790,9 @@ def _group_issues(issues):
             g = groups[key] = {"severity": issue["severity"], "location": key[1], "message": key[2],
                                "occurrences": [], "suggest": [], "mismatch_note": None}
         g["occurrences"].append({"entry_label": issue.get("entry_label"), "line": issue.get("line"),
-                                 "location": issue.get("location")})
+                                 "location": issue.get("location"), "v2": issue.get("v2")})
+        if issue.get("v2") and not g.get("v2"):
+            g["v2"] = issue["v2"]
         for sug in issue.get("suggest") or []:
             if sug not in g["suggest"]:
                 g["suggest"].append(sug)
@@ -785,6 +830,8 @@ def build_report(jobs, include_information=False, ignore=None):
             "ig_label": job.get("ig_label"), "bundle_rule_text": job.get("bundle_rule_text"),
             "individual": job.get("key") != "all", "error": job.get("error"),
             "stale": bool(job.get("stale")), "auto": bool(job.get("auto")),
+            "conversion_note": job.get("conversion_note"),
+            "has_v2": any(i.get("v2") for i in issues),
             "represents": job.get("represents") or [],
             "resource_type": (job.get("resource") or {}).get("resourceType"),
             "issues": issues, "groups": groups, "counts": counts, "ignored": ignored,
@@ -810,6 +857,7 @@ def build_report(jobs, include_information=False, ignore=None):
             g["see"] = see
     report = {"sections": sections, "totals": totals, "ignored_total": ignored_total,
               "include_information": include_information, "ignore": ignore}
+    report["has_v2"] = any(sec["has_v2"] for sec in sections)
     report.update(_overall_result(sections, totals))
     report["advice"] = _advice(sections, totals)
     return report
@@ -864,6 +912,16 @@ def _advice(sections, totals):
     resource's own errors), so the point is to find the few root causes."""
     advice = []
     errors, distinct_errors = _distinct(sections, {"fatal", "error"})
+    if any(s.get("has_v2") for s in sections):
+        advice.append("This HL7 v2 message was converted to FHIR by the ESB (the same conversion live messages go "
+                      "through) and the FHIR was validated. Each issue shows the HL7 v2 segment and field it "
+                      "comes from — fix it there in the sending system.")
+        conversion = sum(1 for s in sections for i in s["issues"]
+                         if i["severity"] in ("fatal", "error") and (i.get("v2") or {}).get("conversion"))
+        if conversion:
+            advice.append(f"{conversion} error(s) are on elements the HL7 v2 to FHIR conversion adds itself "
+                          "(marked \"Added by the HL7 v2 → FHIR conversion\"), not on data from the message — "
+                          "the sender can't fix these; raise them with the integration team.")
     mismatches = sum(len(g["occurrences"]) for s in sections for g in s["groups"]
                      if g["severity"] in ("fatal", "error") and _profile_mismatch(g))
     auto = [s for s in sections if s.get("auto")]

@@ -731,6 +731,37 @@ Nav "Testing" dropdown, hidden when `client.is_production()`; every
   `ESB_BASE_URL`'s host) : `HL7V2_PORT` (default 9980); shows the ACK and
   its MSA-1 code.
 
+**HL7 v2 validation** (ESB backend only — `_hl7v2_validation_context()`
+says so otherwise): a v2 upload gets **Submit (MLLP)** and **Validate**.
+Validate POSTs the message (segments normalised to `\r`) to the same ESB
+`$validate` as a FHIR `Binary` (`contentType` `x-application/hl7-v2+er7`,
+`FhirClient.validate_hl7v2_with_esb()`). RIE-SourceCode's
+`RIE.FHIR.Server.ValidateHL7v2()` converts it with
+`RIE.Transforms.HL7v2ToFHIRMessage` — the transform live v2 messages go
+through — validates the result with FHIR.Validate, and replies with a
+`Parameters` (`return` = OperationOutcome, `message` = the converted
+Bundle); nothing is routed or stored. An ESB without that change just
+validates the Binary, which shows as "no converted FHIR message". From
+there the job is a normal Bundle report (`fhir_validator.validate_hl7v2()`
+for the first stage, then the same automatic follow-up), with issue line
+numbers dropped (they point into the ESB's unindented JSON).
+**Translating back to v2** (`hl7v2_mapping.py`): each issue gets a `v2`
+location — **segment** from the resource's `meta.source`
+(`urn:hl7v2:<position>-<segment>[,...]`, position = segment's place in the
+message, MSH = 1), which the transform only writes when the message's
+`Source` is `"$validate"` (`TagSourceSegments`, so routed messages are
+unchanged); **field** from `hl7v2_mapping.FIELD_MAP` (resource type + FHIR
+path → v2 field, read off the transform's `Get*` methods — keep it in step
+when the transform changes). Elements the transform sets itself map to
+`CONVERSION` ("Added by the HL7 v2 → FHIR conversion" — advice says the
+sender can't fix these). "Unable to find a profile match" issues are
+located at the referenced resource's segment. The report (page and PDF)
+adds an **HL7 v2** column (field + clickable line, opening the v2 message
+with that segment highlighted), "View converted FHIR" / "View HL7 v2
+message", and v2-specific advice. Without `meta.source` (older ESB, or a
+resource the transform made up) the segment is the nearest one of the
+mapped name.
+
 **Only a FHIR message Bundle (`Bundle.type = "message"`) can be sent** —
 any other FHIR resource can be uploaded/pasted but only validated; the
 send button is hidden and `action=send` rejects it server-side too.

@@ -14,6 +14,7 @@ import plotly.express as px
 from dotenv import load_dotenv
 from fhir_client import FhirClient
 import fhir_validator
+import hl7v2_mapping
 from iris_client import IrisClient
 from pdf_report import monthly_report_pdf_bytes, quality_report_pdf_bytes, validation_report_pdf_bytes
 from epic_client import EpicClient, EPIC_FHIR_BASE_URL_DEFAULT, KNOWN_SANDBOX_TEST_PATIENTS
@@ -1332,17 +1333,45 @@ def _validation_tx(value):
     return value or fhir_validator.TX_FHIR_ORG
 
 
+def _hl7v2_validation_context(text):
+    """Validate-panel context for an HL7 v2 preview: validated by the
+    ESB's $validate, which converts it to FHIR first — so only with the
+    ESB backend."""
+    problems = []
+    if fhir_validator.backend() != fhir_validator.BACKEND_ESB:
+        problems.append("HL7 v2 messages can only be validated by the ESB (it converts them to FHIR first) — "
+                        "FHIR_VALIDATION_BACKEND is set to local.")
+    return {
+        "parse_error": None, "is_v2": True, "is_message_bundle": False,
+        "targets": [{"key": "all", "label": "HL7 v2 message", "resource_type": "HL7 v2",
+                     "default": "", "choices": []}],
+        "message_event": hl7v2_mapping.message_event(text),
+        "backend": fhir_validator.backend(), "esb_validate_url": FhirClient.esb_validate_url(),
+        "setup_problems": problems,
+    }
+
+
 def _run_validation_job(job):
     try:
-        try:
-            source = json.loads(job["message"])
-        except ValueError:
-            source = None
-        bundle = source if isinstance(source, dict) and source.get("resourceType") == "Bundle" else None
+        if job.get("v2"):
+            # The ESB converts the v2 message; the report is about that
+            # FHIR Message, located back in the v2 message at the end.
+            first = job["results"][0]
+            if not first.get("validated"):
+                fhir_validator.validate_hl7v2(first, job["v2"])
+                first["validated"] = True
+            bundle = first.get("resource") or None
+        else:
+            try:
+                source = json.loads(job["message"])
+            except ValueError:
+                source = None
+            bundle = source if isinstance(source, dict) and source.get("resourceType") == "Bundle" else None
         # A run that adds individual resources to an earlier report
         # carries that report's results over already validated.
         to_run = [r for r in job["results"] if not r.get("validated")]
-        fhir_validator.validate(to_run, job["tx"])
+        if to_run:
+            fhir_validator.validate(to_run, job["tx"])
         for r in to_run:
             r["validated"] = True
         fhir_validator.annotate_profile_mismatches(job["results"], bundle)
@@ -1360,6 +1389,9 @@ def _run_validation_job(job):
                 for r in follow_up:
                     r["validated"] = True
                 fhir_validator.annotate_profile_mismatches(job["results"], bundle)
+        if job.get("v2"):
+            hl7v2_mapping.annotate(job["results"], bundle, job["v2"],
+                                   fhir_validator._profile_mismatch, fhir_validator._find_entry)
     except Exception as e:
         job["error"] = str(e)
     job["status"] = "done"
@@ -1416,6 +1448,7 @@ def testing_send_message():
         "error": None, "result": None, "validation": None, "validation_job": None,
         "now_ts": time.time(), "report": None, "report_pdf_url": None, "entry_targets": None,
         "pick_error": False, "individual_validation": INDIVIDUAL_VALIDATION_ENABLED,
+        "v2_message": None, "v2_segments": None,
     }
     job_id = request.args.get("validation")
     if request.method == "GET" and job_id:
@@ -1423,7 +1456,7 @@ def testing_send_message():
         if not job:
             ctx["error"] = "That validation run isn't available (the app may have restarted)."
         else:
-            ctx.update(message=job["message"], message_type="fhir", filename=job["filename"],
+            ctx.update(message=job["message"], message_type=job.get("message_type", "fhir"), filename=job["filename"],
                        validation_job=job, selected_tx=job["tx"],
                        selected={r["key"]: r["choice"] for r in job["results"]},
                        selected_bundle_rule=next((r.get("bundle_rule", "") for r in job["results"]
@@ -1450,6 +1483,30 @@ def testing_send_message():
                 if not ctx["message_type"]:
                     ctx["error"] = ("Couldn't tell what kind of message this is — expected a FHIR JSON "
                                     "resource (starting with '{') or an HL7 v2 message (starting with 'MSH').")
+        elif action == "validate" and (FhirClient.detect_message_type(request.form.get("message", ""))
+                                       or request.form.get("message_type")) == "hl7v2":
+            text = request.form.get("message", "")
+            ctx.update(message=text, message_type="hl7v2", filename=request.form.get("filename"))
+            problems = _hl7v2_validation_context(text)["setup_problems"]
+            if problems:
+                ctx["error"] = " ".join(problems)
+            else:
+                event = hl7v2_mapping.message_event(text)
+                job_id = secrets.token_urlsafe(16)
+                _validation_jobs[job_id] = job = {
+                    "sid": session.get("sid"), "status": "running", "error": None,
+                    "message": text, "message_type": "hl7v2", "v2": hl7v2_mapping.normalise(text),
+                    "filename": ctx["filename"], "tx": _validation_tx(None),
+                    "results": [{
+                        "key": "all", "resource": {}, "choice": "", "ig": fhir_validator.DEFAULT_IG,
+                        "ig_label": fhir_validator.ESB_IG_LABEL, "profile": None, "bundle_rule": "",
+                        "bundle_rule_text": None, "auto": False, "represents": [],
+                        "label": f"HL7 v2 message{f' ({event})' if event else ''} — converted to FHIR",
+                    }],
+                    "started": time.time(), "finished": None, "follow_up": True, "stage": "bundle",
+                }
+                threading.Thread(target=_run_validation_job, args=(job,), daemon=True).start()
+                return redirect(url_for("testing_send_message", validation=job_id))
         elif action == "validate":
             text = request.form.get("message", "")
             ctx.update(message=text, message_type="fhir", filename=request.form.get("filename"))
@@ -1579,6 +1636,11 @@ def testing_send_message():
                 ctx["error"] = f"Send failed: {e}"
     if ctx["message"] and ctx["message_type"] == "fhir":
         ctx["validation"] = _fhir_validation_context(ctx["message"])
+    elif ctx["message"] and ctx["message_type"] == "hl7v2":
+        ctx["validation"] = _hl7v2_validation_context(ctx["message"])
+    if ctx["validation_job"] and ctx["validation_job"].get("v2"):
+        ctx["v2_segments"] = hl7v2_mapping.segments(ctx["validation_job"]["v2"])
+        ctx["v2_message"] = "\n".join(ctx["v2_segments"])
     if ctx["validation_job"] and ctx["validation_job"]["status"] == "done":
         include_information, ignore = _validation_report_options()
         ctx["report"] = fhir_validator.build_report(ctx["validation_job"]["results"], include_information, ignore)

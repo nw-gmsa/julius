@@ -401,6 +401,9 @@ def validation_report_pdf_bytes(report, job):
     details = []
     if job.get("filename"):
         details.append(f"File: {job['filename']}")
+    if job.get("v2"):
+        details.append("Input: HL7 v2 message, converted to FHIR by the ESB; issues are shown against its "
+                       "segments and fields (line = segment position, MSH = 1)")
     details.append(f"Validated: {_time.strftime('%Y-%m-%d %H:%M', _time.localtime(job.get('started') or _time.time()))}")
     details.append(f"Terminology server: {job.get('tx')}")
     details.append("Shown: errors and warnings" + (" and information" if report["include_information"] else ""))
@@ -444,6 +447,8 @@ def validation_report_pdf_bytes(report, job):
             [f"Against {s.get('profile') or 'base resource + meta.profile'} ({s.get('ig_label') or ''})"]
         if s.get("bundle_rule_text"):
             meta.append(f"With {s['bundle_rule_text']}")
+        if s.get("conversion_note"):
+            meta.append(s["conversion_note"])
         if s.get("represents"):
             meta.append(f"Stands in for {len(s['represents'])} other {s.get('resource_type')}(s) named in the same "
                         f"errors, not validated individually - likely to have the same problems: "
@@ -463,7 +468,9 @@ def validation_report_pdf_bytes(report, job):
             main_story.append(KeepTogether(story))
             continue
         has_entries = s.get("has_entries")
-        rows = [["Severity", "Location", "Message"] + (["Where"] if has_entries else [])]
+        has_v2 = s.get("has_v2")
+        rows = [["Severity"] + (["HL7 v2"] if has_v2 else []) + ["FHIR location" if has_v2 else "Location", "Message"]
+                + (["Where"] if has_entries else [])]
         for g in s["groups"]:
             sev = Paragraph(f'<font color="{sev_colours.get(g["severity"], "#000000")}"><b>'
                             f'{escape(g["severity"])}</b></font>', _CELL_STYLE)
@@ -475,15 +482,29 @@ def validation_report_pdf_bytes(report, job):
                 message += f"<br/>&gt;&gt; why: see {escape(label)} below"
             if g.get("mismatch_note"):
                 message += f"<br/>&gt;&gt; {escape(g['mismatch_note'])}"
-            row = [sev, p(location), Paragraph(message, _CELL_STYLE)]
+            row = [sev]
+            if has_v2:
+                v2 = g.get("v2") or {}
+                lines = []
+                for o in g["occurrences"]:
+                    line = (o.get("v2") or {}).get("line")
+                    if line and line not in lines:
+                        lines.append(line)
+                text = escape(v2.get("text") or "-")
+                text = f"<i>{text}</i>" if v2.get("conversion") else f"<b>{text}</b>"
+                if lines:
+                    text += "<br/>" + escape("line " + ", ".join(str(n) for n in lines))
+                row.append(Paragraph(text, _CELL_STYLE))
+            row += [p(location), Paragraph(message, _CELL_STYLE)]
             if has_entries:
                 row.append(Paragraph("<br/>".join(
                     escape((o.get("entry_label") or o.get("location") or "(resource)")
                            + (f" (line {o['line']})" if o.get("line") else ""))
                     for o in g["occurrences"]), _CELL_STYLE))
             rows.append(row)
-        sev_w, loc_w, where_w = 50, 170, (200 if has_entries else 0)
-        widths = [sev_w, loc_w, _CONTENT_WIDTH - sev_w - loc_w - where_w] + ([where_w] if has_entries else [])
+        sev_w, loc_w, where_w, v2_w = 50, 170, (200 if has_entries else 0), (120 if has_v2 else 0)
+        widths = [sev_w] + ([v2_w] if has_v2 else []) + [loc_w, _CONTENT_WIDTH - sev_w - v2_w - loc_w - where_w] \
+            + ([where_w] if has_entries else [])
         t = Table(rows, colWidths=widths, repeatRows=1)
         t.setStyle(_TABLE_STYLE)
         # The table flows on straight after the summary and splits across
