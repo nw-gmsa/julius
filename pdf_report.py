@@ -374,12 +374,25 @@ def validation_report_pdf_bytes(report, job):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=_PAGE_MARGIN, rightMargin=_PAGE_MARGIN,
                             topMargin=_PAGE_MARGIN, bottomMargin=_PAGE_MARGIN,
-                            title="FHIR validation report")
+                            title="Data security report - FHIR validation")
 
     def p(text):
         return Paragraph(escape(text or ""), _CELL_STYLE)
 
-    story = [_para("FHIR validation report", "Title")]
+    story = [_para("Data security report", "Title"), _para("FHIR validation", "Heading2")]
+    result_colours = {"fail": ("#fdecee", "#8a1020"), "incomplete": ("#fff4e5", "#7a4a00"),
+                      "pass_with_warnings": ("#fff8e1", "#6b5200"), "pass": ("#e8f5ec", "#135c2c")}
+    bg, fg = result_colours.get(report.get("result"), ("#f0f0f0", "#000000"))
+    banner_style = ParagraphStyle("ResultBanner", parent=_STYLES["Normal"], fontSize=11, leading=15,
+                                  textColor=colors.HexColor(fg))
+    banner = Table([[Paragraph(f"<font size=16><b>Result: {escape(report.get('result_label') or '')}</b></font>"
+                               f"<br/>{escape((report.get('result_reason') or '').capitalize())}.", banner_style)]],
+                   colWidths=[_CONTENT_WIDTH])
+    banner.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(bg)),
+                                ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor(fg)),
+                                ("LEFTPADDING", (0, 0), (-1, -1), 10), ("TOPPADDING", (0, 0), (-1, -1), 8),
+                                ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
+    story += [banner, Spacer(1, 4 * mm)]
     totals = report["totals"]
     summary = (f"<b>{totals['error']} error(s)</b>, <b>{totals['warning']} warning(s)</b>"
                + (f", {totals['information']} information" if report["include_information"] else "")
@@ -391,17 +404,21 @@ def validation_report_pdf_bytes(report, job):
     details.append(f"Validated: {_time.strftime('%Y-%m-%d %H:%M', _time.localtime(job.get('started') or _time.time()))}")
     details.append(f"Terminology server: {job.get('tx')}")
     details.append("Shown: errors and warnings" + (" and information" if report["include_information"] else ""))
-    if report["ignore"]:
+    if report["ignored_total"]:
         details.append(f"Ignored (message contains): {'; '.join(report['ignore'])}"
                        f" — {report['ignored_total']} issue(s) left out")
     story.append(_para("<br/>".join(escape(d) for d in details)))
+    if report.get("advice"):
+        story.append(_para("Tackling the issues", "Heading3"))
+        story.append(_para("<br/>".join(f"{i}. {escape(a)}" for i, a in enumerate(report["advice"], 1))))
     story.append(Spacer(1, 6 * mm))
 
     info = report["include_information"]
     header = ["Resource", "Validated against", "Errors", "Warnings"] + (["Info"] if info else [])
     rows = [header]
     for s in report["sections"]:
-        label = s["label"] + (" (before later edits)" if s.get("stale") else "")
+        label = s["label"] + ((f" (automatic, stands in for {len(s['represents'])} more)" if s.get("represents")
+                               else " (automatic)") if s.get("auto") else "") + (" (before later edits)" if s.get("stale") else "")
         rows.append([p(label), p(s.get("profile") or "base resource + meta.profile"),
                      "failed" if s.get("error") else str(s["counts"]["error"]), str(s["counts"]["warning"])]
                     + ([str(s["counts"]["information"])] if info else []))
@@ -414,13 +431,23 @@ def validation_report_pdf_bytes(report, job):
 
     sev_colours = {"fatal": "#b00020", "error": "#b00020", "warning": "#a15c00", "information": "#555555"}
     main_story = story
+    main_story.append(Spacer(1, 6 * mm))
+    issues_heading = _para("Issues by resource", "Heading2")
+    issues_heading.keepWithNext = 1
+    main_story.append(issues_heading)
     for s in report["sections"]:
-        main_story.append(Spacer(1, 6 * mm))
-        story = []  # this section, kept with its heading (KeepTogether below)
+        if s is not report["sections"][0]:
+            main_story.append(Spacer(1, 4 * mm))
+        story = []  # this section's heading and notes, kept with the start of its table
         story.append(_para(escape(s["label"]), "Heading3"))
-        meta = [f"Against {s.get('profile') or 'base resource + meta.profile'} ({s.get('ig_label') or ''})"]
+        meta = (["Validated automatically - named in \"Unable to find a profile match\""] if s.get("auto") else []) + \
+            [f"Against {s.get('profile') or 'base resource + meta.profile'} ({s.get('ig_label') or ''})"]
         if s.get("bundle_rule_text"):
             meta.append(f"With {s['bundle_rule_text']}")
+        if s.get("represents"):
+            meta.append(f"Stands in for {len(s['represents'])} other {s.get('resource_type')}(s) named in the same "
+                        f"errors, not validated individually - likely to have the same problems: "
+                        f"{', '.join(s['represents'])}")
         if s.get("stale"):
             meta.append("NOTE: validated before later edits to this resource - re-validate for current results")
         if s.get("ignored"):
@@ -444,8 +471,8 @@ def validation_report_pdf_bytes(report, job):
             if not has_entries and g["occurrences"][0].get("line"):
                 location += f" (line {g['occurrences'][0]['line']})"
             message = escape(g.get("message") or "")
-            for sug in g.get("suggest") or []:
-                message += f"<br/>&gt;&gt; can be checked by validating {escape(sug['label'])} against {escape(sug['profile'])}"
+            for _, label in g.get("see") or []:
+                message += f"<br/>&gt;&gt; why: see {escape(label)} below"
             if g.get("mismatch_note"):
                 message += f"<br/>&gt;&gt; {escape(g['mismatch_note'])}"
             row = [sev, p(location), Paragraph(message, _CELL_STYLE)]
@@ -459,7 +486,12 @@ def validation_report_pdf_bytes(report, job):
         widths = [sev_w, loc_w, _CONTENT_WIDTH - sev_w - loc_w - where_w] + ([where_w] if has_entries else [])
         t = Table(rows, colWidths=widths, repeatRows=1)
         t.setStyle(_TABLE_STYLE)
-        story.append(t)
-        main_story.append(KeepTogether(story))
+        # The table flows on straight after the summary and splits across
+        # pages (header row repeated); the heading and notes stay with its
+        # first rows rather than being left at the foot of a page.
+        for flowable in story:
+            flowable.keepWithNext = 1
+        main_story.extend(story)
+        main_story.append(t)
     doc.build(main_story)
     return buf.getvalue()

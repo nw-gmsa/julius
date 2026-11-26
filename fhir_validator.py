@@ -1,10 +1,21 @@
-"""FHIR validation run inside this app — the HL7 FHIR Validator CLI
-(validator_cli.jar) as a subprocess, the same tool and flags the NW GMSA
-IG's own testing page uses
-(https://nw-gmsa.github.io/en/testing-resources.html). Deliberately not
-the FHIR server's own $validate: everything runs locally.
+"""FHIR validation for /testing/send-message. Two backends, picked by
+FHIR_VALIDATION_BACKEND (read fresh on every call):
 
-Configuration (environment variables, read fresh on every call):
+- "esb" (default) — POST to the ESB's $validate (ESB_BASE_URL +
+  /ESB/$validate, FhirClient.validate_with_esb()): RIE.FHIR.Validate runs
+  the HL7 FHIR Validator on the ESB servers. Profile, -bundle rule,
+  terminology server and ignored issues are that component's own
+  settings, so this app's profile / -bundle / terminology choices don't
+  apply. Only message Bundles (O21/O51/R01/R32) and single non-Bundle
+  resources (against the NW profile named after their type) are accepted.
+- "local" — the HL7 FHIR Validator CLI (validator_cli.jar) as a
+  subprocess inside this app (run_validator()), the same tool and flags
+  the NW GMSA IG's own testing page uses
+  (https://nw-gmsa.github.io/en/testing-resources.html). Kept so the app
+  can revert to it.
+
+Configuration for the local backend (environment variables, read fresh
+on every call):
 
 - FHIR_VALIDATOR_JAR    path to validator_cli.jar
                         (default data/validator/validator_cli.jar —
@@ -92,8 +103,24 @@ def java_path():
     return os.environ.get("FHIR_VALIDATOR_JAVA") or "java"
 
 
+BACKEND_ESB = "esb"
+BACKEND_LOCAL = "local"
+
+
+def backend():
+    """FHIR_VALIDATION_BACKEND: "esb" (default) or "local"."""
+    value = (os.environ.get("FHIR_VALIDATION_BACKEND") or BACKEND_ESB).strip().lower()
+    return BACKEND_LOCAL if value == BACKEND_LOCAL else BACKEND_ESB
+
+
 def setup_problems():
     """List of human-readable reasons validation can't run (empty = ready)."""
+    if backend() == BACKEND_ESB:
+        return []
+    return _local_setup_problems()
+
+
+def _local_setup_problems():
     problems = []
     if not shutil.which(java_path()):
         problems.append(f"Java not found ('{java_path()}') — install Java 17+ or set FHIR_VALIDATOR_JAVA.")
@@ -401,7 +428,7 @@ def run_validator(resources, ig_key, profile, tx, bundle_rule=None):
     validator run against `profile` (or just the base resource and its
     meta.profile when None) with `ig_key`'s package loaded. Returns
     (list of OperationOutcome per resource, console log text)."""
-    problems = setup_problems()
+    problems = _local_setup_problems()
     if problems:
         raise RuntimeError(" ".join(problems))
     with tempfile.TemporaryDirectory(prefix="fhir-validate-") as tmp:
@@ -459,11 +486,84 @@ def _annotate_bundle_entries(job):
             issue["entry_type"] = res.get("resourceType")
 
 
+# --- The ESB's $validate ---------------------------------------------------
+
+NW_PROFILE_BASE = "https://fhir.nwgenomics.nhs.uk/StructureDefinition/"
+
+#: What RIE.FHIR.Validate validates a message's focus resource against
+#: (its FocusResourceType()/FocusProfile() and the *Profile settings'
+#: defaults) — shown on the report only; the ESB decides.
+ESB_EVENT_FOCUS = {
+    "O21": ("ServiceRequest", NW_PROFILE_BASE + "ServiceRequest"),
+    "O51": ("Task", NW_PROFILE_BASE + "Task"),
+    "R01": ("DiagnosticReport", NW_PROFILE_BASE + "DiagnosticReport"),
+    "R32": ("DiagnosticReport", NW_PROFILE_BASE + "DiagnosticReport"),
+}
+
+ESB_IG_LABEL = "ESB $validate"
+
+
+def esb_validation_plan(resource):
+    """(profile, bundle_rule_text) the ESB is expected to use for
+    `resource`, for the report — RIE.FHIR.Validate's defaults, which may
+    differ if its settings were changed."""
+    if resource.get("resourceType") == "Bundle":
+        if resource.get("type") != "message":
+            return "not accepted (only message Bundles)", None
+        event = message_event_code(resource)
+        focus = ESB_EVENT_FOCUS.get(event or "")
+        if not focus:
+            return f"not accepted (event {event or 'unknown'})", None
+        return NW_PROFILE_BASE + "BundleMessage", f"-bundle {focus[0]}:0 {focus[1]}"
+    return NW_PROFILE_BASE + resource.get("resourceType", ""), None
+
+
+def _validate_esb(jobs):
+    from fhir_client import FhirClient  # fhir_client doesn't import this module
+    timeout = int(os.environ.get("FHIR_VALIDATOR_TIMEOUT", "600"))
+    for job in jobs:
+        started = time.time()
+        try:
+            outcome = FhirClient.validate_with_esb(pretty(job["resource"]), timeout=timeout)
+            issues = _issue_rows(outcome)
+            if (len(issues) == 1 and issues[0]["severity"] == "information"
+                    and "validation disabled" in issues[0]["message"].lower()):
+                job["error"], job["issues"] = ("FHIR validation is disabled on the ESB "
+                                               "(FHIR.Validate's FHIRValidatorEnabled setting)."), []
+            else:
+                job["issues"] = issues
+            print(f"[fhir_validator] ESB $validate {job['label']}: {len(issues)} issue(s) "
+                  f"in {time.time() - started:.0f}s", flush=True)
+        except requests.Timeout:
+            job["error"], job["issues"] = "The ESB's $validate timed out.", []
+        except Exception as e:
+            print(f"[fhir_validator] ESB $validate {job['label']}: failed — {e}", flush=True)
+            job["error"], job["issues"] = str(e), []
+
+
 def validate(jobs, tx):
-    """`jobs`: list of {label, resource, ig, profile}. Runs one validator
-    per distinct (ig, profile) — each JVM start + package load takes tens
-    of seconds, so resources sharing a profile go together. Returns the
-    jobs, each with `issues`, `counts` and `error` added."""
+    """`jobs`: list of {label, resource, ig, profile}. Validates each via
+    the configured backend() and returns the jobs, each with `issues`,
+    `counts` and `error` added. `tx` only applies to the local backend."""
+    if backend() == BACKEND_ESB:
+        _validate_esb(jobs)
+    else:
+        _validate_local(jobs, tx)
+    for job in jobs:
+        job["json"] = pretty(job["resource"])
+        _annotate_bundle_entries(job)
+        counts = {"error": 0, "warning": 0, "information": 0}
+        for issue in job.get("issues") or []:
+            sev = "error" if issue["severity"] == "fatal" else issue["severity"]
+            counts[sev] = counts.get(sev, 0) + 1
+        job["counts"] = counts
+    return jobs
+
+
+def _validate_local(jobs, tx):
+    """Local backend: runs one validator per distinct (ig, profile) — each
+    JVM start + package load takes tens of seconds, so resources sharing a
+    profile go together."""
     groups = {}
     for job in jobs:
         groups.setdefault((job["ig"], job["profile"], job.get("bundle_rule") or None), []).append(job)
@@ -489,15 +589,6 @@ def validate(jobs, tx):
             print(f"[fhir_validator] {ig_key} {profile or '(base)'}: failed — {e}", flush=True)
             for job in group:
                 job["error"], job["issues"] = str(e), []
-    for job in jobs:
-        job["json"] = pretty(job["resource"])
-        _annotate_bundle_entries(job)
-        counts = {"error": 0, "warning": 0, "information": 0}
-        for issue in job.get("issues") or []:
-            sev = "error" if issue["severity"] == "fatal" else issue["severity"]
-            counts[sev] = counts.get(sev, 0) + 1
-        job["counts"] = counts
-    return jobs
 
 
 # --- "Unable to find a profile match" ---------------------------------------
@@ -576,6 +667,51 @@ def suggestions(jobs):
     return out
 
 
+#: Resource types only the first suggested entry of which is validated
+#: automatically — a message usually carries many Observations built the
+#: same way, so they tend to share one problem.
+FOLLOW_UP_FIRST_ONLY_TYPES = {"Observation"}
+
+
+def follow_up_targets(jobs, bundle):
+    """Entries to validate automatically once a Bundle's report is in:
+    every entry named in an "Unable to find a profile match" issue (after
+    annotate_profile_mismatches()), in Bundle order, against its type's
+    default profile (default_choice() — the NW Observation profile for an
+    Observation) — but only the first of each FOLLOW_UP_FIRST_ONLY_TYPES
+    type. Entries already validated are skipped. Returns a list of
+    {key, label, resource, choice, represents} — `represents` lists the
+    labels of the other entries of a first-only type that were named too
+    but not validated (the report explains the one stands in for them)."""
+    if not isinstance(bundle, dict):
+        return []
+    entries = bundle.get("entry") or []
+    done = {job["key"] for job in jobs}
+    indexes = sorted({int(sug["key"].split("-", 1)[1]) for sug in suggestions(jobs)})
+    picks, first_of_type = [], {}
+    for i in indexes:
+        key = f"entry-{i}"
+        res = (entries[i].get("resource") if i < len(entries) else None) or {}
+        res_type = res.get("resourceType")
+        if not res_type:
+            continue
+        label = f"entry[{i}] {describe_resource(res)}"
+        if res_type in FOLLOW_UP_FIRST_ONLY_TYPES:
+            if res_type in first_of_type:
+                if first_of_type[res_type] is not None:
+                    first_of_type[res_type]["represents"].append(label)
+                continue
+            first_of_type[res_type] = None
+        if key in done:
+            continue
+        pick = {"key": key, "label": label, "resource": res, "choice": default_choice(res),
+                "represents": []}
+        if res_type in FOLLOW_UP_FIRST_ONLY_TYPES:
+            first_of_type[res_type] = pick
+        picks.append(pick)
+    return picks
+
+
 # --- Human-readable report ---------------------------------------------------
 
 #: Issues left out of the report by default (case-insensitive substring
@@ -648,10 +784,117 @@ def build_report(jobs, include_information=False, ignore=None):
             "key": job["key"], "label": job["label"], "profile": job.get("profile"),
             "ig_label": job.get("ig_label"), "bundle_rule_text": job.get("bundle_rule_text"),
             "individual": job.get("key") != "all", "error": job.get("error"),
-            "stale": bool(job.get("stale")),
+            "stale": bool(job.get("stale")), "auto": bool(job.get("auto")),
+            "represents": job.get("represents") or [],
+            "resource_type": (job.get("resource") or {}).get("resourceType"),
             "issues": issues, "groups": groups, "counts": counts, "ignored": ignored,
             "has_entries": any("entry" in i for i in issues),
             "json": job.get("json"), "log": job.get("log"),
         })
-    return {"sections": sections, "totals": totals, "ignored_total": ignored_total,
-            "include_information": include_information, "ignore": ignore}
+    # "Unable to find a profile match" rows point at the section where the
+    # referenced resource was validated on its own (the automatic follow-up).
+    # An entry that wasn't validated because another of its type stands in
+    # for it (FOLLOW_UP_FIRST_ONLY_TYPES) points at that one instead.
+    index_by_key = {sec["key"]: (i, sec["label"]) for i, sec in enumerate(sections, 1)}
+    index_by_label = {}
+    for i, sec in enumerate(sections, 1):
+        for label in sec.get("represents") or []:
+            index_by_label.setdefault(label, (i, sec["label"]))
+    for sec in sections:
+        for g in sec["groups"]:
+            see = []
+            for sug in g["suggest"]:
+                target = index_by_key.get(sug["key"]) or index_by_label.get(sug["label"])
+                if target and sug["key"] != sec["key"] and target not in see:
+                    see.append(target)
+            g["see"] = see
+    report = {"sections": sections, "totals": totals, "ignored_total": ignored_total,
+              "include_information": include_information, "ignore": ignore}
+    report.update(_overall_result(sections, totals))
+    report["advice"] = _advice(sections, totals)
+    return report
+
+
+#: Overall result: any error fails; warnings alone pass with warnings; a
+#: resource the validator couldn't check at all makes it incomplete.
+RESULT_LABELS = {
+    "fail": "Fail",
+    "incomplete": "Incomplete",
+    "pass_with_warnings": "Pass with warnings",
+    "pass": "Pass",
+}
+
+
+def _overall_result(sections, totals):
+    failed_runs = [s["label"] for s in sections if s.get("error")]
+    if totals["error"]:
+        result = "fail"
+        reason = f"{totals['error']} validation error(s)"
+        if failed_runs:
+            reason += f"; {len(failed_runs)} resource(s) could not be validated"
+    elif failed_runs:
+        result = "incomplete"
+        reason = (f"{len(failed_runs)} resource(s) could not be validated "
+                  f"({', '.join(failed_runs)}) — no errors in the rest")
+    elif totals["warning"]:
+        result = "pass_with_warnings"
+        reason = f"no errors, {totals['warning']} warning(s)"
+    else:
+        result = "pass"
+        reason = "no errors or warnings"
+    return {"result": result, "result_label": RESULT_LABELS[result], "result_reason": reason}
+
+
+def _distinct(sections, severities):
+    """(occurrences, distinct problems) of these severities — distinct
+    being one per grouped row, ignoring which resource it was found in."""
+    occurrences, distinct = 0, set()
+    for s in sections:
+        for g in s["groups"]:
+            if g["severity"] in severities:
+                occurrences += len(g["occurrences"])
+                distinct.add((g["severity"], g["location"], g["message"]))
+    return occurrences, len(distinct)
+
+
+def _advice(sections, totals):
+    """Plain-language next steps for the report, based on what it found:
+    the same problem tends to repeat (many Observations built the same
+    way; "Unable to find a profile match" restating a referenced
+    resource's own errors), so the point is to find the few root causes."""
+    advice = []
+    errors, distinct_errors = _distinct(sections, {"fatal", "error"})
+    mismatches = sum(len(g["occurrences"]) for s in sections for g in s["groups"]
+                     if g["severity"] in ("fatal", "error") and _profile_mismatch(g))
+    auto = [s for s in sections if s.get("auto")]
+    if errors:
+        advice.append("Fix errors first — they are what fails the report. Warnings don't, and can be "
+                      "reviewed once the errors are gone.")
+    if errors and distinct_errors < errors:
+        advice.append(f"The {errors} error(s) come from {distinct_errors} distinct problem(s). Identical "
+                      "issues are shown once, with every place they occur — each is usually one fault in "
+                      "how the sending system builds that resource, so fixing it once fixes every "
+                      "occurrence.")
+    if mismatches:
+        advice.append(f"{mismatches} error(s) are \"Unable to find a profile match\". These are symptoms: they "
+                      "say a referenced resource doesn't conform to its profile, not why. "
+                      + ("The reasons are in the automatically validated resource(s) below — fix those and "
+                         "these errors should go away too." if auto else
+                         "Validate the referenced resource on its own to see why."))
+    for s in auto:
+        if s.get("represents"):
+            n = len(s["represents"])
+            advice.append(f"Only the first {s['resource_type']} ({s['label']}) was validated on its own. "
+                          f"{n} other {s['resource_type']}(s) were named in the same errors and are very likely "
+                          f"built the same way, so expect them to have the same problems: apply the fixes for "
+                          f"{s['label']} to all of them.")
+    if any(s.get("error") for s in sections):
+        advice.append("Some resources could not be validated at all (see their sections) — the report can't "
+                      "pass until they are.")
+    if errors:
+        advice.append("Re-validate after each round of fixes: fixing one error can remove others or let "
+                      "the validator check further and report new ones.")
+    elif totals["warning"]:
+        advice.append("Review the warnings: they don't fail the report but often point at data that a "
+                      "receiving system may not handle as expected.")
+    return advice

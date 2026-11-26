@@ -12,6 +12,14 @@
     .sev-information { color: #555; }
     .validation-result { margin-bottom: 1.2em; }
     .validation-result summary { cursor: pointer; }
+    .result-banner { display: flex; gap: 14px; align-items: center; padding: 12px 16px; border-radius: 6px;
+                     margin-bottom: 12px; border: 1px solid; }
+    .result-banner .result-label { font-size: 1.4rem; font-weight: bold; white-space: nowrap; }
+    .result-fail { background: #fdecee; border-color: #f1aeb5; color: #8a1020; }
+    .result-incomplete { background: #fff4e5; border-color: #f5c77e; color: #7a4a00; }
+    .result-pass_with_warnings { background: #fff8e1; border-color: #f0d27a; color: #6b5200; }
+    .result-pass { background: #e8f5ec; border-color: #9fd3ae; color: #135c2c; }
+    .advice li { margin-bottom: .35em; }
     #vr-dialog { width: min(1000px, 94vw); max-height: 85vh; padding: 0; border: 1px solid #ccc; border-radius: 6px; overscroll-behavior: contain; }
     #vr-dialog .vr-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #eee; }
     #vr-code { margin: 0; max-height: calc(85vh - 50px); overflow: auto; overscroll-behavior: contain; background: #f7f7f7; font-size: .8rem; }
@@ -27,9 +35,11 @@
   <h1>Validate / send HL7 v2 / FHIR message</h1>
   <p class="muted">
     Test systems only. FHIR resources can be validated (any resource; for a Bundle, the whole
-    Bundle and/or individual entries) with the HL7 FHIR Validator run inside this app — against
-    the NW GMSA or HL7 Genomics Reporting profiles, as on the IG's
-    <a href="https://nw-gmsa.github.io/en/testing-resources.html" target="_blank">FHIR validation page</a>.
+    Bundle and/or individual entries) with the HL7 FHIR Validator, as on the IG's
+    <a href="https://nw-gmsa.github.io/en/testing-resources.html" target="_blank">FHIR validation page</a> —
+    {% if validation and validation.backend == "esb" %}run by the ESB's <code>{{ validation.esb_validate_url }}</code>
+    (the ESB's FHIR.Validate settings choose the profile and terminology server).
+    {% else %}run inside this app, against the NW GMSA or HL7 Genomics Reporting profiles.{% endif %}
     Only a FHIR <strong>message Bundle</strong> can be sent: it's POSTed to <code>{{ process_message_url }}</code>;
     HL7 v2 messages are sent over MLLP to <code>{{ hl7v2_target }}</code>.
   </p>
@@ -64,6 +74,13 @@
       <div class="code-editor" data-editor-for="message"
            data-language="{{ 'json' if message_type == 'fhir' else 'plaintext' }}"></div>
       <textarea id="message" name="message" rows="20" class="code-fallback">{{ message }}</textarea>
+      {% set can_validate = message_type == "fhir" and validation and not validation.parse_error %}
+      {% set running = validation_job and validation_job.status == "running" %}
+      {% if can_validate %}
+        {% for p in validation.setup_problems %}<div class="error">{{ p }}</div>{% endfor %}
+      {% elif message_type == "fhir" and validation and validation.parse_error %}
+        <div class="error">{{ validation.parse_error }}</div>
+      {% endif %}
       <p>
         {% if message_type == "hl7v2" or (validation and validation.is_message_bundle) %}
           <button type="submit" name="action" value="send"
@@ -71,82 +88,97 @@
             {% if result %}Resend{% else %}Submit{% endif %}
             {% if message_type == "fhir" %}to $process-message{% else %}to {{ hl7v2_target }} (MLLP){% endif %}
           </button>
-        {% elif message_type == "fhir" %}
-          <span class="muted">Sending is only available for a FHIR message Bundle (<code>Bundle.type = "message"</code>) —
-            this can be validated below.</span>
+        {% endif %}
+        {% if can_validate %}
+          <button type="submit" name="action" value="validate"
+                  {% if validation.setup_problems or running %}disabled{% endif %}>Validate</button>
         {% endif %}
         {% if message_type == "fhir" %}<button type="button" onclick="formatEditor('message')">Format JSON</button>{% endif %}
         <a href="{{ request.script_root }}/testing/send-message">Start again with a new message</a>
       </p>
 
-      {% if message_type == "fhir" %}
-        <h2>Validate</h2>
-        {% if validation.parse_error %}
-          <div class="error">{{ validation.parse_error }}</div>
-        {% else %}
-          {% for p in validation.setup_problems %}<div class="error">{{ p }}</div>{% endfor %}
+      {% if can_validate %}
+        {% set t = validation.targets[0] %}
+        <input type="hidden" name="validate_target" value="all">
+        {% if validation.backend == "esb" %}
           <p class="muted">
-            {% if validation.targets|length > 1 %}
-              The whole Bundle is validated first. Once its report is in, you can choose individual entries to
-              validate on their own (e.g. one named in "Unable to find a profile match").
-            {% endif %}
-            Edits above are included.
+            Validate sends the {{ "message" if validation.is_message_bundle else "resource" }} (with any edits above) to the
+            ESB's <code>{{ validation.esb_validate_url }}</code>.
+            {% if validation.is_message_bundle %}A message Bundle is checked with a <code>-bundle</code> rule for its
+              focus resource (event {{ validation.message_event or "unknown" }}).{% else %}A single resource is checked
+              against the NW profile named after its type.{% endif %}
+            Resources named in "Unable to find a profile match" are then validated automatically against their
+            type's NW profile (only the first Observation, as several usually share the same problem).
+            Profiles, terminology server and ignored issues are the ESB's FHIR.Validate settings.
           </p>
-          {% set t = validation.targets[0] %}
+        {% else %}
           {% set current = selected.get(t.key) or t.default %}
-          <input type="hidden" name="validate_target" value="all">
-          <table class="validate-table">
-            <tr><th>Resource</th><td><strong>{{ t.label }}</strong></td></tr>
-            <tr><th>Validate against</th>
-              <td>
-                <select name="profile_all">
-                  {% for group_label, options in t.choices %}
-                    <optgroup label="{{ group_label }}">
-                      {% for value, label in options %}
-                        <option value="{{ value }}" {% if value == current %}selected{% endif %}>{{ label }}</option>
-                      {% endfor %}
-                    </optgroup>
-                  {% endfor %}
-                </select>
-              </td></tr>
-            {% if validation.is_message_bundle %}
-              {% set rule = selected_bundle_rule if selected_bundle_rule is not none else validation.default_bundle_rule %}
-              <tr><th>Focal resource<br><span class="muted">(event {{ validation.message_event or "unknown" }})</span></th>
+          <details>
+            <summary class="muted">Validation options (local validator)</summary>
+            <table class="validate-table">
+              <tr><th>Resource</th><td><strong>{{ t.label }}</strong></td></tr>
+              <tr><th>Validate against</th>
                 <td>
-                  <select name="bundle_rule">
-                    <option value="" {% if not rule %}selected{% endif %}>No -bundle rule</option>
-                    {% for value, label in validation.bundle_rule_choices %}
-                      <option value="{{ value }}" {% if value == rule %}selected{% endif %}>{{ label }}</option>
+                  <select name="profile_all">
+                    {% for group_label, options in t.choices %}
+                      <optgroup label="{{ group_label }}">
+                        {% for value, label in options %}
+                          <option value="{{ value }}" {% if value == current %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                      </optgroup>
                     {% endfor %}
                   </select>
                 </td></tr>
-            {% endif %}
-            <tr><th>Terminology server</th>
-              <td>
-                <select name="tx">
-                  {% for value, label in validation.tx_options %}
-                    <option value="{{ value }}" {% if value == selected_tx %}selected{% endif %}>{{ label }}</option>
-                  {% endfor %}
-                </select>
-              </td></tr>
-          </table>
-          <p>
-            <button type="submit" name="action" value="validate"
-                    {% if validation.setup_problems or (validation_job and validation_job.status == "running") %}disabled{% endif %}>
-              Validate {{ "Bundle" if validation.targets|length > 1 else t.resource_type }}
-            </button>
-          </p>
+              {% if validation.is_message_bundle %}
+                {% set rule = selected_bundle_rule if selected_bundle_rule is not none else validation.default_bundle_rule %}
+                <tr><th>Focal resource<br><span class="muted">(event {{ validation.message_event or "unknown" }})</span></th>
+                  <td>
+                    <select name="bundle_rule">
+                      <option value="" {% if not rule %}selected{% endif %}>No -bundle rule</option>
+                      {% for value, label in validation.bundle_rule_choices %}
+                        <option value="{{ value }}" {% if value == rule %}selected{% endif %}>{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  </td></tr>
+              {% endif %}
+              <tr><th>Terminology server</th>
+                <td>
+                  <select name="tx">
+                    {% for value, label in validation.tx_options %}
+                      <option value="{{ value }}" {% if value == selected_tx %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                </td></tr>
+            </table>
+            <p class="muted">Resources named in "Unable to find a profile match" are then validated automatically
+              against their type's default profile (only the first Observation).</p>
+          </details>
+        {% endif %}
         {% if validation_job %}
           {% set job = validation_job %}
-          <h2 id="validation-results">Validation report</h2>
+          <h2 id="validation-results">Data security report <span class="muted" style="font-weight: normal;">— FHIR validation</span></h2>
           {% if job.status == "running" %}
             <div class="card">
-              Validating… started {{ ((job.started and (now_ts - job.started)) or 0)|int }}s ago.
-              This page refreshes itself; each validator run (one per distinct profile) takes tens of seconds,
-              longer with a terminology server.
+              {% if job.stage == "follow_up" %}Validating resources named in "Unable to find a profile match"…
+              {% else %}Validating…{% endif %} started {{ ((job.started and (now_ts - job.started)) or 0)|int }}s ago.
+              This page refreshes itself;
+              {% if validation.backend == "esb" %}each resource is one call to the ESB's <code>$validate</code>, typically tens of seconds.
+              {% else %}each validator run (one per distinct profile) takes tens of seconds,
+              longer with a terminology server.{% endif %}
             </div>
           {% elif report %}
             {% if job.error %}<div class="error">{{ job.error }}</div>{% endif %}
+            <div class="result-banner result-{{ report.result }}">
+              <span class="result-label">{{ "✗" if report.result == "fail" else "!" if report.result in ("incomplete", "pass_with_warnings") else "✓" }}
+                {{ report.result_label }}</span>
+              <span>{{ report.result_reason|capitalize }}.</span>
+            </div>
+            {% if report.advice %}
+              <div class="card">
+                <h3 style="margin-top: 0;">Tackling the issues</h3>
+                <ol class="advice">{% for a in report.advice %}<li>{{ a }}</li>{% endfor %}</ol>
+              </div>
+            {% endif %}
             <div class="card">
               <p style="margin-top: 0;">
                 <strong>{{ report.totals.error }} error(s)</strong>, <strong>{{ report.totals.warning }} warning(s)</strong>
@@ -158,12 +190,10 @@
               </p>
               <p><label><input type="checkbox" name="info" value="1" form="report-filter"
                                {% if report.include_information %}checked{% endif %}> Include information issues</label></p>
-              <p><label>Ignore issues whose message contains (one per line):<br>
-                <textarea name="ignore" form="report-filter" rows="3" style="width: 100%; max-width: 600px;">{{ report.ignore|join("\n") }}</textarea></label></p>
               <p>
                 <button type="submit" form="report-filter">Update report</button>
                 <a href="{{ report_pdf_url }}">Download report as PDF</a>
-                {% if entry_targets %} · <a href="#validate-entries">Validate individual resources ↓</a>{% endif %}
+                {% if individual_validation and entry_targets %} · <a href="#validate-entries">Validate individual resources ↓</a>{% endif %}
               </p>
             </div>
             {% if report.sections|length > 1 %}
@@ -172,7 +202,7 @@
                   {% if report.include_information %}<th>Info</th>{% endif %}</tr>
                 {% for s in report.sections %}
                   <tr>
-                    <td><a href="#vr-section-{{ loop.index }}">{{ s.label }}</a>{% if s.stale %} <span class="sev-warning">(before later edits)</span>{% endif %}</td>
+                    <td><a href="#vr-section-{{ loop.index }}">{{ s.label }}</a>{% if s.auto %} <span class="muted">(automatic{% if s.represents %}, stands in for {{ s.represents|length }} more{% endif %})</span>{% endif %}{% if s.stale %} <span class="sev-warning">(before later edits)</span>{% endif %}</td>
                     <td class="muted">{{ s.profile or "base resource + meta.profile" }}</td>
                     <td class="{{ 'sev-error' if s.counts.error or s.error }}">{{ "failed" if s.error else s.counts.error }}</td>
                     <td class="{{ 'sev-warning' if s.counts.warning }}">{{ s.counts.warning }}</td>
@@ -181,6 +211,7 @@
                 {% endfor %}
               </table>
             {% endif %}
+            <h3>Issues by resource</h3>
             {% for s in report.sections %}
               {% set result_index = loop.index %}
               <div class="validation-result card" id="vr-section-{{ loop.index }}">
@@ -191,6 +222,10 @@
                   <p class="sev-warning" style="margin-top: 0;">Validated before later edits to this resource — these results may be out of date. Re-validate it to refresh.</p>
                 {% endif %}
                 <p class="muted" style="margin-top: 0;">
+                  {% if s.auto %}Validated automatically — named in "Unable to find a profile match".<br>{% endif %}
+                  {% if s.represents %}<strong>Stands in for {{ s.represents|length }} other {{ s.resource_type }}(s)</strong>
+                    named in the same errors, which weren't validated individually — they're likely to have the same problems:
+                    {{ s.represents|join(", ") }}.<br>{% endif %}
                   Against {{ s.profile or "base resource + meta.profile" }} ({{ s.ig_label }})
                   {% if s.bundle_rule_text %}<br>with <code>{{ s.bundle_rule_text }}</code>{% endif %}
                   {% if s.ignored %}<br>{{ s.ignored }} ignored issue(s) not shown{% endif %}
@@ -217,9 +252,12 @@
                           {% endif %}
                         </td>
                         <td>{{ g.message }}
-                          {% for sug in g.suggest %}
+                          {% for sug in (g.suggest if individual_validation else []) %}
                             <br><button type="submit" form="entries-form" name="quick"
-                                        value="{{ sug.key }}|{{ sug.choice }}">Validate {{ sug.label }} against {{ sug.profile.rsplit('/', 1)[-1] }}</button>
+                                        value="{{ sug.key }}|{{ sug.choice }}">Validate {{ sug.label }}{% if validation.backend != "esb" %} against {{ sug.profile.rsplit('/', 1)[-1] }}{% endif %}</button>
+                          {% endfor %}
+                          {% for idx, label in g.see %}
+                            <br><span class="muted">Why: see <a href="#vr-section-{{ idx }}">{{ label }}</a> below.</span>
                           {% endfor %}
                           {% if g.mismatch_note %}<br><span class="muted">{{ g.mismatch_note }}</span>{% endif %}
                         </td>
@@ -239,21 +277,26 @@
                 {% endif %}
               </div>
             {% endfor %}
-            {% if entry_targets %}
+            {# Manual per-entry validation — replaced by the automatic follow-up
+               (INDIVIDUAL_VALIDATION_ENABLED in app.py turns it back on). #}
+            {% if individual_validation and entry_targets %}
               <div class="card" id="validate-entries">
                 <h3 style="margin-top: 0;">Validate individual resources</h3>
                 {% if pick_error %}<div class="error">Tick at least one resource.</div>{% endif %}
-                <p class="muted">Validates each ticked entry on its own against the chosen profile and adds it to this
-                  report. Entries named in "Unable to find a profile match" are listed first, with the profile the
-                  reference expected.</p>
+                {% set esb = validation.backend == "esb" %}
+                <p class="muted">Validates each ticked entry on its own {% if esb %}(by the ESB, against the NW profile named
+                  after its type){% else %}against the chosen profile{% endif %} and adds it to this
+                  report. Entries named in "Unable to find a profile match" are listed first{% if not esb %}, with the profile the
+                  reference expected{% endif %}.</p>
                 <table class="validate-table">
-                  <tr><th></th><th>Resource</th><th>Validate against</th></tr>
+                  <tr><th></th><th>Resource</th>{% if not esb %}<th>Validate against</th>{% endif %}</tr>
                   {% for t in entry_targets %}
                     <tr>
                       <td><input type="checkbox" form="entries-form" name="validate_entry" value="{{ t.key }}" id="ve-{{ t.key }}"></td>
                       <td><label for="ve-{{ t.key }}">{{ t.label }}</label>
                         {% if t.suggested %}<br><span class="sev-warning">suggested — unable to find a profile match</span>
                           <br><span class="muted">reference expected {{ t.suggested.profile }}</span>{% endif %}</td>
+                      {% if not esb %}
                       <td>
                         <select form="entries-form" name="profile_{{ t.key }}">
                           {% for group_label, options in t.choices %}
@@ -265,6 +308,7 @@
                           {% endfor %}
                         </select>
                       </td>
+                      {% endif %}
                     </tr>
                   {% endfor %}
                 </table>
@@ -272,7 +316,6 @@
               </div>
             {% endif %}
           {% endif %}
-        {% endif %}
         {% endif %}
       {% endif %}
     </form>

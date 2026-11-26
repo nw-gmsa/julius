@@ -735,11 +735,33 @@ Nav "Testing" dropdown, hidden when `client.is_production()`; every
 any other FHIR resource can be uploaded/pasted but only validated; the
 send button is hidden and `action=send` rejects it server-side too.
 
-**FHIR validation** (same page, `action=validate`) runs the HL7 FHIR
-Validator CLI **inside the app** (`fhir_validator.py`, `validator_cli.jar`
-as a subprocess — same tool/flags as the IG's
-https://nw-gmsa.github.io/en/testing-resources.html), deliberately
-**not** the FHIR server's own `$validate`. For a Bundle, the whole Bundle
+**FHIR validation** (same page, `action=validate`) has two backends,
+picked by `FHIR_VALIDATION_BACKEND`:
+
+- **`esb` (default)** — POSTs each resource (pretty-printed, so line
+  numbers match) to the ESB's **`$validate`** (`ESB_BASE_URL +
+  /ESB/$validate`, `FhirClient.validate_with_esb()`), where
+  RIE-SourceCode's `RIE.FHIR.Server` → `RIE.FHIR.Validate` runs the
+  validator on the ESB servers. No OAuth2 token is required there
+  (`Server.cls` skips introspection for `$validate`); one is sent anyway
+  if `ESB_CLIENT_ID`/`ESB_CLIENT_SECRET` are set. **The ESB chooses
+  profile, `-bundle` rule, terminology server and ignored issues** (its
+  FHIR.Validate settings) — the page hides those selects and labels each
+  result with what the ESB is expected to use
+  (`fhir_validator.esb_validation_plan()`, from FHIR.Validate's
+  defaults). It only accepts message Bundles (O21/O51/R01/R32) and single
+  non-Bundle resources (NW profile named after the type); anything else
+  comes back as an error issue. Its "FHIR Validation disabled" reply is
+  shown as an error. The ESB may blank `ServiceRequest.code.coding.display`
+  before validating, so line numbers can drift for those.
+- **`local`** — the original in-app path, kept to revert to:
+  the HL7 FHIR Validator CLI (`fhir_validator.run_validator()`,
+  `validator_cli.jar` as a subprocess — same tool/flags as the IG's
+  https://nw-gmsa.github.io/en/testing-resources.html). Everything below
+  about profile choices, IG packages, `-bundle` rules and terminology
+  servers applies to this backend only.
+
+For a Bundle, the whole Bundle
 and/or each entry (validated on its own, extracted from the Bundle) can
 be ticked, each with its own profile `<select>` built from the
 StructureDefinitions in two IG packages: NW GMSA
@@ -759,37 +781,56 @@ Issues are labelled per entry (`describe_resource()`: type, id,
 code/value text) and the JSON is validated indented (`pretty()`) so
 reported line numbers are real; clicking an issue's location opens that
 exact JSON with the line highlighted.
-**The results are a human-readable report** (`fhir_validator.build_report()`,
-shared by the page and `/testing/send-message/report.pdf` —
-`pdf_report.validation_report_pdf_bytes()`, same `?info=`/`?ignore=`
-query string so they match): errors and warnings only unless "Include
-information" is ticked, minus any issue whose message contains a line of
-the "Ignore" box (default `DEFAULT_IGNORED_ISSUES` = `Constraint failed:
-dom-6`; the count left out is shown). Filtering happens at render time,
-so changing it doesn't re-run the validator. **Two stages**: after upload only the whole resource/Bundle is offered
-(profile, `-bundle` rule, terminology server). Individual Bundle entries
-are only offered once that report is in ("Validate individual
-resources", `action=validate_entries`) — validating every entry up front
-repeated the same issue across every Observation. Each such run is a
-new job that carries the earlier results over (`validated: True`, not
-re-run) and adds the new ones, so the report accumulates. The
-individual panel is its own `<form id="entries-form">`, so its submit
-handler copies the editor's current text into a hidden `message` field —
-edits made since the Bundle report are what gets validated, and become
-the job's message. Carried-over results whose resource has changed since
-(`fhir_validator.canonical()` comparison, per entry — or the whole
-message for the Bundle result) are flagged `stale` ("validated before
-later edits") on the page and in the PDF. Identical
-issues are grouped into one row (`_group_issues()`: same severity,
-message and location once `Bundle.entry[n].resource` is replaced by the
-entry's type) listing every entry it occurs in. **"Unable to find a
-profile match for <ref> among choices: <profiles>"** only says a
-reference target failed its targetProfile, not why —
-`annotate_profile_mismatches()` finds `<ref>` in the uploaded Bundle
-(fullUrl, Type/id, or `Bundle.entry[n]`) and the issue gets a "Validate
-<entry> against <profile>" button; those entries are also listed first,
-profile pre-selected, in the individual panel. Nothing is validated
-automatically. The message regex (`_PROFILE_MATCH_RE`) follows the
+**Page actions**: a FHIR message Bundle gets **Submit to
+$process-message**, **Validate** and **Format JSON**; any other FHIR
+resource just **Validate** and **Format JSON** (one button row under the
+editor). With the local backend the profile / `-bundle` / terminology
+selects sit in a collapsed "Validation options" `<details>`; with the ESB
+backend there are none.
+**The results are a "Data security report"** (aimed at eventually being
+an onboarding step — `fhir_validator.build_report()`, shared by the page
+and `/testing/send-message/report.pdf` —
+`pdf_report.validation_report_pdf_bytes()`, same `?info=` query string
+so they match): errors and warnings only unless "Include information" is
+ticked. **Ignored issues are the ESB's job** (FHIR.Validate's
+`IgnoredIssues`), so the old "Ignore" box is gone; `DEFAULT_IGNORED_ISSUES`
+is still applied silently (a no-op on the ESB's output, still needed for
+the local validator's) and a count is shown only if something was left
+out. **Overall result** (`_overall_result()`, a banner at the top of the
+page and PDF): any error → **Fail**; a resource that couldn't be validated
+at all (and no errors) → **Incomplete**; warnings only → **Pass with
+warnings**; else **Pass**. Below it, **"Tackling the issues"**
+(`_advice()`) — numbered advice built from what the report found: errors
+before warnings, N errors from D distinct problems (fix once, fixes every
+occurrence), "Unable to find a profile match" errors are symptoms whose
+reasons are in the automatically validated resources, the one Observation
+standing in for the others (`represents`), and re-validate after each
+round. **Validate runs in two automatic stages** (one background job): the
+whole resource/Bundle, then — for a Bundle — every entry named in an
+**"Unable to find a profile match for <ref> among choices: <profiles>"**
+issue (which only says a reference target failed its targetProfile, not
+why) is validated on its own against its type's default profile
+(`fhir_validator.follow_up_targets()` → `default_choice()`; the NW
+`Observation` profile for an Observation). **Only the first such
+Observation** (`FOLLOW_UP_FIRST_ONLY_TYPES`) — a message usually carries
+many Observations built the same way, so they share one problem. The validated
+Observation's section lists the others it stands in for (`represents`,
+from `follow_up_targets()`). These
+sections are marked "Validated automatically" (`auto`) on the page and in
+the PDF. `annotate_profile_mismatches()` finds `<ref>` in the uploaded
+Bundle (fullUrl, Type/id, or `Bundle.entry[n]`).
+**The manual "Validate individual resources" panel and the per-issue
+"Validate <entry> against <profile>" buttons are hidden, not deleted** —
+`app.INDIVIDUAL_VALIDATION_ENABLED = False`; set it to `True` to bring
+them back. That path (`action=validate_entries`, its own
+`<form id="entries-form">` whose submit handler copies the editor's
+current text into a hidden `message` field) is still wired up: each run
+is a new job carrying earlier results over (`validated: True`, not
+re-run), and carried-over results whose resource has changed since
+(`fhir_validator.canonical()`) are flagged `stale`. Identical issues are
+grouped into one row (`_group_issues()`: same severity, message and
+location once `Bundle.entry[n].resource` is replaced by the entry's
+type) listing every entry it occurs in. The message regex (`_PROFILE_MATCH_RE`) follows the
 validator's message text, not yet checked against a real run.
 Terminology server: tx.fhir.org (`-sct uk`), none (`-tx n/a`),
 or `FHIR_VALIDATOR_TX_URL`. One JVM run per distinct (IG, profile) — each

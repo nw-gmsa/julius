@@ -5561,17 +5561,71 @@ class FhirClient:
         except ValueError:
             body = resp.text
         if not resp.ok:
-            detail = body if isinstance(body, str) else json.dumps(body, indent=2) if body else ""
-            if "<html" in detail.lower():
-                # IIS's own error page (it masks the backend's real error)
-                # — keep just its headings rather than the whole page.
-                headings = re.findall(r"<h[23][^>]*>(.*?)</h[23]>", detail, re.S | re.I)
-                detail = " — ".join(h.strip() for h in headings) or "HTML error page from the web server"
-                detail += (" (this is IIS's generic error page — the real error is in the "
-                           "HealthConnect/IIS logs on the ESB server)")
+            detail = cls._esb_error_detail(body)
             raise requests.HTTPError(
                 f"{resp.status_code} from {url}" + (f": {detail[:2000]}" if detail else ""), response=resp)
         return resp.status_code, body
+
+    #: The ESB's FHIR validation operation (RIE.FHIR.Server → FHIR.Validate,
+    #: the HL7 FHIR Validator on the ESB servers) — ESB_BASE_URL + this.
+    ESB_VALIDATE_PATH = "/ESB/$validate"
+
+    @classmethod
+    def esb_validate_url(cls):
+        return cls.esb_base_url() + cls.ESB_VALIDATE_PATH
+
+    @classmethod
+    def validate_with_esb(cls, body_text, timeout=600):
+        """POSTs `body_text` (a FHIR resource as JSON text — sent as-is so
+        the validator's line numbers match what the caller shows) to the
+        ESB's $validate and returns the OperationOutcome it replies with.
+
+        The ESB doesn't require an OAuth2 token for $validate (RIE.FHIR.Server
+        skips introspection for it), so a Bearer token is only sent when
+        ESB_CLIENT_ID/ESB_CLIENT_SECRET are set — with the same one retry on
+        a 401 as send_fhir_message_to_esb(). Any OperationOutcome body is
+        returned whatever the HTTP status (a rejected message, e.g. a
+        non-message Bundle, comes back as an error issue); anything else
+        raises requests.HTTPError with the response detail."""
+        url = cls.esb_validate_url()
+        _, _, client_id, client_secret, verify_ssl, _ = cls.esb_config()
+        use_token = bool(client_id and client_secret)
+
+        def post(force_refresh=False):
+            headers = {"Content-Type": "application/fhir+json", "Accept": "application/fhir+json"}
+            if use_token:
+                headers["Authorization"] = f"Bearer {cls.esb_access_token(force_refresh=force_refresh)}"
+            return requests.post(url, data=body_text.encode("utf-8"), headers=headers,
+                                 timeout=timeout, verify=verify_ssl)
+
+        resp = post()
+        if resp.status_code == 401 and use_token:
+            resp = post(force_refresh=True)
+        try:
+            body = resp.json() if resp.content else None
+        except ValueError:
+            body = resp.text
+        if isinstance(body, dict) and body.get("resourceType") == "OperationOutcome":
+            return body
+        detail = cls._esb_error_detail(body)
+        raise requests.HTTPError(
+            f"{resp.status_code} from {url}" + (f": {detail[:2000]}" if detail
+                                                 else " (no OperationOutcome returned)"),
+            response=resp)
+
+    @staticmethod
+    def _esb_error_detail(body):
+        """Readable detail for an ESB error body — JSON pretty-printed, or
+        just the headings of IIS's own HTML error page."""
+        detail = body if isinstance(body, str) else json.dumps(body, indent=2) if body else ""
+        if "<html" in detail.lower():
+            # IIS's own error page (it masks the backend's real error)
+            # — keep just its headings rather than the whole page.
+            headings = re.findall(r"<h[23][^>]*>(.*?)</h[23]>", detail, re.S | re.I)
+            detail = " — ".join(h.strip() for h in headings) or "HTML error page from the web server"
+            detail += (" (this is IIS's generic error page — the real error is in the "
+                       "HealthConnect/IIS logs on the ESB server)")
+        return detail
 
     @classmethod
     def send_hl7v2_mllp(cls, message, host=None, port=None, timeout=30):

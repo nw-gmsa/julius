@@ -1249,6 +1249,30 @@ def testing_menu():
 #: job can see it.
 _validation_jobs = {}
 
+#: The "Validate individual resources" panel (and the per-issue "Validate
+#: <entry>" buttons). Replaced by the automatic follow-up validation
+#: (fhir_validator.follow_up_targets()); the panel, its template block and
+#: action=validate_entries are kept so this can be turned back on.
+INDIVIDUAL_VALIDATION_ENABLED = False
+
+
+def _validation_result(key, label, resource, choice, bundle_rule="", auto=False, represents=None):
+    """One entry of a validation job's `results` (not yet validated)."""
+    ig_key, profile = fhir_validator.parse_choice(choice)
+    if bundle_rule:
+        # The rule's profile is an NW one; the NW package also pulls in
+        # Genomics Reporting (a dependency), so either choice resolves.
+        ig_key = "nw-gmsa"
+    rule = fhir_validator.BUNDLE_RULES.get(bundle_rule)
+    result = {
+        "key": key, "label": label, "resource": resource, "choice": choice,
+        "ig": ig_key, "ig_label": fhir_validator.IGS[ig_key]["label"], "profile": profile,
+        "bundle_rule": bundle_rule or "",
+        "bundle_rule_text": " ".join(["-bundle", rule["rule"], rule["profile"]]) if rule else None,
+        "auto": auto, "represents": represents or [],
+    }
+    return _apply_validation_backend([result])[0]
+
 
 def _is_message_bundle(resource):
     return (isinstance(resource, dict) and resource.get("resourceType") == "Bundle"
@@ -1284,7 +1308,28 @@ def _fhir_validation_context(text):
                           if _is_message_bundle(resource) else None),
         "tx_options": fhir_validator.terminology_options(),
         "setup_problems": fhir_validator.setup_problems(),
+        "backend": fhir_validator.backend(),
+        "esb_validate_url": FhirClient.esb_validate_url(),
     }
+
+
+def _apply_validation_backend(results):
+    """With the ESB backend, the ESB picks the profile / -bundle rule, so
+    each result is labelled with what it's expected to use rather than the
+    (ignored) choice made on the page."""
+    if fhir_validator.backend() != fhir_validator.BACKEND_ESB:
+        return results
+    for r in results:
+        r["profile"], r["bundle_rule_text"] = fhir_validator.esb_validation_plan(r["resource"])
+        r["ig_label"] = fhir_validator.ESB_IG_LABEL
+        r["bundle_rule"] = ""
+    return results
+
+
+def _validation_tx(value):
+    if fhir_validator.backend() == fhir_validator.BACKEND_ESB:
+        return "set by the ESB (FHIR.Validate)"
+    return value or fhir_validator.TX_FHIR_ORG
 
 
 def _run_validation_job(job):
@@ -1301,6 +1346,20 @@ def _run_validation_job(job):
         for r in to_run:
             r["validated"] = True
         fhir_validator.annotate_profile_mismatches(job["results"], bundle)
+        if job.get("follow_up"):
+            # Entries named in "Unable to find a profile match" are
+            # validated on their own straight away, against their type's
+            # default profile (one Observation stands in for the rest).
+            follow_up = [_validation_result(t["key"], t["label"], t["resource"], t["choice"],
+                                            auto=True, represents=t["represents"])
+                         for t in fhir_validator.follow_up_targets(job["results"], bundle)]
+            if follow_up:
+                job["stage"] = "follow_up"
+                job["results"].extend(follow_up)
+                fhir_validator.validate(follow_up, job["tx"])
+                for r in follow_up:
+                    r["validated"] = True
+                fhir_validator.annotate_profile_mismatches(job["results"], bundle)
     except Exception as e:
         job["error"] = str(e)
     job["status"] = "done"
@@ -1309,10 +1368,11 @@ def _run_validation_job(job):
 
 def _validation_report_options():
     """(include_information, ignore patterns) from the report's query
-    string — shared by the page and the PDF so they match. No `ignore`
-    param at all means the defaults (fhir_validator.DEFAULT_IGNORED_ISSUES)."""
-    ignore = request.args["ignore"].splitlines() if "ignore" in request.args else None
-    return request.args.get("info") == "1", ignore
+    string — shared by the page and the PDF so they match. Ignored issues
+    are the ESB's job now (FHIR.Validate's IgnoredIssues), so there's no
+    longer a box to change them: always fhir_validator.DEFAULT_IGNORED_ISSUES
+    (a no-op on the ESB's output; still applied to the local validator's)."""
+    return request.args.get("info") == "1", None
 
 
 def _owned_validation_job(job_id):
@@ -1355,7 +1415,7 @@ def testing_send_message():
         "message": None, "message_type": None, "filename": None,
         "error": None, "result": None, "validation": None, "validation_job": None,
         "now_ts": time.time(), "report": None, "report_pdf_url": None, "entry_targets": None,
-        "pick_error": False,
+        "pick_error": False, "individual_validation": INDIVIDUAL_VALIDATION_ENABLED,
     }
     job_id = request.args.get("validation")
     if request.method == "GET" and job_id:
@@ -1410,34 +1470,22 @@ def testing_send_message():
                         if t["key"] not in wanted:
                             continue
                         choice = request.form.get(f"profile_{t['key']}") or t["default"]
-                        ig_key, profile = fhir_validator.parse_choice(choice)
                         bundle_rule = ""
                         if t["key"] == "all" and _is_message_bundle(resource):
                             bundle_rule = request.form.get("bundle_rule", "")
                             if bundle_rule not in fhir_validator.BUNDLE_RULES:
                                 bundle_rule = ""
-                            # The rule's profile is an NW one; the NW package
-                            # also pulls in Genomics Reporting (a dependency),
-                            # so a Genomics Reporting choice still resolves.
-                            if bundle_rule:
-                                ig_key = "nw-gmsa"
-                        results.append({
-                            "key": t["key"], "label": t["label"], "resource": t["resource"],
-                            "choice": choice, "ig": ig_key, "ig_label": fhir_validator.IGS[ig_key]["label"],
-                            "profile": profile, "bundle_rule": bundle_rule,
-                            "bundle_rule_text": (" ".join(["-bundle", fhir_validator.BUNDLE_RULES[bundle_rule]["rule"],
-                                                           fhir_validator.BUNDLE_RULES[bundle_rule]["profile"]])
-                                                 if bundle_rule else None),
-                        })
+                        results.append(_validation_result(t["key"], t["label"], t["resource"], choice, bundle_rule))
                     if not results:
                         ctx["error"] = "Tick at least one resource to validate."
                     else:
-                        tx = request.form.get("tx") or fhir_validator.TX_FHIR_ORG
+                        tx = _validation_tx(request.form.get("tx"))
                         job_id = secrets.token_urlsafe(16)
                         job = {
                             "sid": session.get("sid"), "status": "running", "error": None,
                             "message": text, "filename": ctx["filename"], "tx": tx,
                             "results": results, "started": time.time(), "finished": None,
+                            "follow_up": True, "stage": "bundle",
                         }
                         _validation_jobs[job_id] = job
                         threading.Thread(target=_run_validation_job, args=(job,), daemon=True).start()
@@ -1477,13 +1525,7 @@ def testing_send_message():
                     t = targets.get(key)
                     if not t:
                         continue
-                    choice = choice or t["default"]
-                    ig_key, profile = fhir_validator.parse_choice(choice)
-                    new.append({
-                        "key": key, "label": t["label"], "resource": t["resource"], "choice": choice,
-                        "ig": ig_key, "ig_label": fhir_validator.IGS[ig_key]["label"], "profile": profile,
-                        "bundle_rule": "", "bundle_rule_text": None,
-                    })
+                    new.append(_validation_result(key, t["label"], t["resource"], choice or t["default"]))
                 if not new:
                     return redirect(url_for("testing_send_message", validation=parent_id,
                                             pick_error=1, _anchor="validate-entries"))
@@ -1497,7 +1539,7 @@ def testing_send_message():
                 _validation_jobs[job_id] = job = {
                     "sid": session.get("sid"), "status": "running", "error": None,
                     "message": text, "filename": parent["filename"],
-                    "tx": request.form.get("tx") or parent["tx"],
+                    "tx": _validation_tx(request.form.get("tx") or parent["tx"]),
                     "results": kept + new, "started": time.time(), "finished": None,
                 }
                 threading.Thread(target=_run_validation_job, args=(job,), daemon=True).start()
@@ -1543,8 +1585,6 @@ def testing_send_message():
         pdf_args = {"validation": job_id}
         if include_information:
             pdf_args["info"] = "1"
-        if ignore is not None:
-            pdf_args["ignore"] = "\n".join(ignore)
         ctx["report_pdf_url"] = url_for("testing_validation_report_pdf", **pdf_args)
         # Individual Bundle entries can be validated once the report is in:
         # suggested ones (referenced by "Unable to find a profile match")
