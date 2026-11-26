@@ -581,7 +581,11 @@ def suggestions(jobs):
 #: Issues left out of the report by default (case-insensitive substring
 #: of the message), one per line in the report's "Ignore" box. dom-6 is
 #: "A resource should have narrative for robust management" — not
-#: something these messages are expected to carry.
+#: something these messages are expected to carry. This list is a
+#: shared requirement, documented in nw-gmsa-use-cases DataSecurity.md
+#: ("Ignored validation issues"): keep it the same as RIE.FHIR.Validate's
+#: IgnoredIssues setting, which strips the same issues from RIE's
+#: OperationOutcomes.
 DEFAULT_IGNORED_ISSUES = ["Constraint failed: dom-6"]
 _SEVERITY_ORDER = {"fatal": 0, "error": 1, "warning": 2, "information": 3}
 
