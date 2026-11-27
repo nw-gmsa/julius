@@ -1304,8 +1304,28 @@ both. `organisation_ics(org)` is just
   is now only used for the `/stats` organisation **map markers**
   (`organisation_geocode()`); the ONS boundaries only for drawing the
   choropleths (`fetch_icb_boundaries()`).
-- **Only NHS trusts are in `etr.csv`** — a GP practice, private provider
-  or anything else with no trust row shows as "Unknown" ICS.
+- **Anything that isn't an English NHS trust goes through
+  `FhirClient.organisation_geography(ods, name, postcode)`** (used by
+  `organisation_ics()` and the monthly report) — previously all of these
+  were "Unknown" ICS. In order: `trust_geography()`; then the NHS ODS
+  API's own record for the code (`ods_details()`, cached per code):
+  primary role ICB (RO261) → that ICB, commissioning region (RO209,
+  e.g. Y62) → "North West (ICS not known)", independent sector (RO172,
+  e.g. Spire NT3) → "Independent sector" (its ODS link is to its head
+  office's ICB, so deliberately not used), `Country` Wales/Scotland/
+  Northern Ireland/Isle of Man/... → that country, a relationship to an
+  NHS trust (699X0 GLH → R0A) or an ICB (sub-ICB location 01G → QOP) →
+  that trust's/ICB's ICS; then the postcode area (`POSTCODE_AREA_GROUPS`,
+  border-straddling areas left out); then the code/name
+  (`NAME_GEOGRAPHY_RULES` — local codes ODS doesn't know, e.g.
+  "SS999 NHS Lothian", "ABUHB_Wales", "IRL Ireland", GENQA/UK NEQAS →
+  "External quality assessment", ISO country codes/names → "Other
+  countries"); finally an ODS-known English organisation with nothing
+  else (closed trust RFZ) → "England (ICS not known)". Countries outside
+  England get region `OUTSIDE_ENGLAND_REGION` ("Outside England"), which
+  the monthly report's region filter offers too. Still "Unknown": no
+  ordering organisation at all, or a local code with an uninformative
+  name (`SH_OLDHAM`, `NOTKNN`).
 - The ONS boundary set is **April 2023**, so the November 2025 merged
   ICBs have no polygon: they're counted in the tables but listed as
   unmatched under each choropleth.

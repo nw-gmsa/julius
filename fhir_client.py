@@ -2405,6 +2405,207 @@ class FhirClient:
             "region_name": cls.NHS_REGION_NAMES.get(trust["region_code"]),
         }
 
+    # --- Geography for organisations that aren't English NHS trusts ------
+    #
+    # trust_geography() only knows NHS trusts in etr.csv, so Welsh health
+    # boards, Northern Ireland trusts, Scottish boards, Ireland, ICB/region
+    # codes, independent providers, EQA schemes, ... all came out "Unknown"
+    # ICS. organisation_geography() places them: first through the NHS ODS
+    # API's own data for the code (ods_details(): primary role, country,
+    # relationships), then the organisation's postcode area, then its
+    # name/code. Groups that aren't an ICB use the same dict shape as
+    # trust_geography() with icb_code None, so callers needn't care.
+
+    #: ODS primary role ids (ODS API `Roles`) used below.
+    ODS_ROLE_NHS_TRUST = "RO197"
+    ODS_ROLE_ICB = "RO261"
+    ODS_ROLE_SUB_ICB_LOCATION = "RO98"
+    ODS_ROLE_COMMISSIONING_REGION = "RO209"
+    ODS_ROLE_INDEPENDENT_SECTOR = "RO172"
+
+    #: Region label for organisations outside England (the monthly
+    #: report's region filter offers it alongside the NHS England regions).
+    OUTSIDE_ENGLAND_REGION = "Outside England"
+
+    #: ODS `GeoLoc.Location.Country` -> group label, for countries other
+    #: than England.
+    ODS_COUNTRY_GROUPS = {
+        "WALES": "Wales", "SCOTLAND": "Scotland", "NORTHERN IRELAND": "Northern Ireland",
+        "ISLE OF MAN": "Isle of Man", "JERSEY": "Channel Islands", "GUERNSEY": "Channel Islands",
+        "IRELAND": "Republic of Ireland", "REPUBLIC OF IRELAND": "Republic of Ireland",
+    }
+
+    #: Postcode areas (the leading letters) wholly in one country other than
+    #: England. Areas that straddle a border (CH, SY, TD) are left out.
+    POSTCODE_AREA_GROUPS = {
+        **{a: "Wales" for a in ("CF", "LD", "LL", "NP", "SA")},
+        **{a: "Scotland" for a in ("AB", "DD", "DG", "EH", "FK", "G", "HS", "IV", "KA", "KW",
+                                    "KY", "ML", "PA", "PH", "ZE")},
+        "BT": "Northern Ireland", "IM": "Isle of Man", "JE": "Channel Islands", "GY": "Channel Islands",
+    }
+
+    #: (group label, regex over "<ODS code> <name>") for codes ODS doesn't
+    #: know — local codes like "SS999 NHS Lothian" or "ABUHB_Wales". Checked
+    #: in order: Northern Ireland before Ireland, EQA first of all.
+    NAME_GEOGRAPHY_RULES = [
+        ("External quality assessment", r"GENQA|NEQAS|EMQN|quality assessment"),
+        ("Northern Ireland", r"northern ireland|health and social care trust|belfast|^ZT\d"),
+        ("Republic of Ireland", r"^(IRL|IE)\b|\bireland\b|\beire\b|\birish\b|health service executive"),
+        ("Wales", r"wales|welsh|cymru|\blhb\b|local health board|university health board|^7A\d"),
+        ("Scotland", r"scotland|scottish|^S[A-Z]9\d*\b|\b(ayrshire|arran|dumfries|galloway|fife|forth valley|"
+                     r"grampian|glasgow|clyde|highland|lanarkshire|lothian|orkney|shetland|tayside|"
+                     r"western isles|eilean siar|golden jubilee|aberdeen|edinburgh|dundee|inverness)\b"),
+        ("Isle of Man", r"isle of man|\bmanx\b"),
+        ("Channel Islands", r"jersey|guernsey|alderney|channel islands"),
+        # International referrers — ISO 3166 alpha-3 code as the whole ODS
+        # code ("BEL"), or a country name.
+        ("Other countries", r"^(AUS|AUT|BEL|BGR|CAN|CHE|CYP|CZE|DEU|DNK|ESP|EST|FIN|FRA|GRC|HRV|HUN|ISL|ISR|"
+                            r"ITA|LTU|LUX|LVA|MLT|NLD|NOR|NZL|POL|PRT|ROU|SAU|SVK|SVN|SWE|TUR|UAE|ARE|USA)\b|"
+                            r"\b(australia|austria|belgium|bulgaria|canada|switzerland|cyprus|czechia|germany|"
+                            r"denmark|spain|estonia|finland|france|greece|croatia|hungary|iceland|israel|italy|"
+                            r"lithuania|luxembourg|latvia|malta|netherlands|norway|new zealand|poland|portugal|"
+                            r"romania|saudi arabia|slovakia|slovenia|sweden|turkey|united arab emirates|"
+                            r"united states)\b"),
+    ]
+
+    _ods_details_cache = {}
+    _ods_details_misses = {}
+
+    @classmethod
+    def ods_details(cls, ods_code):
+        """{"name", "postcode", "country", "status", "primary_role",
+        "rels": [(rel id, target code, target primary role, active)]} for
+        an ODS code from the NHS ODS lookup API, or None if ODS doesn't know
+        it / can't be reached. Cached per code at class level (static
+        reference data); an unknown code (404) is cached too, a network
+        failure is retried after ODS_RETRY_AFTER_SECONDS."""
+        if not ods_code:
+            return None
+        if ods_code in cls._ods_details_cache:
+            return cls._ods_details_cache[ods_code]
+        missed_at = cls._ods_details_misses.get(ods_code)
+        if missed_at and time.time() - missed_at < cls.ODS_RETRY_AFTER_SECONDS:
+            return None
+        try:
+            resp = requests.get(f"{cls.ODS_LOOKUP_API_URL}/{quote(ods_code)}", timeout=10)
+        except requests.RequestException:
+            cls._ods_details_misses[ods_code] = time.time()
+            return None
+        if resp.status_code in (400, 404):
+            cls._ods_details_cache[ods_code] = None
+            return None
+        if not resp.ok:
+            cls._ods_details_misses[ods_code] = time.time()
+            return None
+        try:
+            org = resp.json().get("Organisation") or {}
+        except ValueError:
+            cls._ods_details_misses[ods_code] = time.time()
+            return None
+        location = (org.get("GeoLoc") or {}).get("Location") or {}
+        roles = (org.get("Roles") or {}).get("Role") or []
+        primary = next((r.get("id") for r in roles if r.get("primaryRole")), None)
+        rels = []
+        for rel in (org.get("Rels") or {}).get("Rel") or []:
+            target = rel.get("Target") or {}
+            rels.append((rel.get("id"), (target.get("OrgId") or {}).get("extension"),
+                         (target.get("PrimaryRoleId") or {}).get("id"), rel.get("Status") == "Active"))
+        rels.sort(key=lambda r: not r[3])  # active relationships first
+        details = {
+            "name": org.get("Name"), "postcode": location.get("PostCode"), "country": location.get("Country"),
+            "status": org.get("Status"), "primary_role": primary, "rels": rels,
+        }
+        cls._ods_details_cache[ods_code] = details
+        return details
+
+    @staticmethod
+    def _group_geography(label, region_name=None):
+        """trust_geography()-shaped dict for a group that isn't an ICB."""
+        return {"icb_code": None, "icb_name": label, "region_code": None, "region_name": region_name}
+
+    @classmethod
+    def _icb_geography(cls, icb_code):
+        """trust_geography()-shaped dict for an ICB code — region from the
+        ICBs' trusts in etr.csv, else the ICB's own ODS sub-division
+        relationship to a commissioning region."""
+        region_code = next((t["region_code"] for t in cls.ods_trusts().values()
+                            if t["icb_code"] == icb_code and t["region_code"]), None)
+        if not region_code:
+            details = cls.ods_details(icb_code) or {}
+            region_code = next((target for rel, target, role, _ in details.get("rels", [])
+                                if role == cls.ODS_ROLE_COMMISSIONING_REGION), None)
+        return {"icb_code": icb_code, "icb_name": cls.icb_name(icb_code), "region_code": region_code,
+                "region_name": cls.NHS_REGION_NAMES.get(region_code)}
+
+    @classmethod
+    def _region_group(cls, region_code):
+        region = cls.NHS_REGION_NAMES.get(region_code)
+        return cls._group_geography(f"{region} (ICS not known)", region) if region else None
+
+    @classmethod
+    def _geography_from_ods_details(cls, ods_code, details):
+        role = details["primary_role"]
+        rels = details["rels"]
+        if role == cls.ODS_ROLE_ICB:
+            return cls._icb_geography(ods_code)
+        if role == cls.ODS_ROLE_COMMISSIONING_REGION:
+            return cls._region_group(ods_code)
+        if role == cls.ODS_ROLE_INDEPENDENT_SECTOR:
+            # An independent provider's ODS relationship is to its head
+            # office's ICB, not where the patient was seen — kept apart.
+            return cls._group_geography("Independent sector")
+        country_group = cls.ODS_COUNTRY_GROUPS.get((details["country"] or "").upper())
+        if country_group:
+            return cls._group_geography(country_group, cls.OUTSIDE_ENGLAND_REGION)
+        # Directed by / part of an NHS trust (a GLH run by a trust: 699X0 ->
+        # R0A), or located in an ICB (a sub-ICB location: 01G -> QOP).
+        for rel, target, target_role, _ in rels:
+            if target_role == cls.ODS_ROLE_NHS_TRUST:
+                geo = cls.trust_geography(target)
+                if geo:
+                    return geo
+        for rel, target, target_role, _ in rels:
+            if target_role == cls.ODS_ROLE_ICB:
+                return cls._icb_geography(target)
+        for rel, target, target_role, _ in rels:
+            if target_role == cls.ODS_ROLE_COMMISSIONING_REGION:
+                geo = cls._region_group(target)
+                if geo:
+                    return geo
+        return None
+
+    @classmethod
+    def organisation_geography(cls, ods_code, name=None, postcode=None):
+        """trust_geography() for an NHS trust; otherwise the best grouping
+        that can be worked out for the organisation (see the section
+        comment above): an ICB, "<region> (ICS not known)", a country
+        outside England (Wales, Scotland, Northern Ireland, Republic of
+        Ireland, Isle of Man, Channel Islands — region
+        OUTSIDE_ENGLAND_REGION), "Independent sector", "External quality
+        assessment", "Other countries", or "England (ICS not known)". None
+        if nothing fits."""
+        geo = cls.trust_geography(ods_code)
+        if geo:
+            return geo
+        details = cls.ods_details(ods_code) if ods_code else None
+        if details:
+            geo = cls._geography_from_ods_details(ods_code, details)
+            if geo:
+                return geo
+        postcode = postcode or (details or {}).get("postcode")
+        area = re.match(r"\s*([A-Za-z]{1,2})\d", postcode or "")
+        group = cls.POSTCODE_AREA_GROUPS.get(area.group(1).upper()) if area else None
+        if group:
+            return cls._group_geography(group, cls.OUTSIDE_ENGLAND_REGION)
+        text = " ".join(t for t in (ods_code, name, (details or {}).get("name")) if t)
+        for label, pattern in cls.NAME_GEOGRAPHY_RULES:
+            if re.search(pattern, text, re.I):
+                region = None if label == "External quality assessment" else cls.OUTSIDE_ENGLAND_REGION
+                return cls._group_geography(label, region)
+        if details and (details["country"] or "").upper() == "ENGLAND":
+            return cls._group_geography("England (ICS not known)")
+        return None
+
     @classmethod
     def icbs_by_region(cls):
         """{region name: [ICB name, ...]} over every *open* trust's ICB in
@@ -2424,11 +2625,16 @@ class FhirClient:
 
     def organisation_ics(self, organisation):
         """The ICB an Organization belongs to, by its ODS code via the ODS
-        trust -> ICB mapping (trust_geography()) — no postcode lookup. Used
-        for every "by ICS" breakdown on /stats and /stats/monthly-reports.
-        None if the organisation has no ODS code, or isn't an NHS trust
-        ODS knows about."""
-        geo = self.trust_geography(self.organisation_ods_code(organisation))
+        trust -> ICB mapping (trust_geography()), or for anything that isn't
+        an English NHS trust, organisation_geography()'s grouping (Wales,
+        Scotland, "North West (ICS not known)", ...). Used for every "by
+        ICS" breakdown on /stats and /stats/monthly-reports. None if
+        nothing fits."""
+        if not organisation:
+            return None
+        geo = self.organisation_geography(self.organisation_ods_code(organisation),
+                                          name=organisation.get("name"),
+                                          postcode=self.organisation_postcode(organisation))
         return geo["icb_name"] if geo else None
 
     #: iGene report identifier system (NW Genomics IG-specific) — a local

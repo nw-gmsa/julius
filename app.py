@@ -3177,7 +3177,8 @@ def _build_monthly_report():
             for r in reports:
                 order, org, _ = _report_ordering(r, orders_index)
                 ordering_ods = client.organisation_ods_code(org) if org else None
-                geo = FhirClient.trust_geography(ordering_ods)
+                geo = FhirClient.organisation_geography(
+                    ordering_ods, name=_org_name(org), postcode=client.organisation_postcode(org)) if org else None
                 ics = geo["icb_name"] if geo else "Unknown"
                 if geo:
                     ics_region_names[ics] = geo["region_name"]
@@ -3243,7 +3244,7 @@ def _build_monthly_report():
     for region, icbs in icbs_by_region.items():
         for icb in icbs:
             ics_region_names.setdefault(icb, region)
-    regions = list(FhirClient.NHS_REGION_NAMES.values())
+    regions = list(FhirClient.NHS_REGION_NAMES.values()) + [FhirClient.OUTSIDE_ENGLAND_REGION]
     if selected_region:
         ics_list = list(icbs_by_region.get(selected_region, []))
         ics_list += sorted(i for i in ics_counts if i not in ics_list and ics_region_names.get(i) == selected_region)
