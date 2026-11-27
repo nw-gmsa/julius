@@ -41,7 +41,7 @@
     (the ESB's FHIR.Validate settings choose the profile and terminology server).
     {% else %}run inside this app, against the NW GMSA or HL7 Genomics Reporting profiles.{% endif %}
     Only a FHIR <strong>message Bundle</strong> can be sent: it's POSTed to <code>{{ process_message_url }}</code>;
-    HL7 v2 messages are sent over MLLP to <code>{{ hl7v2_target }}</code>.
+    HL7 v2 messages are POSTed over HTTPS to <code>{{ hl7v2_target }}</code>.
   </p>
 
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
@@ -86,7 +86,7 @@
           <button type="submit" name="action" value="send"
                   onclick="return confirm('Send this message to {{ process_message_url if message_type == 'fhir' else hl7v2_target }}?');">
             {% if result %}Resend{% else %}Submit{% endif %}
-            {% if message_type == "fhir" %}to $process-message{% else %}to {{ hl7v2_target }} (MLLP){% endif %}
+            {% if message_type == "fhir" %}to $process-message{% else %}to the order filler (HTTPS){% endif %}
           </button>
         {% endif %}
         {% if can_validate %}

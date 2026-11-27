@@ -1432,7 +1432,8 @@ def testing_validation_report_pdf():
 def testing_send_message():
     """Upload (or paste) an HL7 v2 or FHIR message, preview it, validate
     it (FHIR only) and/or submit it to the test ESB — FHIR to
-    $process-message, HL7 v2 over MLLP. action=upload detects the type
+    $process-message, HL7 v2 POSTed over HTTPS to the order filler
+    (FhirClient.send_hl7v2_http()). action=upload detects the type
     and shows the preview; action=validate starts a background validator
     run (fhir_validator.py — local validator_cli.jar, never the server's
     $validate) and redirects to ?validation=<id>, which shows the results
@@ -1440,10 +1441,10 @@ def testing_send_message():
     only branch with an external side effect). A FHIR resource can be
     validated whatever it is, but only a message Bundle can be sent.
     Nothing is written to the FHIR server."""
-    process_message_url, hl7v2_host, hl7v2_port = FhirClient.test_message_targets()
+    process_message_url, hl7v2_url = FhirClient.test_message_targets()
     ctx = {
         "process_message_url": process_message_url,
-        "hl7v2_target": f"{hl7v2_host}:{hl7v2_port}",
+        "hl7v2_target": hl7v2_url,
         "message": None, "message_type": None, "filename": None,
         "error": None, "result": None, "validation": None, "validation_job": None,
         "now_ts": time.time(), "report": None, "report_pdf_url": None, "entry_targets": None,
@@ -1624,9 +1625,9 @@ def testing_send_message():
                         "body": json.dumps(body, indent=2) if isinstance(body, (dict, list)) else body,
                     }
                 elif message_type == "hl7v2":
-                    ack = FhirClient.send_hl7v2_mllp(text)
+                    status, ack = FhirClient.send_hl7v2_http(text)
                     ctx["result"] = {
-                        "target": ctx["hl7v2_target"],
+                        "target": ctx["hl7v2_target"], "status": status,
                         "ack_code": FhirClient.hl7v2_ack_code(ack),
                         "body": ack.replace("\r\n", "\n").replace("\r", "\n"),
                     }

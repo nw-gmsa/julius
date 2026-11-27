@@ -5509,24 +5509,27 @@ class FhirClient:
     # --- Testing menu (/testing) — test systems only ---------------------
 
     #: /testing/send-message sends FHIR to the same ESB as "Send to ESB"
-    #: (esb_config(), from ESB_BASE_URL). HL7 v2 goes over MLLP to
-    #: HL7V2_HOST (default: ESB_BASE_URL's host) on HL7V2_PORT.
-    HL7V2_PORT_DEFAULT = 9980
+    #: (esb_config(), from ESB_BASE_URL). HL7 v2 is POSTed over HTTPS to
+    #: HL7V2_BASE_URL + HL7V2_ORDER_FILLER_PATH (IIS → OrderFillerHL7v2HttpService;
+    #: see RIE-SourceCode docs/hl7v2-http-over-iis.md) — this replaced MLLP
+    #: to port 9980. HL7V2_BASE_URL defaults to ESB_BASE_URL's scheme + host
+    #: (the /hl7v2 rewrite sits at the IIS site root, not under /healthconnect).
+    HL7V2_ORDER_FILLER_PATH = "/hl7v2/orderfiller"
 
-    #: MLLP framing bytes (HL7 v2 over TCP).
-    MLLP_START = b"\x0b"
-    MLLP_END = b"\x1c\x0d"
+    @classmethod
+    def hl7v2_base_url(cls):
+        from urllib.parse import urlparse
+        configured = (os.environ.get("HL7V2_BASE_URL") or "").strip().rstrip("/")
+        if configured:
+            return configured
+        parsed = urlparse(cls.esb_base_url())
+        return f"{parsed.scheme}://{parsed.netloc}"
 
     @classmethod
     def test_message_targets(cls):
-        """(process_message_url, hl7v2_host, hl7v2_port) for the testing
+        """(process_message_url, hl7v2_order_filler_url) for the testing
         menu, read fresh from the environment each call."""
-        from urllib.parse import urlparse
-        return (
-            cls.esb_config()[1],
-            os.environ.get("HL7V2_HOST") or urlparse(cls.esb_base_url()).hostname,
-            int(os.environ.get("HL7V2_PORT", cls.HL7V2_PORT_DEFAULT)),
-        )
+        return cls.esb_config()[1], cls.hl7v2_base_url() + cls.HL7V2_ORDER_FILLER_PATH
 
     @staticmethod
     def detect_message_type(text):
@@ -5657,32 +5660,58 @@ class FhirClient:
                        "HealthConnect/IIS logs on the ESB server)")
         return detail
 
+    @staticmethod
+    def normalise_hl7v2(message):
+        """`message` with line endings normalised to \r, the HL7 v2 segment
+        separator (an uploaded file usually has \n or \r\n), blank
+        lines and a leading BOM dropped."""
+        segments = [seg for seg in re.split(r"\r\n|\n|\r", (message or "").strip("\ufeff \t\r\n"))
+                    if seg.strip()]
+        return "\r".join(segments) + "\r"
+
     @classmethod
-    def send_hl7v2_mllp(cls, message, host=None, port=None, timeout=30):
-        """Sends one HL7 v2 message over MLLP (TCP, framed
-        <VT>message<FS><CR>) and returns the decoded acknowledgement
-        (segments \\r-separated). Line endings in `message` are
-        normalised to \\r, the HL7 v2 segment separator, since an
-        uploaded file usually has \\n or \\r\\n. Raises OSError/
-        socket.timeout on connection failure or no ACK in time."""
-        import socket
-        _, default_host, default_port = cls.test_message_targets()
-        host = host or default_host
-        port = port or default_port
-        segments = [seg for seg in re.split(r"\r\n|\n|\r", message.strip("\ufeff \t\r\n")) if seg.strip()]
-        payload = "\r".join(segments) + "\r"
-        with socket.create_connection((host, port), timeout=timeout) as sock:
-            sock.sendall(cls.MLLP_START + payload.encode("utf-8") + cls.MLLP_END)
-            buf = b""
-            while cls.MLLP_END not in buf:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-        if not buf:
-            raise ConnectionError(f"No acknowledgement received from {host}:{port}.")
-        ack = buf.split(cls.MLLP_END, 1)[0].lstrip(cls.MLLP_START)
-        return ack.decode("utf-8", errors="replace")
+    def _post_hl7v2(cls, url, message, timeout):
+        """POSTs an HL7 v2 message (plain ER7, no MLLP framing) to one of the
+        ESB's HTTPS HL7 v2 services. Those services authenticate only if
+        Basic/OAuth2 is enabled on them, so a Bearer token is only sent
+        when ESB_CLIENT_ID/ESB_CLIENT_SECRET are set, with one retry on a
+        401 — same as validate_with_esb()."""
+        _, _, client_id, client_secret, verify_ssl, _ = cls.esb_config()
+        use_token = bool(client_id and client_secret)
+        payload = cls.normalise_hl7v2(message).encode("utf-8")
+
+        def post(force_refresh=False):
+            headers = {"Content-Type": cls.HL7V2_CONTENT_TYPE}
+            if use_token:
+                headers["Authorization"] = f"Bearer {cls.esb_access_token(force_refresh=force_refresh)}"
+            return requests.post(url, data=payload, headers=headers, timeout=timeout, verify=verify_ssl)
+
+        resp = post()
+        if resp.status_code == 401 and use_token:
+            resp = post(force_refresh=True)
+        return resp
+
+    @classmethod
+    def send_hl7v2_http(cls, message, timeout=90):
+        """POSTs one HL7 v2 message to the order filler's HTTPS endpoint
+        (test_message_targets()[1]) and returns (HTTP status, ACK text,
+        segments \r-separated). The ACK comes back with HTTP 200 whether
+        or not the message was accepted — MSA-1 says which
+        (hl7v2_ack_code()). A non-2xx (401/403/503 from the service's
+        authentication, an IIS/proxy error, ...) carries no ACK and raises
+        requests.HTTPError with the response detail. The timeout allows
+        for the service waiting up to 60s for the downstream reply
+        (AckMode=App)."""
+        url = cls.test_message_targets()[1]
+        resp = cls._post_hl7v2(url, message, timeout)
+        if not resp.ok:
+            detail = cls._esb_error_detail((resp.text or "").strip())
+            if resp.status_code == 401 and not all(cls.esb_config()[2:4]):
+                detail += (" — no Bearer token was sent: set ESB_CLIENT_ID / ESB_CLIENT_SECRET "
+                           "if OAuth2 is enabled on this service")
+            raise requests.HTTPError(
+                f"{resp.status_code} from {url}" + (f": {detail[:2000]}" if detail else ""), response=resp)
+        return resp.status_code, resp.content.decode("utf-8", errors="replace")
 
     @staticmethod
     def hl7v2_ack_code(ack):

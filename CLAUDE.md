@@ -726,10 +726,19 @@ Nav "Testing" dropdown, hidden when `client.is_production()`; every
   reduced to its headings. A 500 for every authenticated POST (even `{}`)
   against 192.168.1.56 was server-side, not the message — tokens from
   that host carry `iss: https://localhost/healthconnect/oauth2`.
-- **HL7 v2** → MLLP over TCP (`send_hl7v2_mllp()`: `<VT>msg<FS><CR>`,
-  line endings normalised to `\r`) to `HL7V2_HOST` (default:
-  `ESB_BASE_URL`'s host) : `HL7V2_PORT` (default 9980); shows the ACK and
-  its MSA-1 code.
+- **HL7 v2** → HTTPS POST of the plain ER7 message (no MLLP framing,
+  `Content-Type: x-application/hl7-v2+er7`, segments normalised to `\r`
+  by `normalise_hl7v2()`) to `HL7V2_BASE_URL + /hl7v2/orderfiller`
+  (`send_hl7v2_http()`; IIS → `OrderFillerHL7v2HttpService`, see
+  RIE-SourceCode `docs/hl7v2-http-over-iis.md`). `HL7V2_BASE_URL`
+  defaults to `ESB_BASE_URL`'s scheme + host (the `/hl7v2` rewrite sits
+  at the IIS site root, not under `/healthconnect`). This **replaced**
+  MLLP to port 9980 (`HL7V2_HOST`/`HL7V2_PORT` are no longer read). A
+  Bearer token is sent only if `ESB_CLIENT_ID`/`ESB_CLIENT_SECRET` are
+  set (the service authenticates only if Basic/OAuth2 is enabled on it),
+  with one 401 retry. The ACK comes back with HTTP 200 either way — MSA-1
+  says whether it was accepted; a non-2xx (401/403/503, IIS error) has no
+  ACK and is shown as an error.
 
 **HL7 v2 validation** (ESB backend only — `_hl7v2_validation_context()`
 says so otherwise): a v2 upload gets **Submit (MLLP)** and **Validate**.
