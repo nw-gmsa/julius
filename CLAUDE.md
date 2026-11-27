@@ -1217,7 +1217,10 @@ month that hits the page cap is flagged on the page as possibly incomplete.
   placed, else the order requester's identifier value/literal reference),
   per month. Reports with no code at all are grouped by why — no
   `basedOn`, order not found, order with no requester — so they can be
-  chased with the sending system. On the test server most Unknowns have
+  chased with the sending system. Each row expands into up to
+  `UNKNOWN_ICS_EXAMPLES` (20) example reports, newest `meta.lastUpdated`
+  first (id linking to `/report/<id>`, issued, every identifier), for
+  finding the original messages — page only, not the PDF. On the test server most Unknowns have
   no `basedOn`/`encounter`/`subject` at all (nothing to trace), and some
   orders' requester is an unresolvable `PractitionerRole/<id>`.
 - **"Unclassified reports — what codes do they carry?"** — a collapsed

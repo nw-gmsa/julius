@@ -3050,6 +3050,11 @@ def _month_range(start_month, end_month):
 #: Upper bound on how many months /stats/monthly-reports will query in one
 #: go — each month is its own reports_in_range() search.
 MONTHLY_REPORTS_MAX_MONTHS = 24
+
+#: Example reports listed per row of the monthly report's "Unknown ICS"
+#: breakdown (newest meta.lastUpdated first) — to find the original
+#: messages they came from.
+UNKNOWN_ICS_EXAMPLES = 20
 #: Each month is searched in windows of this many days, each with its own
 #: page cap — one search for a whole busy month hit the cap on production.
 MONTHLY_REPORTS_WINDOW_DAYS = 7
@@ -3181,7 +3186,11 @@ def _build_monthly_report():
     # (code, name, source) -> month -> category -> count, for reports
     # whose ICS is "Unknown" (see _requesting_code_provided()).
     unknown_codes = {}
+    # (code, name, source) -> [report, ...] — examples to trace back to the
+    # original message (UNKNOWN_ICS_EXAMPLES newest kept per row).
+    unknown_examples = {}
     truncated_months = []
+    selected_leaf_keys = FhirClient.category_leaf_keys(selected_category) if selected_category else None
     try:
         seen = set()
         for month in months:
@@ -3229,12 +3238,12 @@ def _build_monthly_report():
                     key = _requesting_code_provided(r, order, org, ordering_ods)
                     by_cat = unknown_codes.setdefault(key, {}).setdefault(month, {})
                     by_cat[category] = by_cat.get(category, 0) + 1
+                    if not selected_leaf_keys or category in selected_leaf_keys:
+                        unknown_examples.setdefault(key, []).append(r)
                 by_cat = trust_counts.setdefault(ics, {}).setdefault(trust, {}).setdefault(month, {})
                 by_cat[category] = by_cat.get(category, 0) + 1
     except Exception as e:
         error = str(e)
-
-    selected_leaf_keys = FhirClient.category_leaf_keys(selected_category) if selected_category else None
 
     def count(month_cats, month):
         cats = month_cats.get(month, {})
@@ -3333,8 +3342,18 @@ def _build_monthly_report():
         for (code, name, source), month_cats in unknown_codes.items():
             code_months = [count(month_cats, mo) for mo in months]
             if sum(code_months):
-                unknown_code_rows.append({"code": code, "name": name, "source": source,
-                                          "months": code_months, "total": sum(code_months)})
+                examples = sorted(unknown_examples.get((code, name, source), []),
+                                  key=lambda rep: (rep.get("meta") or {}).get("lastUpdated") or "", reverse=True)
+                unknown_code_rows.append({
+                    "code": code, "name": name, "source": source,
+                    "months": code_months, "total": sum(code_months),
+                    "examples": [{
+                        "id": rep.get("id"),
+                        "last_updated": (rep.get("meta") or {}).get("lastUpdated"),
+                        "issued": rep.get("issued"),
+                        "identifiers": all_identifiers(rep),
+                    } for rep in examples[:UNKNOWN_ICS_EXAMPLES]],
+                })
         unknown_code_rows.sort(key=lambda r: (-r["total"], r["code"] or "", r["source"]))
 
     # Unclassified reports' code combinations over the ICS list above

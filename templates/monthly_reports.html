@@ -203,6 +203,30 @@
               {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
               <td><strong>{{ row.total }}</strong></td>
             </tr>
+            {% if row.examples %}
+              <tr style="background: #fafbfd;">
+                <td colspan="{{ months|length + 4 }}">
+                  <details>
+                    <summary class="muted" style="cursor: pointer;">
+                      {{ row.examples|length }} example report{{ "s" if row.examples|length != 1 }}
+                      {% if row.total > row.examples|length %}(newest of {{ row.total }}){% endif %}
+                      — to find the original messages
+                    </summary>
+                    <table style="margin-top: 6px;">
+                      <tr><th>meta.lastUpdated</th><th>Issued</th><th>DiagnosticReport</th><th>Identifiers</th></tr>
+                      {% for ex in row.examples %}
+                        <tr>
+                          <td><code>{{ ex.last_updated or "—" }}</code></td>
+                          <td>{{ ex.issued or "—" }}</td>
+                          <td><a href="{{ url_for('report_view', report_id=ex.id) }}">{{ ex.id }}</a></td>
+                          <td>{{ ex.identifiers|join(", ") or "—" }}</td>
+                        </tr>
+                      {% endfor %}
+                    </table>
+                  </details>
+                </td>
+              </tr>
+            {% endif %}
           {% endfor %}
           <tr>
             <th colspan="3">Total</th>
