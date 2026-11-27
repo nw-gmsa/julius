@@ -3002,6 +3002,33 @@ def stats_ics():
     )
 
 
+def _requesting_code_provided(report, order, org, ordering_ods):
+    """(code, name, source) describing what a report says about who ordered
+    it — for the monthly report's "Unknown ICS" breakdown, so the codes
+    that couldn't be placed (or the lack of any) can be chased up with the
+    sender. `code` is the ODS code the report/order carries, else the
+    order requester's identifier value, else its literal reference, else
+    None; `source` says where it came from, or why there's nothing."""
+    if ordering_ods:
+        return ordering_ods, _org_name(org), "ODS code — organisation couldn't be placed in an ICS"
+    if org:
+        return None, _org_name(org), "Organisation with no ODS code"
+    if not order:
+        if not report.get("basedOn"):
+            return None, None, "No ordering organisation on the report, and no basedOn order reference"
+        return None, None, "No ordering organisation on the report; its order wasn't found"
+    requester = order.get("requester") or {}
+    if not requester:
+        return None, None, "Order has no requester"
+    ident = requester.get("identifier") or {}
+    if ident.get("value"):
+        system = ident.get("system")
+        return ident["value"], requester.get("display"), f"Order requester identifier ({system or 'no system'})"
+    if requester.get("reference"):
+        return requester["reference"], requester.get("display"), "Order requester reference (couldn't be resolved)"
+    return None, requester.get("display"), "Order requester has only a display name"
+
+
 def short_icb_name(icb_name):
     """"NHS Greater Manchester Integrated Care Board" -> "Greater
     Manchester" — just for column/row labels on the monthly report."""
@@ -3151,6 +3178,9 @@ def _build_monthly_report():
     # ICS -> (report code, order code) -> count, for unclassified reports —
     # shows which codes need mapping (see _code_signature()).
     unclassified_by_ics = {}
+    # (code, name, source) -> month -> category -> count, for reports
+    # whose ICS is "Unknown" (see _requesting_code_provided()).
+    unknown_codes = {}
     truncated_months = []
     try:
         seen = set()
@@ -3195,6 +3225,10 @@ def _build_monthly_report():
                     sigs[signature] = sigs.get(signature, 0) + 1
                 by_cat = ics_counts.setdefault(ics, {}).setdefault(month, {})
                 by_cat[category] = by_cat.get(category, 0) + 1
+                if ics == "Unknown":
+                    key = _requesting_code_provided(r, order, org, ordering_ods)
+                    by_cat = unknown_codes.setdefault(key, {}).setdefault(month, {})
+                    by_cat[category] = by_cat.get(category, 0) + 1
                 by_cat = trust_counts.setdefault(ics, {}).setdefault(trust, {}).setdefault(month, {})
                 by_cat[category] = by_cat.get(category, 0) + 1
     except Exception as e:
@@ -3291,6 +3325,18 @@ def _build_monthly_report():
             trust_totals[key] = trust_totals.get(key, 0) + sum(count(trust_month_cats, mo) for mo in months)
     delivery = _delivery_summary(trust_totals, sum(month_totals))
 
+    # "Unknown" ICS: what requesting organisation code each report gave
+    # (category filter applied, like the ICS table, so the totals match
+    # its Unknown row). Only in the all-regions view, where Unknown is.
+    unknown_code_rows = []
+    if not selected_region:
+        for (code, name, source), month_cats in unknown_codes.items():
+            code_months = [count(month_cats, mo) for mo in months]
+            if sum(code_months):
+                unknown_code_rows.append({"code": code, "name": name, "source": source,
+                                          "months": code_months, "total": sum(code_months)})
+        unknown_code_rows.sort(key=lambda r: (-r["total"], r["code"] or "", r["source"]))
+
     # Unclassified reports' code combinations over the ICS list above
     # (region filter applied), most common first.
     unclassified_signatures = {}
@@ -3315,6 +3361,8 @@ def _build_monthly_report():
         truncated_months=truncated_months, max_pages=MONTHLY_REPORTS_MAX_PAGES,
         unclassified_signatures=unclassified_signatures, unclassified_total=sum(unclassified_signatures.values()),
         unclassified_shown=UNCLASSIFIED_SIGNATURES_SHOWN, delivery=delivery,
+        unknown_code_rows=unknown_code_rows,
+        unknown_code_month_totals=[sum(r["months"][i] for r in unknown_code_rows) for i in range(len(months))],
     )
 
 

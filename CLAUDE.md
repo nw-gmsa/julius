@@ -1209,6 +1209,17 @@ month that hits the page cap is flagged on the page as possibly incomplete.
   the top 25 production unclassified IGEAP codes (all categorised); the
   IG only publishes a 3-code fragment of IGEAP and no mapping, so these
   rules are inferred.
+- **"Unknown ICS — requesting organisation codes provided"** — under the
+  ICS table (all-regions view only, where Unknown appears; category
+  filter applied so it totals to the Unknown row), and in the PDF: each
+  code the Unknown reports carried, the name given and where it came from
+  (`app._requesting_code_provided()`: the ODS code that couldn't be
+  placed, else the order requester's identifier value/literal reference),
+  per month. Reports with no code at all are grouped by why — no
+  `basedOn`, order not found, order with no requester — so they can be
+  chased with the sending system. On the test server most Unknowns have
+  no `basedOn`/`encounter`/`subject` at all (nothing to trace), and some
+  orders' requester is an unresolvable `PractitionerRole/<id>`.
 - **"Unclassified reports — what codes do they carry?"** — a collapsed
   section under "Reports by category" listing the most common (report
   code, order code) combinations among unclassified reports

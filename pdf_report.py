@@ -248,7 +248,8 @@ def monthly_report_pdf_bytes(report):
     bytes. `report` is app._build_monthly_report()'s context dict — the
     same one the HTML page renders, so the two always match. Sections
     follow the page (coverage note, warnings, reports by category with a
-    total, reports by ICS), except that what the page hides behind clicks
+    total, reports by ICS, the Unknown ICS's requesting organisation
+    codes), except that what the page hides behind clicks
     is written out in full: every ICS's trusts are listed under it, and a
     final "Categories by ICS" section gives each ICS's category breakdown
     (the page's Categories popup)."""
@@ -342,6 +343,27 @@ def monthly_report_pdf_bytes(report):
         ["Total"] + ([""] if show_region else []) + month_totals + [sum(month_totals)],
         name_width=230, extra_widths=(105,) if show_region else (), trust_rows=trust_rows,
     ))
+
+    unknown_rows = report.get("unknown_code_rows") or []
+    if unknown_rows:
+        heading = "Unknown ICS — requesting organisation codes provided" + (
+            f" — {category_label}" if category_label else "")
+        story.append(_para(escape(heading), "Heading2"))
+        story.append(_para(
+            "Reports counted under Unknown above, by the requesting organisation code each one carried "
+            "(the ODS code on the report or its order, else the order requester's identifier or reference) "
+            "&mdash; or, where there was none, why."))
+        unknown_totals = report.get("unknown_code_month_totals") or [0] * len(months)
+        # The three text columns share what the count columns (at least 32pt
+        # each) leave, so a long month range still fits the page.
+        text_width = max(_CONTENT_WIDTH - 32 * len(month_header), 210)
+        story.append(_count_table(
+            ["Code provided", "Organisation name given", "Where it came from"] + month_header,
+            [[_name_cell(r["code"] or "(none)"), _name_cell(r["name"] or "—"), _name_cell(r["source"])]
+             + r["months"] + [r["total"]] for r in unknown_rows],
+            ["Total", "", ""] + unknown_totals + [sum(unknown_totals)],
+            name_width=text_width * .25, extra_widths=(text_width * .35, text_width * .4),
+        ))
 
     breakdowns = [r for r in (report.get("ics_rows") or []) if r.get("categories")]
     if breakdowns:

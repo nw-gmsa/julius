@@ -180,6 +180,38 @@
         </tr>
       </table>
     </div>
+
+    {% if unknown_code_rows %}
+      <h2 id="unknown-ics">Unknown ICS — requesting organisation codes provided{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
+      <p class="muted">
+        Reports counted under <strong>Unknown</strong> above, by the requesting organisation code each
+        one carried (the ODS code on the report or its order, else the order requester's identifier or
+        reference) — or, where there was none, why. Use this to chase the sending systems for a
+        correct ODS code.
+      </p>
+      <div style="overflow-x: auto;">
+        <table>
+          <tr>
+            <th>Code provided</th><th>Organisation name given</th><th>Where it came from</th>
+            {% for m in months %}<th>{{ m }}</th>{% endfor %}<th>Total</th>
+          </tr>
+          {% for row in unknown_code_rows %}
+            <tr>
+              <td>{% if row.code %}<code>{{ row.code }}</code>{% else %}<span class="muted">(none)</span>{% endif %}</td>
+              <td>{{ row.name or "—" }}</td>
+              <td class="muted">{{ row.source }}</td>
+              {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
+              <td><strong>{{ row.total }}</strong></td>
+            </tr>
+          {% endfor %}
+          <tr>
+            <th colspan="3">Total</th>
+            {% for n in unknown_code_month_totals %}<th>{{ n }}</th>{% endfor %}
+            <th>{{ unknown_code_month_totals|sum }}</th>
+          </tr>
+        </table>
+      </div>
+    {% endif %}
   {% endif %}
 
   <!-- "Categories" popup — one ICS's or trust's reports by category and
