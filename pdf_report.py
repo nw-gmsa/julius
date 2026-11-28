@@ -286,6 +286,16 @@ def monthly_report_pdf_bytes(report):
 
     month_header = list(months) + ["Total"]
 
+    summary = report.get("summary") or []
+    if summary:
+        suffix = (f" — {region}" if region else "") + (f" — {category_label}" if category_label else "")
+        story.append(_para(escape("Summary" + suffix), "Heading2"))
+        rows = [["Section", "Figure", "Notes"]] + [
+            [_name_cell(r["section"]), _name_cell(r["figure"]), _name_cell(r["note"] or "")] for r in summary]
+        t = Table(rows, colWidths=[210, 130, _CONTENT_WIDTH - 340], repeatRows=1)
+        t.setStyle(_TABLE_STYLE)
+        story.append(t)
+
     story.append(_para(f"Reports by category{escape(' — ' + region) if region else ''}", "Heading2"))
     body, child_rows, totals = _category_body(report.get("category_rows") or [])
     totals = totals or [0] * len(months)

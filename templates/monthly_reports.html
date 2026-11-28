@@ -124,7 +124,20 @@
   {% endif %}
 
   {% if months %}
-    <h2>Reports by category{% if selected_region %} — {{ selected_region }}{% endif %}</h2>
+    <h2 id="summary">Summary{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
+    <p class="muted">Each section's headline figure for {{ months[0] }}{% if months|length > 1 %} to {{ months[-1] }}{% endif %} — click a section to jump to it.</p>
+    <table>
+      <tr><th>Section</th><th>Figure</th><th>Notes</th></tr>
+      {% for row in summary %}
+        <tr>
+          <td><a href="#{{ row.anchor }}">{{ row.section }}</a></td>
+          <td><strong>{{ row.figure }}</strong></td>
+          <td class="muted">{{ row.note }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+
+    <h2 id="categories">Reports by category{% if selected_region %} — {{ selected_region }}{% endif %}</h2>
     <div style="overflow-x: auto;">
       {{ category_table(category_rows, category_month_totals) }}
     </div>
@@ -155,7 +168,7 @@
       </details>
     {% endif %}
 
-    <h2>Reports actually delivered{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
+    <h2 id="delivered">Reports actually delivered{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
     <p class="muted">
       Reports whose ordering trust receives them electronically. Which trusts
       are live is maintained by hand (<code>TRUST_DELIVERY_STATUS</code> in
@@ -185,11 +198,19 @@
       </table>
     {% endif %}
 
-    <h2>Reports by ICS{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
+    <h2 id="ics">Reports by ICS{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
     <div style="overflow-x: auto;">
       {{ ics_table(ics_rows, month_totals, 'r') }}
     </div>
 
+
+    {% if patient_inferred_reports %}
+      <p class="muted">
+        {{ patient_inferred_reports }} report{{ "s" if patient_inferred_reports != 1 }} with no link to an order
+        (no <code>basedOn</code>, e.g. Shire karyotype reports) {{ "were" if patient_inferred_reports != 1 else "was" }}
+        placed by the patient's other orders — counted only where all of them came from the same trust.
+      </p>
+    {% endif %}
 
     <h2 id="cepheid">Cepheid results (MRD monitoring){% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
     <p class="muted">
@@ -274,13 +295,6 @@
     {% endif %}
     {% endfor %}
 
-    {% if patient_inferred_reports %}
-      <p class="muted">
-        {{ patient_inferred_reports }} report{{ "s" if patient_inferred_reports != 1 }} with no link to an order
-        (no <code>basedOn</code>, e.g. Shire karyotype reports) {{ "were" if patient_inferred_reports != 1 else "was" }}
-        placed by the patient's other orders — counted only where all of them came from the same trust.
-      </p>
-    {% endif %}
 
     {% if unknown_code_rows %}
       <h2 id="unknown-ics">Unknown ICS — requesting organisation codes provided{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>

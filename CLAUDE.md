@@ -1186,6 +1186,12 @@ via `GetDate()`), so only orders sent before that fall back. The trust is the NG
 dWGS orders have no `basedOn`, so they're under Unknown as "No original
 order — from <lab>".
 
+**"Summary"** (top of the page and PDF) — one row per section with its
+headline figure and a link (`_monthly_summary()`, built from the figures
+the sections already have, so it can't disagree with them; same filters as
+each section — with a category filter on, the category row says what the
+figure is a part of, since the category table ignores that filter).
+
 **"Cepheid results (MRD monitoring)"** (page and PDF, before the work
 order sections): BCRABL-coded reports (`FhirClient._is_bcrabl_report()`,
 as on `/cepheid-results`), tallied in the same report loop, so they're

@@ -3430,6 +3430,51 @@ def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region
         by_cat[category] = by_cat.get(category, 0) + 1
 
 
+def _monthly_summary(month_totals, category_rows, delivery, ics_rows, unknown_code_rows, data_quality_rows,
+                     cepheid, work_order_sections, all_regions, category_label=None):
+    """The monthly report's "Summary" — one row per section, (section,
+    anchor, figure, note), from the figures the sections already have, so
+    it can't disagree with them. Same filters as each section."""
+    def n(x):
+        return f"{x:,}"
+    rows = []
+    total = sum(month_totals)
+    top = sorted((r for r in category_rows if not r["child"] and r["total"]), key=lambda r: -r["total"])[:3]
+    # The category table ignores the category filter (it *is* the
+    # breakdown), so with a filter on, say what the figure is a part of.
+    all_categories = sum(r["total"] for r in category_rows if not r["child"])
+    rows.append(("Reports by category", "categories", f"{n(total)} reports",
+                 f"{category_label} only — {n(all_categories)} in all categories" if category_label else
+                 ("Largest: " + ", ".join(f"{r['label']} {n(r['total'])}" for r in top)) if top else "—"))
+    live = next((st for st in delivery["statuses"] if st["label"] == TRUST_DELIVERY_LABELS["live"]), None)
+    nearing = next((st for st in delivery["statuses"] if st["label"] == TRUST_DELIVERY_LABELS["nearing"]), None)
+    rows.append(("Reports actually delivered", "delivered",
+                 f"{n(live['reports'])} ({live['pct']}%) live" if live else "—",
+                 f"{n(nearing['reports'])} ({nearing['pct']}%) at trusts nearing go-live" if nearing else ""))
+    with_reports = [r for r in ics_rows if r["total"] and r["name"] != "Unknown"]
+    unknown = next((r["total"] for r in ics_rows if r["name"] == "Unknown"), 0)
+    rows.append(("Reports by ICS", "ics", f"{len(with_reports)} ICS{'s' if len(with_reports) != 1 else ''} with reports",
+                 f"{n(unknown)} ({round(100 * unknown / total, 1) if total else 0}%) Unknown ICS" if unknown else
+                 "None under Unknown"))
+    if all_regions and unknown_code_rows:  # the section only renders when there are some
+        rows.append(("Unknown ICS — codes provided", "unknown-ics",
+                     f"{n(sum(r['total'] for r in unknown_code_rows))} reports",
+                     f"{len(unknown_code_rows)} different codes / reasons" if unknown_code_rows else "—"))
+    rows.append(("Data quality issues", "data-quality",
+                 f"{len(data_quality_rows)} issue{'s' if len(data_quality_rows) != 1 else ''}",
+                 f"{n(sum(r['total'] for r in data_quality_rows))} reports affected (a report can have more than one; "
+                 "all reports in the months shown)" if data_quality_rows else "None found"))
+    rows.append(("Cepheid results (MRD monitoring)", "cepheid",
+                 cepheid["error"] and "Error" or f"{n(sum(cepheid['month_totals']))} results",
+                 cepheid["error"] or "Included in the report figures"))
+    for wo in work_order_sections:
+        rows.append((wo["title"], f"work-orders-{wo['key'].lower()}",
+                     wo["error"] and "Error" or f"{n(sum(wo['month_totals']))} original orders",
+                     wo["error"] or ("Stands in for StarLIMS reports, which don't come through the RIE"
+                                     if wo["key"] == FhirClient.STARLIMS_PERFORMER_ODS else "")))
+    return [{"section": a, "anchor": b, "figure": c, "note": d} for a, b, c, d in rows]
+
+
 def _build_monthly_report():
     """
     Everything the monthly report shows, as the template context dict —
@@ -3786,8 +3831,13 @@ def _build_monthly_report():
                                       for i in range(len(months))],
         })
 
+    summary = _monthly_summary(
+        month_totals, category_rows, delivery, ics_rows, unknown_code_rows, data_quality_rows,
+        cepheid, work_order_sections, all_regions=not selected_region,
+        category_label=category_labels.get(selected_category))
+
     return dict(
-        error=error,
+        error=error, summary=summary,
         start_month=start_month, end_month=end_month, months=months,
         regions=regions, selected_region=selected_region,
         categories=FhirClient.REPORT_CATEGORIES, selected_category=selected_category,
