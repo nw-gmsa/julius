@@ -181,6 +181,14 @@
       </table>
     </div>
 
+    {% if patient_inferred_reports %}
+      <p class="muted">
+        {{ patient_inferred_reports }} report{{ "s" if patient_inferred_reports != 1 }} with no link to an order
+        (no <code>basedOn</code>, e.g. Shire karyotype reports) {{ "were" if patient_inferred_reports != 1 else "was" }}
+        placed by the patient's other orders — counted only where all of them came from the same trust.
+      </p>
+    {% endif %}
+
     {% if unknown_code_rows %}
       <h2 id="unknown-ics">Unknown ICS — requesting organisation codes provided{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
       <p class="muted">
@@ -241,6 +249,53 @@
           </tr>
         </table>
       </div>
+    {% endif %}
+
+    <h2 id="data-quality">Data quality issues</h2>
+    {% if data_quality_rows %}
+      <p class="muted">
+        Problems in the data behind this report, for every report in the months shown (the region and category
+        filters don't apply). Where the report can correct them, the counts above already have.
+      </p>
+      <div style="overflow-x: auto;">
+        <table>
+          <tr>
+            <th>Issue</th><th>Value</th><th>Where</th>
+            {% for m in months %}<th>{{ m }}</th>{% endfor %}<th>Total</th>
+          </tr>
+          {% for row in data_quality_rows %}
+            <tr>
+              <td><strong>{{ row.issue }}</strong><br><span class="muted">{{ row.fix }}</span></td>
+              <td>{% if row.detail %}<code>{{ row.detail }}</code>{% else %}—{% endif %}</td>
+              <td class="muted">{{ row.where|join("; ") }}</td>
+              {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
+              <td><strong>{{ row.total }}</strong></td>
+            </tr>
+            <tr style="background: #fafbfd;">
+              <td colspan="{{ months|length + 4 }}">
+                <details>
+                  <summary class="muted" style="cursor: pointer;">
+                    {{ row.examples|length }} example report{{ "s" if row.examples|length != 1 }}
+                    {% if row.total > row.examples|length %}(newest of {{ row.total }}){% endif %}
+                  </summary>
+                  <table style="margin-top: 6px;">
+                    <tr><th>meta.lastUpdated</th><th>DiagnosticReport</th><th>Identifiers</th></tr>
+                    {% for ex in row.examples %}
+                      <tr>
+                        <td><code>{{ ex.last_updated or "—" }}</code></td>
+                        <td><a href="{{ url_for('report_view', report_id=ex.id) }}">{{ ex.id }}</a></td>
+                        <td>{{ ex.identifiers|join(", ") or "—" }}</td>
+                      </tr>
+                    {% endfor %}
+                  </table>
+                </details>
+              </td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    {% else %}
+      <p class="muted">None found in the months shown.</p>
     {% endif %}
   {% endif %}
 

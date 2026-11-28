@@ -2690,6 +2690,11 @@ def _report_ordering(report, orders_index):
         org, name = _order_ordering(order)
     else:
         name = "Unknown"
+    if not org and _patient_inferred_key(report) in orders_index:
+        # No order link at all: the trust all the patient's orders came
+        # from (_infer_ordering_from_patient_orders()).
+        org = _canonical_org(client.organisation_by_ods(orders_index[_patient_inferred_key(report)]))
+        name = _org_name(org) or name
     return order, org, name
 
 
@@ -2708,15 +2713,51 @@ def _orders_index_for_reports(reports, orders=()):
     whenever the report itself lacks one, not only when the report can't
     be categorised at all."""
     index = FhirClient.index_orders(orders)
+    # "No ordering organisation" means none that resolves — a report whose
+    # own code is a sender typo ("ROA") needs its order's requester too.
     missing = [
         r for r in reports
-        if (not client.report_ordering_ods(r) or not FhirClient._test_code_and_display(r.get("code"))[0])
+        if (not client.report_ordering_organisation(r) or not FhirClient._test_code_and_display(r.get("code"))[0])
         and not client.match_report_order(r, index)
     ]
     if missing:
         for key, order in FhirClient.index_orders(client.service_requests_for_reports(missing)).items():
             index.setdefault(key, order)
+    _infer_ordering_from_patient_orders(reports, index)
     return index
+
+
+def _patient_inferred_key(report):
+    return f"DiagnosticReport/{report.get('id')}#patient-ods"
+
+
+def _infer_ordering_from_patient_orders(reports, index):
+    """For reports with no link to their order at all — no ordering
+    organisation of their own, no `basedOn` order in `index` (e.g. Shire
+    karyotype reports, which carry no basedOn) — record an ordering ODS
+    code in `index` under _patient_inferred_key() when *every* one of the
+    patient's orders authored on or before the report's date points at
+    the same trust. Several trusts, or none, leaves the report Unknown.
+    Only the organisation is inferred, never the order itself (so a
+    report's category never comes from a guessed order)."""
+    unlinked = [
+        r for r in reports
+        if (r.get("subject") or {}).get("reference")
+        and not client.report_ordering_organisation(r)
+        and not client.match_report_order(r, index)
+    ]
+    if not unlinked:
+        return
+    by_patient = client.service_requests_for_patients(r["subject"]["reference"] for r in unlinked)
+    for r in unlinked:
+        report_date = (r.get("issued") or r.get("effectiveDateTime") or "")[:10]
+        candidates = [
+            o for o in by_patient.get(r["subject"]["reference"], [])
+            if not report_date or (o.get("authoredOn") or "")[:10] <= report_date
+        ]
+        codes = {client.order_ordering_ods(o) for o in candidates}
+        if len(codes) == 1 and None not in codes:
+            index[_patient_inferred_key(r)] = codes.pop()
 
 
 def _reports_by_order_id(reports, orders_index):
@@ -3029,6 +3070,78 @@ def _requesting_code_provided(report, order, org, ordering_ods):
     return None, requester.get("display"), "Order requester has only a display name"
 
 
+#: Data quality issues the monthly report lists (_report_data_quality_issues()):
+#: key -> (label, what to do about it).
+DATA_QUALITY_ISSUES = {
+    "ods_typo": ("ODS code typo",
+                 "A letter O sent for a zero. The ESB now corrects it "
+                 "(RIE.FHIR.Library.NormaliseODSCode()); records already stored keep it, and this report corrects them."),
+    "local_code": ("Local code instead of an ODS code",
+                   "Map it to the trust's ODS code — ODSCodeCorrections lookup table on the ESB, "
+                   "FhirClient.LOCAL_ODS_ALIASES here — or ask the sender to send the ODS code."),
+    "country_as_ods": ("Country code sent as an ODS code",
+                       "A country outside the UK has no ODS code: it should be its ISO 3166-1 alpha-3 code "
+                       "under urn:iso:std:iso:3166 (the ESB now does this)."),
+    "shire_no_order_placed": ("Shire report with no order link — placed from the patient's orders",
+                              "Shire ORU messages carry no ORC, placer number or ordering facility, so nothing links "
+                              "the report to its order; the trust was inferred (all the patient's orders came from it)."),
+    "shire_no_order_unknown": ("Shire report with no order link — ordering organisation unknown",
+                               "As above, but the patient's orders came from more than one trust (or there are none). "
+                               "Needs Shire to send the order (placer/HODS order number) or ordering facility."),
+}
+
+#: Example reports kept per data quality issue row.
+DATA_QUALITY_EXAMPLES = 10
+
+
+def _raw_organisation_codes(report, order):
+    """(where, system, value) for every organisation code the report and
+    its order carry, *as sent* — before FhirClient.normalise_ods_code()."""
+    codes = []
+    assigner = (((report.get("encounter") or {}).get("identifier") or {}).get("assigner") or {}).get("identifier") or {}
+    if assigner.get("value"):
+        codes.append(("report encounter assigner", assigner.get("system"), assigner["value"]))
+    for ref in report.get("basedOn") or []:
+        assigner = (((ref.get("identifier") or {}).get("assigner") or {}).get("identifier")) or {}
+        if assigner.get("value"):
+            codes.append(("report basedOn placer number assigner", assigner.get("system"), assigner["value"]))
+    if order:
+        ident = (order.get("requester") or {}).get("identifier") or {}
+        if ident.get("value"):
+            codes.append(("order requester", ident.get("system"), ident["value"]))
+        for ident in order.get("identifier") or []:
+            assigner = ((ident.get("assigner") or {}).get("identifier")) or {}
+            if assigner.get("value"):
+                codes.append(("order identifier assigner", assigner.get("system"), assigner["value"]))
+    return codes
+
+
+def _report_data_quality_issues(report, order, org, orders_index):
+    """{(issue key, detail): set of where} for one report — see
+    DATA_QUALITY_ISSUES. `detail` is e.g. "ROA → R0A"."""
+    issues = {}
+    for where, system, value in _raw_organisation_codes(report, order):
+        if system not in (None, "", FhirClient.ODS_ORGANIZATION_CODE_SYSTEM):
+            continue
+        upper = value.strip().upper()
+        if upper in FhirClient.LOCAL_ODS_ALIASES:
+            key = ("local_code", f"{value} → {FhirClient.LOCAL_ODS_ALIASES[upper]}")
+        elif upper in FhirClient.ISO3166_ALPHA3_COUNTRIES and upper not in FhirClient.ods_trusts():
+            key = ("country_as_ods", f"{value} ({FhirClient.ISO3166_ALPHA3_COUNTRIES[upper]})")
+        elif FhirClient.normalise_ods_code(value) != value:
+            key = ("ods_typo", f"{value} → {FhirClient.normalise_ods_code(value)}")
+        else:
+            continue
+        issues.setdefault(key, set()).add(where)
+    is_shire = any(i.get("system") == "https://fhir.nwgenomics.nhs.uk/Shire/ReportIdentifier"
+                   for i in report.get("identifier") or [])
+    if is_shire and not report.get("basedOn") and not order:
+        placed = bool(org) and _patient_inferred_key(report) in orders_index
+        issues.setdefault(("shire_no_order_placed" if placed else "shire_no_order_unknown", ""), set()).add(
+            "DiagnosticReport (no basedOn, encounter or ordering organisation)")
+    return issues
+
+
 def short_icb_name(icb_name):
     """"NHS Greater Manchester Integrated Care Board" -> "Greater
     Manchester" — just for column/row labels on the monthly report."""
@@ -3189,6 +3302,12 @@ def _build_monthly_report():
     # (code, name, source) -> [report, ...] — examples to trace back to the
     # original message (UNKNOWN_ICS_EXAMPLES newest kept per row).
     unknown_examples = {}
+    # Reports placed by _infer_ordering_from_patient_orders() (no order
+    # link; all the patient's orders from one trust) — counted, shown on
+    # the page, so an inferred attribution is never silent.
+    patient_inferred_reports = 0
+    # (issue key, detail) -> {"where": set, "months": {month: n}, "examples": [report, ...]}
+    data_quality = {}
     truncated_months = []
     selected_leaf_keys = FhirClient.category_leaf_keys(selected_category) if selected_category else None
     try:
@@ -3215,6 +3334,13 @@ def _build_monthly_report():
             orders_index = _orders_index_for_reports(reports)
             for r in reports:
                 order, org, _ = _report_ordering(r, orders_index)
+                if org and not order and _patient_inferred_key(r) in orders_index:
+                    patient_inferred_reports += 1
+                for key, where in _report_data_quality_issues(r, order, org, orders_index).items():
+                    entry = data_quality.setdefault(key, {"where": set(), "months": {}, "examples": []})
+                    entry["where"] |= where
+                    entry["months"][month] = entry["months"].get(month, 0) + 1
+                    entry["examples"].append(r)
                 ordering_ods = client.organisation_ods_code(org) if org else None
                 geo = FhirClient.organisation_geography(
                     ordering_ods, name=_org_name(org), postcode=client.organisation_postcode(org)) if org else None
@@ -3356,6 +3482,22 @@ def _build_monthly_report():
                 })
         unknown_code_rows.sort(key=lambda r: (-r["total"], r["code"] or "", r["source"]))
 
+    # Data quality issues — every report in the months shown (region and
+    # category filters don't apply: these are about the data, not counts).
+    data_quality_rows = []
+    order_of_issues = list(DATA_QUALITY_ISSUES)
+    for (key, detail), entry in sorted(data_quality.items(), key=lambda kv: (order_of_issues.index(kv[0][0]), kv[0][1])):
+        label, fix = DATA_QUALITY_ISSUES[key]
+        months_ = [entry["months"].get(mo, 0) for mo in months]
+        examples = sorted(entry["examples"], key=lambda rep: (rep.get("meta") or {}).get("lastUpdated") or "",
+                          reverse=True)[:DATA_QUALITY_EXAMPLES]
+        data_quality_rows.append({
+            "issue": label, "detail": detail, "fix": fix, "where": sorted(entry["where"]),
+            "months": months_, "total": sum(months_),
+            "examples": [{"id": rep.get("id"), "last_updated": (rep.get("meta") or {}).get("lastUpdated"),
+                          "identifiers": all_identifiers(rep)} for rep in examples],
+        })
+
     # Unclassified reports' code combinations over the ICS list above
     # (region filter applied), most common first.
     unclassified_signatures = {}
@@ -3380,7 +3522,8 @@ def _build_monthly_report():
         truncated_months=truncated_months, max_pages=MONTHLY_REPORTS_MAX_PAGES,
         unclassified_signatures=unclassified_signatures, unclassified_total=sum(unclassified_signatures.values()),
         unclassified_shown=UNCLASSIFIED_SIGNATURES_SHOWN, delivery=delivery,
-        unknown_code_rows=unknown_code_rows,
+        unknown_code_rows=unknown_code_rows, patient_inferred_reports=patient_inferred_reports,
+        data_quality_rows=data_quality_rows,
         unknown_code_month_totals=[sum(r["months"][i] for r in unknown_code_rows) for i in range(len(months))],
     )
 

@@ -1233,6 +1233,49 @@ month that hits the page cap is flagged on the page as possibly incomplete.
   attachments aren't included. On the test server most Unknowns have
   no `basedOn`/`encounter`/`subject` at all (nothing to trace), and some
   orders' requester is an unresolvable `PractitionerRole/<id>`.
+- **What the production diagnostics showed (October 2026), and the fixes:**
+  - **1,129 "order wasn't found"** — MFT's placer number
+    (`basedOn.identifier.assigner`, and the order's own PLAC identifier)
+    carries **`ROA`, a letter O for R0A's zero**. `report_ordering_ods()`
+    took that as the report's ordering code, so the order (whose
+    `requester` says R0A correctly) was never fetched, and `ROA` resolves
+    to nothing. Fixed twice over: `FhirClient.normalise_ods_code()`
+    (applied in `organisation_by_ods()`, `organisation_geography()`,
+    `resolve_organisation_ods_inline()` and `order_ordering_ods()`)
+    swaps O → 0 only when the code isn't an etr.csv trust/site and the
+    swapped one is, and also maps `LOCAL_ODS_ALIASES` (`SH_OLDHAM` →
+    `RM3`); and `_orders_index_for_reports()` now fetches the order
+    whenever the report's own ODS code doesn't *resolve*
+    (`report_ordering_organisation()`), not only when it's absent. The
+    sender should still fix `ROA`.
+  - **514 "no basedOn"** — Shire bone-marrow karyotype reports (LOINC
+    `33893-9`, `Shire/ReportIdentifier`) carry no order link at all.
+    `_infer_ordering_from_patient_orders()` fetches those patients'
+    orders in batches (`FhirClient.service_requests_for_patients()`,
+    `subject=Patient/a,b,...`) and records an ordering ODS code (under
+    `_patient_inferred_key()` in the orders index) only when *every*
+    order authored on or before the report's date has the same one —
+    several trusts leave it Unknown. Only the organisation is inferred,
+    never the order, so categories never come from a guessed order. The
+    count is shown on the page and in the PDF (`patient_inferred_reports`).
+- **"Data quality issues"** (page and PDF; every report in the months
+  shown — region/category filters don't apply) — `DATA_QUALITY_ISSUES` /
+  `_report_data_quality_issues()` in `app.py`, from the organisation
+  codes the report and its order carry *as sent*
+  (`_raw_organisation_codes()`, before `normalise_ods_code()`): ODS code
+  typo (`ROA` → `R0A`), local code (`LOCAL_ODS_ALIASES`, `SH_OLDHAM` →
+  `RM3`), a country code sent under the ODS system (`IRL`), and Shire
+  reports with no order link, split by whether the patient's orders
+  placed them. Up to `DATA_QUALITY_EXAMPLES` examples per row (page only).
+  **The ESB side** (RIE-SourceCode, `RIE.FHIR.Library.NormaliseODSCode()`/
+  `OrganisationCodeSystem()`, used by `HL7v2ToFHIRMessage`) now writes
+  `R0A` instead of its old internal `ROA` marker for MFT EPIC placer
+  numbers, maps `SH_OLDHAM`, and writes countries outside the UK as
+  ISO 3166-1 alpha-3 under `urn:iso:std:iso:3166`
+  (`FhirClient.ISO3166_SYSTEM`; read here via `ORGANISATION_CODE_SYSTEMS`,
+  grouped as Republic of Ireland / Other countries). Shire ORU messages
+  carry only MSH/PID/OBR/OBX — no ORC, placer number or ordering
+  facility — so the transform can't fix those.
 - **"Unclassified reports — what codes do they carry?"** — a collapsed
   section under "Reports by category" listing the most common (report
   code, order code) combinations among unclassified reports

@@ -344,6 +344,12 @@ def monthly_report_pdf_bytes(report):
         name_width=230, extra_widths=(105,) if show_region else (), trust_rows=trust_rows,
     ))
 
+    if report.get("patient_inferred_reports"):
+        n = report["patient_inferred_reports"]
+        story.append(_para(
+            f"{n} report{'s' if n != 1 else ''} with no link to an order (no basedOn) placed by the patient's "
+            f"other orders &mdash; counted only where all of them came from the same trust."))
+
     unknown_rows = report.get("unknown_code_rows") or []
     if unknown_rows:
         heading = "Unknown ICS — requesting organisation codes provided" + (
@@ -364,6 +370,23 @@ def monthly_report_pdf_bytes(report):
             ["Total", "", ""] + unknown_totals + [sum(unknown_totals)],
             name_width=text_width * .25, extra_widths=(text_width * .35, text_width * .4),
         ))
+
+    dq_rows = report.get("data_quality_rows") or []
+    story.append(_para("Data quality issues", "Heading2"))
+    if dq_rows:
+        story.append(_para("Problems in the data behind this report, for every report in the months shown "
+                           "(the region and category filters don't apply)."))
+        text_width = max(_CONTENT_WIDTH - 32 * len(month_header), 210)
+        story.append(_count_table(
+            ["Issue", "Value", "Where"] + month_header,
+            [[Paragraph(f"<b>{escape(r['issue'])}</b><br/>{escape(r['fix'])}", _CELL_STYLE),
+              _name_cell(r["detail"] or "—"), _name_cell("; ".join(r["where"]))] + r["months"] + [r["total"]]
+             for r in dq_rows],
+            None,
+            name_width=text_width * .5, extra_widths=(text_width * .2, text_width * .3),
+        ))
+    else:
+        story.append(_para("None found in the months shown."))
 
     breakdowns = [r for r in (report.get("ics_rows") or []) if r.get("categories")]
     if breakdowns:

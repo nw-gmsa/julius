@@ -1810,6 +1810,29 @@ class FhirClient:
     #: identifier it finds.
     ODS_ORGANIZATION_CODE_SYSTEM = "https://fhir.nhs.uk/Id/ods-organization-code"
 
+    #: FHIR's system for ISO 3166 country codes — used (with an alpha-3
+    #: code, https://en.wikipedia.org/wiki/ISO_3166-1_alpha-3) for a
+    #: referring organisation outside the UK, which has no ODS code; the
+    #: ESB (RIE.FHIR.Library.OrganisationCodeSystem()) writes it.
+    ISO3166_SYSTEM = "urn:iso:std:iso:3166"
+
+    #: ISO 3166-1 alpha-3 codes recognised as a country (same list as the
+    #: ESB's IsISO3166Alpha3()) -> name. Wales, Scotland and Northern
+    #: Ireland have ODS-style codes, so they aren't here.
+    ISO3166_ALPHA3_COUNTRIES = {
+        "ARE": "United Arab Emirates", "AUS": "Australia", "AUT": "Austria", "BEL": "Belgium",
+        "BGR": "Bulgaria", "CAN": "Canada", "CHE": "Switzerland", "CYP": "Cyprus", "CZE": "Czechia",
+        "DEU": "Germany", "DNK": "Denmark", "ESP": "Spain", "EST": "Estonia", "FIN": "Finland",
+        "FRA": "France", "GRC": "Greece", "HRV": "Croatia", "HUN": "Hungary", "IRL": "Ireland",
+        "ISL": "Iceland", "ISR": "Israel", "ITA": "Italy", "LTU": "Lithuania", "LUX": "Luxembourg",
+        "LVA": "Latvia", "MLT": "Malta", "NLD": "Netherlands", "NOR": "Norway", "NZL": "New Zealand",
+        "POL": "Poland", "PRT": "Portugal", "ROU": "Romania", "SAU": "Saudi Arabia", "SVK": "Slovakia",
+        "SVN": "Slovenia", "SWE": "Sweden", "TUR": "Turkey", "USA": "United States",
+    }
+
+    #: Identifier systems an organisation code is read from.
+    ORGANISATION_CODE_SYSTEMS = (ODS_ORGANIZATION_CODE_SYSTEM, ISO3166_SYSTEM)
+
     @classmethod
     def organisation_ods_code(cls, organisation):
         """The NHS ODS code from an Organization resource's `identifier`
@@ -1820,6 +1843,10 @@ class FhirClient:
         identifiers = organisation.get("identifier", [])
         for ident in identifiers:
             if ident.get("system") == cls.ODS_ORGANIZATION_CODE_SYSTEM:
+                return ident.get("value")
+        # A country outside the UK (no ODS code) — its ISO 3166 alpha-3 code.
+        for ident in identifiers:
+            if ident.get("system") == cls.ISO3166_SYSTEM:
                 return ident.get("value")
         for ident in identifiers:
             if not ident.get("system"):
@@ -1882,6 +1909,34 @@ class FhirClient:
             pass
         return None, None
 
+    #: Local/non-ODS organisation codes seen on production, mapped to the
+    #: NHS trust they belong to — add to this as they turn up in the
+    #: monthly report's "Unknown ICS" breakdown.
+    LOCAL_ODS_ALIASES = {
+        "SH_OLDHAM": "RM3",  # Royal Oldham Hospital — Northern Care Alliance NHS Foundation Trust
+    }
+
+    @classmethod
+    def normalise_ods_code(cls, ods_code):
+        """`ods_code` with known sender errors corrected: a local alias
+        (LOCAL_ODS_ALIASES), or a letter O typed for a zero — "ROA" for
+        Manchester University's "R0A", seen on production in MFT's placer
+        number assigners. The O -> 0 swap only applies when the code as
+        given isn't an NHS trust (or site) in etr.csv and the swapped one
+        is, so a real code is never changed."""
+        if not ods_code or not isinstance(ods_code, str):
+            return ods_code
+        code = ods_code.strip()
+        if code.upper() in cls.LOCAL_ODS_ALIASES:
+            return cls.LOCAL_ODS_ALIASES[code.upper()]
+        if "O" in code.upper() and len(code) in (3, 5):
+            trusts = cls.ods_trusts()
+            known = lambda c: c in trusts or (len(c) == 5 and c[:3] in trusts)
+            swapped = code.upper().replace("O", "0")
+            if not known(code.upper()) and known(swapped):
+                return swapped
+        return code
+
     def organisation_by_ods(self, ods_code):
         """An Organization-shaped dict for an ODS code — this FHIR
         server's own Organization if it has one (search_organizations()),
@@ -1892,6 +1947,7 @@ class FhirClient:
         stable, so organisation_ics()'s per-id cache still works. Cached
         per ODS code for the process lifetime — the same trusts recur
         across every month's reports."""
+        ods_code = self.normalise_ods_code(ods_code)
         if not ods_code:
             return None
         if ods_code in self._org_by_ods_cache:
@@ -1910,6 +1966,14 @@ class FhirClient:
                 "resourceType": "Organization", "id": f"ods-{trust['code']}", "name": self._ods_name_case(trust["name"]),
                 "identifier": [{"system": self.ODS_ORGANIZATION_CODE_SYSTEM, "value": trust["code"]}],
                 "address": [{"postalCode": trust["postcode"]}] if trust["postcode"] else [],
+            }
+            self._org_by_ods_cache[ods_code] = org
+            return org
+        if ods_code.upper() in self.ISO3166_ALPHA3_COUNTRIES:
+            code = ods_code.upper()
+            org = {
+                "resourceType": "Organization", "id": f"iso-{code}", "name": self.ISO3166_ALPHA3_COUNTRIES[code],
+                "identifier": [{"system": self.ISO3166_SYSTEM, "value": code}],
             }
             self._org_by_ods_cache[ods_code] = org
             return org
@@ -1963,8 +2027,8 @@ class FhirClient:
         IG's examples have the lab, 699X0, as the placer number's
         assigner). None if nothing else is found."""
         requester_ident = (order.get("requester") or {}).get("identifier") or {}
-        if requester_ident.get("value") and requester_ident.get("system") == self.ODS_ORGANIZATION_CODE_SYSTEM:
-            return requester_ident["value"]
+        if requester_ident.get("value") and requester_ident.get("system") in self.ORGANISATION_CODE_SYSTEMS:
+            return self.normalise_ods_code(requester_ident["value"])
         performer_ods = {
             ods for ods in (self.resolve_organisation_ods_inline(p) for p in order.get("performer", []))
             if ods
@@ -2062,6 +2126,27 @@ class FhirClient:
                         found[key] = self._ref_cache[key]
         return list(found.values())
 
+    def service_requests_for_patients(self, patient_refs):
+        """{"Patient/<id>": [ServiceRequest, ...]} for `patient_refs`,
+        fetched in batches of SERVICE_REQUEST_BATCH_SIZE
+        (`ServiceRequest?subject=Patient/a,Patient/b,...`, no `_include`) —
+        for reports with no link to their order at all (see
+        app._orders_index_for_reports()). A batch that fails is skipped."""
+        refs = sorted({r for r in patient_refs if r and r.startswith("Patient/")})
+        by_patient = {r: [] for r in refs}
+        size = self.SERVICE_REQUEST_BATCH_SIZE
+        for start in range(0, len(refs), size):
+            chunk = refs[start:start + size]
+            try:
+                orders = self._search_all("ServiceRequest", {"subject": ",".join(chunk), "_count": 100})
+            except requests.HTTPError:
+                continue
+            for o in orders:
+                subject = (o.get("subject") or {}).get("reference")
+                if o.get("resourceType") == "ServiceRequest" and subject in by_patient:
+                    by_patient[subject].append(o)
+        return by_patient
+
     @staticmethod
     def match_report_order(report, orders_index):
         """The report's originating ServiceRequest *if it's already in
@@ -2122,10 +2207,10 @@ class FhirClient:
         if not org_ref:
             return None
         ident = org_ref.get("identifier") or {}
-        if ident.get("value") and (not ident.get("system") or ident.get("system") == self.ODS_ORGANIZATION_CODE_SYSTEM):
-            return ident["value"]
+        if ident.get("value") and (not ident.get("system") or ident.get("system") in self.ORGANISATION_CODE_SYSTEMS):
+            return self.normalise_ods_code(ident["value"])
         if org_ref.get("reference"):
-            return self.resolve_organisation_ods(org_ref)
+            return self.normalise_ods_code(self.resolve_organisation_ods(org_ref))
         return None
 
     def update_organization_name(self, organization, name):
@@ -2584,9 +2669,13 @@ class FhirClient:
         OUTSIDE_ENGLAND_REGION), "Independent sector", "External quality
         assessment", "Other countries", or "England (ICS not known)". None
         if nothing fits."""
+        ods_code = cls.normalise_ods_code(ods_code)
         geo = cls.trust_geography(ods_code)
         if geo:
             return geo
+        if ods_code and ods_code.upper() in cls.ISO3166_ALPHA3_COUNTRIES:
+            label = "Republic of Ireland" if ods_code.upper() == "IRL" else "Other countries"
+            return cls._group_geography(label, cls.OUTSIDE_ENGLAND_REGION)
         details = cls.ods_details(ods_code) if ods_code else None
         if details:
             geo = cls._geography_from_ods_details(ods_code, details)
