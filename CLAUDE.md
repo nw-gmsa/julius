@@ -1192,6 +1192,16 @@ the sections already have, so it can't disagree with them; same filters as
 each section — with a category filter on, the category row says what the
 figure is a part of, since the category table ignores that filter).
 
+**"ctDNA orders for NE&Y Genomics"** (page and PDF, after Cepheid): ctDNA
+orders (`FhirClient.ctdna_orders_in_range()`: `code=` the bare
+`CTDNA_ORDER_SEARCH_CODES` + `authored`, week windows, no `_include`,
+re-checked with `report_category()`) whose ordering trust's ICB is in
+`FhirClient.NEY_ICB_CODES` (QOQ/QHM/QF7/QWO — the same list as
+RIE-SourceCode's `RIE.Router.O21` NEYICSList, which forwards those iGene
+orders to NE&Y), counted by `_count_work_orders(..., only_icbs=...)` — so
+once per original order, lab codes skipped. ICS/trust table only (they're
+all ctDNA). Orders with no `authoredOn` aren't counted.
+
 **"Cepheid results (MRD monitoring)"** (page and PDF, before the work
 order sections): BCRABL-coded reports (`FhirClient._is_bcrabl_report()`,
 as on `/cepheid-results`), tallied in the same report loop, so they're

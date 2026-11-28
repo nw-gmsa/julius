@@ -800,6 +800,29 @@ class FhirClient:
         self.last_search_truncated = truncated
         return list(found.values())
 
+    #: Test codes searched for ctDNA orders on the monthly report — every
+    #: code report_category() puts under ctDNA (ctDNA/cfDNA in the Test
+    #: Directory display, plus NW local MX codes), bare so any system
+    #: matches; results are re-checked with report_category().
+    CTDNA_ORDER_SEARCH_CODES = ("M3.13", "M4.5", "M4.14", "M226.7", "MX13.1", "MX14.1")
+
+    #: NE&Y Genomics' ICBs — iGene orders from trusts in these are
+    #: forwarded to NE&Y (699N0) by RIE-SourceCode's RIE.Router.O21
+    #: (its NEYICSList setting, same codes).
+    NEY_ICB_CODES = ("QOQ", "QHM", "QF7", "QWO")
+
+    def ctdna_orders_in_range(self, start, end, max_pages=10):
+        """ctDNA ServiceRequests authored within [start, end] — searched by
+        CTDNA_ORDER_SEARCH_CODES, no `_include`, then kept only if
+        report_category() says ctDNA. Sets last_search_truncated."""
+        orders = self._search_all("ServiceRequest", {
+            "code": ",".join(self.CTDNA_ORDER_SEARCH_CODES),
+            "authored": [f"ge{start}", f"le{end}"],
+            "_count": 100,
+        }, max_pages=max_pages)
+        return [o for o in orders if o.get("resourceType") == "ServiceRequest"
+                and self.report_category(o.get("code")) == "ctdna"]
+
     def prefetch_references(self, references):
         """Seed the reference cache with the resources `references`
         ("Type/id" strings) point at, in batches of

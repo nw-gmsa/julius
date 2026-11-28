@@ -242,6 +242,35 @@
       {% endif %}
     {% endif %}
 
+    <h2 id="ney-ctdna">ctDNA orders for NE&amp;Y Genomics{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
+    <p class="muted">
+      ctDNA test orders (by test code: M3.13, M4.5, M4.14, M226.7, MX13.1,
+      MX14.1) from trusts in NE&amp;Y Genomics' ICSs — Humber and North Yorkshire,
+      North East and North Cumbria, South Yorkshire, West Yorkshire: the orders
+      the ESB forwards to NE&amp;Y (<code>RIE.Router.O21</code>'s NEYICSList).
+      By month authored, once per original order, under the ordering trust.
+    </p>
+    {% if ney_ctdna.error %}
+      <div class="error">{{ ney_ctdna.error }}</div>
+    {% else %}
+      {% if ney_ctdna.truncated_months %}
+        <div class="error">
+          Hit the fetch limit for {{ ney_ctdna.truncated_months|join(", ") }} — counts may be incomplete.
+        </div>
+      {% endif %}
+      {% if ney_ctdna.month_totals|sum %}
+        <div style="overflow-x: auto;">
+          {{ ics_table(ney_ctdna.ics_rows, ney_ctdna.month_totals, 'n', hide_empty=true) }}
+        </div>
+      {% else %}
+        <p class="muted">
+          {% if selected_region and selected_region != "North East and Yorkshire" %}None — NE&amp;Y's ICSs aren't in {{ selected_region }}.
+          {% elif selected_category and selected_category != "ctdna" %}None — these are all ctDNA orders, and the category filter is {{ selected_category_label }}.
+          {% else %}None in the months shown.{% endif %}
+        </p>
+      {% endif %}
+    {% endif %}
+
     {% for wo in work_order_sections %}
     <h2 id="work-orders-{{ wo.key|lower }}">{{ wo.title }}{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
     {% if wo.direction == "incoming" %}

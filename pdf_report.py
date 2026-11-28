@@ -384,7 +384,8 @@ def monthly_report_pdf_bytes(report):
 
     suffix = (f" — {region}" if region else "") + (f" — {category_label}" if category_label else "")
     cepheid = dict(report.get("cepheid") or {}, title="Cepheid results (MRD monitoring)", cepheid=True)
-    for i, wo in enumerate([cepheid] + list(report.get("work_order_sections") or [])):
+    ney = dict(report.get("ney_ctdna") or {}, title="ctDNA orders for NE&Y Genomics", ney=True)
+    for i, wo in enumerate([cepheid, ney] + list(report.get("work_order_sections") or [])):
         story.append(_para(escape(wo["title"] + suffix), "Heading2"))
         if wo.get("cepheid"):
             story.append(_para(
@@ -394,7 +395,12 @@ def monthly_report_pdf_bytes(report):
             story.append(_para(
                 "dWGS sub-orders sent to the NW GLH by NE&amp;Y Genomics' laboratories (699C0, 699N0, 699D0), under "
                 "the trust on the NGIS referral. By month dispatched (authoredOn); orders without one by month last updated."))
-        if i == 1:
+        if wo.get("ney"):
+            story.append(_para(
+                "ctDNA test orders from trusts in NE&amp;Y Genomics' ICSs (Humber and North Yorkshire, North East and "
+                "North Cumbria, South Yorkshire, West Yorkshire) &mdash; the orders the ESB forwards to NE&amp;Y. By "
+                "month authored, once per original order, under the ordering trust."))
+        if i == 2:
             story.append(_para(
                 "Work orders sent to each lab system (ServiceRequests whose performer is that system). StarLIMS "
                 "reports don't come through the RIE yet, so its work orders stand in for them; Omics DSS results "
@@ -410,13 +416,14 @@ def monthly_report_pdf_bytes(report):
         if wo.get("truncated_months"):
             story.append(_para("<b>Hit the fetch limit for " + escape(", ".join(wo["truncated_months"]))
                                + "</b> &mdash; counts may be incomplete."))
-        body, child_rows, totals = _category_body(wo.get("category_rows") or [])
-        totals = totals or [0] * len(months)
-        story.append(_count_table(
-            ["Category"] + month_header, body, ["Total"] + totals + [sum(totals)],
-            name_width=200, trust_rows=child_rows,
-        ))
-        story.append(Spacer(1, 8))
+        if wo.get("category_rows"):
+            body, child_rows, totals = _category_body(wo["category_rows"])
+            totals = totals or [0] * len(months)
+            story.append(_count_table(
+                ["Category"] + month_header, body, ["Total"] + totals + [sum(totals)],
+                name_width=200, trust_rows=child_rows,
+            ))
+            story.append(Spacer(1, 8))
         body, trust_rows = [], []
         for row in wo.get("ics_rows") or []:
             if not row["total"]:

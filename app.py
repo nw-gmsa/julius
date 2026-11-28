@@ -3389,7 +3389,7 @@ def _fetch_work_orders(month, month_start, month_end, performer_ref, truncated_m
     return orders
 
 
-def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region_names):
+def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region_names, only_icbs=None):
     """Count one month's work orders into ics_counts / trust_counts (ICS
     -> [trust ->] month -> category -> n), the same shape
     _build_monthly_report() counts reports in — **once per original
@@ -3400,7 +3400,8 @@ def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region
     months). Each counts under the trust that placed the original order
     (_work_order_ordering()) — else "Unknown", as "No original order —
     from <sending lab>" — and the category of the original order's test
-    code, falling back to the work order's."""
+    code, falling back to the work order's. `only_icbs`: count only orders
+    whose trust is in one of these ICB codes (NE&Y ctDNA)."""
     parents_index = _work_order_parents_index(orders)
     for o in orders:
         original = _original_order(o, parents_index)
@@ -3412,6 +3413,8 @@ def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region
         ods = client.organisation_ods_code(org) if org else None
         geo = FhirClient.organisation_geography(
             ods, name=_org_name(org), postcode=client.organisation_postcode(org)) if org else None
+        if only_icbs is not None and (geo or {}).get("icb_code") not in only_icbs:
+            continue
         ics = geo["icb_name"] if geo else "Unknown"
         if geo:
             ics_region_names[ics] = geo["region_name"]
@@ -3431,7 +3434,7 @@ def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region
 
 
 def _monthly_summary(month_totals, category_rows, delivery, ics_rows, unknown_code_rows, data_quality_rows,
-                     cepheid, work_order_sections, all_regions, category_label=None):
+                     cepheid, work_order_sections, all_regions, category_label=None, ney_ctdna=None):
     """The monthly report's "Summary" — one row per section, (section,
     anchor, figure, note), from the figures the sections already have, so
     it can't disagree with them. Same filters as each section."""
@@ -3467,6 +3470,10 @@ def _monthly_summary(month_totals, category_rows, delivery, ics_rows, unknown_co
     rows.append(("Cepheid results (MRD monitoring)", "cepheid",
                  cepheid["error"] and "Error" or f"{n(sum(cepheid['month_totals']))} results",
                  cepheid["error"] or "Included in the report figures"))
+    if ney_ctdna:
+        rows.append(("ctDNA orders for NE&Y Genomics", "ney-ctdna",
+                     ney_ctdna["error"] and "Error" or f"{n(sum(ney_ctdna['month_totals']))} orders",
+                     ney_ctdna["error"] or "From trusts in NE&Y's ICSs"))
     for wo in work_order_sections:
         rows.append((wo["title"], f"work-orders-{wo['key'].lower()}",
                      wo["error"] and "Error" or f"{n(sum(wo['month_totals']))} original orders",
@@ -3545,6 +3552,8 @@ def _build_monthly_report():
     # report figures: ICS/trust x month x category, same as the reports.
     cepheid_ics_counts, cepheid_trust_counts = {}, {}
     cepheid_truncated_months, cepheid_error = [], None
+    # ctDNA orders from NE&Y Genomics' trusts (FhirClient.NEY_ICB_CODES).
+    ney_ctdna = {"error": None, "truncated_months": [], "seen": set(), "ics_counts": {}, "trust_counts": {}}
     # Work orders sent to each lab system (WORK_ORDER_DESTINATIONS —
     # StarLIMS reports don't come through the RIE yet): same ICS/trust x
     # month x category counts as the reports, one set per destination.
@@ -3658,6 +3667,21 @@ def _build_monthly_report():
                                        ics_region_names)
                 except Exception as e:
                     wo["error"] = f"{wo['title']}: {e}"
+            if not ney_ctdna["error"]:
+                try:
+                    ctdna_orders = []
+                    window_start = month_start
+                    while window_start <= month_end:
+                        window_end = min(window_start + timedelta(days=MONTHLY_REPORTS_WINDOW_DAYS - 1), month_end)
+                        ctdna_orders += client.ctdna_orders_in_range(
+                            window_start.isoformat(), window_end.isoformat(), max_pages=MONTHLY_REPORTS_MAX_PAGES)
+                        if client.last_search_truncated and month not in ney_ctdna["truncated_months"]:
+                            ney_ctdna["truncated_months"].append(month)
+                        window_start = window_end + timedelta(days=1)
+                    _count_work_orders(month, ctdna_orders, ney_ctdna["seen"], ney_ctdna["ics_counts"],
+                                       ney_ctdna["trust_counts"], ics_region_names, only_icbs=FhirClient.NEY_ICB_CODES)
+                except Exception as e:
+                    ney_ctdna["error"] = f"ctDNA orders for NE&Y: {e}"
     except Exception as e:
         error = str(e)
 
@@ -3816,6 +3840,9 @@ def _build_monthly_report():
         "category_month_totals": [sum(r["months"][i] for r in cepheid_category_rows if not r["child"])
                                   for i in range(len(months))],
     }
+    ney_ics_rows, ney_month_totals = ics_table(ney_ctdna["ics_counts"], ney_ctdna["trust_counts"])
+    ney_ctdna_section = {"error": ney_ctdna["error"], "truncated_months": ney_ctdna["truncated_months"],
+                         "ics_rows": ney_ics_rows, "month_totals": ney_month_totals}
     work_order_sections = []
     for wo in work_orders:
         wo_ics_rows, wo_month_totals = ics_table(wo["ics_counts"], wo["trust_counts"])
@@ -3833,7 +3860,7 @@ def _build_monthly_report():
 
     summary = _monthly_summary(
         month_totals, category_rows, delivery, ics_rows, unknown_code_rows, data_quality_rows,
-        cepheid, work_order_sections, all_regions=not selected_region,
+        cepheid, work_order_sections, all_regions=not selected_region, ney_ctdna=ney_ctdna_section,
         category_label=category_labels.get(selected_category))
 
     return dict(
@@ -3849,7 +3876,7 @@ def _build_monthly_report():
         unclassified_shown=UNCLASSIFIED_SIGNATURES_SHOWN, delivery=delivery,
         unknown_code_rows=unknown_code_rows, patient_inferred_reports=patient_inferred_reports,
         data_quality_rows=data_quality_rows,
-        work_order_sections=work_order_sections, cepheid=cepheid,
+        work_order_sections=work_order_sections, cepheid=cepheid, ney_ctdna=ney_ctdna_section,
         unknown_code_month_totals=[sum(r["months"][i] for r in unknown_code_rows) for i in range(len(months))],
     )
 
