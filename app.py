@@ -74,7 +74,10 @@ CLEAR_DOWN_PASSWORD = "Grosmont321admin"
 
 @app.before_request
 def _load_client():
-    if request.endpoint in LOGIN_EXEMPT_ENDPOINTS:
+    # request.endpoint is None when no route matches: let Flask 404 it
+    # rather than redirect to login — an unmatched login URL (a URL prefix
+    # left on the path) would otherwise redirect to itself forever.
+    if request.endpoint is None or request.endpoint in LOGIN_EXEMPT_ENDPOINTS:
         return
     fhir_client = _session_clients.get(session.get("sid"))
     if fhir_client is None:

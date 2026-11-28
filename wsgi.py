@@ -42,6 +42,14 @@ class PrefixMiddleware:
     def __call__(self, environ, start_response):
         if self.prefix:
             environ["SCRIPT_NAME"] = self.prefix
+            # If the prefix is still on the path — Waitress reached directly
+            # (http://127.0.0.1:8000/julius/...) or an IIS site-level rewrite
+            # that doesn't strip it — strip it here. Otherwise "/julius/login"
+            # matches no route, and _load_client() redirected it to login,
+            # i.e. to itself: "too many redirects".
+            path = environ.get("PATH_INFO", "")
+            if path == self.prefix or path.startswith(self.prefix + "/"):
+                environ["PATH_INFO"] = path[len(self.prefix):] or "/"
         return self.wsgi_app(environ, start_response)
 
 
