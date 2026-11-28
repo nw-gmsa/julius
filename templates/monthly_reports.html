@@ -189,6 +189,12 @@
         reference) — or, where there was none, why. Use this to chase the sending systems for a
         correct ODS code.
       </p>
+      <p>
+        <a href="{{ request.script_root }}/stats/monthly-reports/unknown-diagnostics.json?{{ request.query_string.decode() }}">Download diagnostics (JSON)</a>
+        <span class="muted">— for a few example reports per row: the report's linking elements and what every
+        lookup for its order returned (read-only; patient identifiers redacted, no clinical text). Takes a
+        little while — it runs several searches per report.</span>
+      </p>
       <div style="overflow-x: auto;">
         <table>
           <tr>

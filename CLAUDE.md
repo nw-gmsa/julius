@@ -1220,7 +1220,17 @@ month that hits the page cap is flagged on the page as possibly incomplete.
   chased with the sending system. Each row expands into up to
   `UNKNOWN_ICS_EXAMPLES` (20) example reports, newest `meta.lastUpdated`
   first (id linking to `/report/<id>`, issued, every identifier), for
-  finding the original messages — page only, not the PDF. On the test server most Unknowns have
+  finding the original messages — page only, not the PDF. **"Download
+  diagnostics (JSON)"** (`/stats/monthly-reports/unknown-diagnostics.json`,
+  same query string, `?per_row=` default 5) is for production, which can't
+  be queried from a dev machine: for each row's examples it records the
+  report's linking elements and what every order lookup returned —
+  `basedOn` direct read *and* the `_id` search the report uses, logical
+  identifier search, orders sharing the report's identifier (commas
+  escaped as `\,`, a bare comma is OR), the patient's orders — with
+  errors captured, not raised, and `ordering_ods_found_by_app` on each.
+  Patient references are cut to their FHIR id; conclusion/notes/
+  attachments aren't included. On the test server most Unknowns have
   no `basedOn`/`encounter`/`subject` at all (nothing to trace), and some
   orders' requester is an unresolvable `PractitionerRole/<id>`.
 - **"Unclassified reports — what codes do they carry?"** — a collapsed

@@ -5,7 +5,7 @@ import secrets
 import difflib
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from flask import Flask, render_template, request, Response, abort, redirect, session, g, url_for
 from werkzeug.local import LocalProxy
 import requests
@@ -3412,6 +3412,138 @@ def _monthly_report_context():
 def monthly_reports():
     """The monthly report page — see _build_monthly_report()."""
     return render_template("monthly_reports.html", **_monthly_report_context())
+
+
+#: How many example reports per Unknown row the diagnostics download
+#: probes by default (?per_row=, at most UNKNOWN_ICS_EXAMPLES) — each costs
+#: a handful of read-only FHIR searches.
+UNKNOWN_DIAGNOSTICS_PER_ROW = 5
+
+#: DiagnosticReport / ServiceRequest elements kept in the diagnostics
+#: download — the linking/identifying ones. Everything else (conclusion,
+#: presentedForm, notes, ...) is dropped, and patient references are
+#: reduced to their FHIR id (see _redact_subject()).
+_DIAGNOSTIC_REPORT_KEEP = ("resourceType", "id", "meta", "status", "category", "code", "identifier", "basedOn",
+                           "encounter", "performer", "resultsInterpreter", "specimen", "issued",
+                           "effectiveDateTime", "effectivePeriod", "result")
+_SERVICE_REQUEST_KEEP = ("resourceType", "id", "meta", "status", "intent", "category", "code", "identifier",
+                         "basedOn", "requisition", "requester", "performer", "encounter", "specimen", "authoredOn")
+
+
+def _redact_subject(ref):
+    """A patient reference with only its literal reference kept — no NHS
+    number or name leaves the server in the diagnostics download."""
+    if not isinstance(ref, dict):
+        return ref
+    return {"reference": ref.get("reference"), "identifier": "(redacted)" if ref.get("identifier") else None,
+            "display": "(redacted)" if ref.get("display") else None}
+
+
+def _diagnostic_copy(resource, keep):
+    copy = {k: resource[k] for k in keep if k in resource}
+    if "subject" in resource:
+        copy["subject"] = _redact_subject(resource["subject"])
+    return copy
+
+
+def _diagnostic_search(resource_type, params):
+    """One read-only search, recorded as {"request", "ok", "count",
+    "service_requests"|"error"} — errors are captured, not raised, since
+    a failing lookup is exactly what the download is for."""
+    entry = {"request": f"{resource_type}?" + "&".join(f"{k}={v}" for k, v in params.items())}
+    try:
+        bundle = client._get(resource_type, params=params)
+    except Exception as e:
+        entry.update(ok=False, error=str(e)[:2000])
+        return entry
+    found = [e.get("resource") or {} for e in bundle.get("entry", [])]
+    entry.update(ok=True, total=bundle.get("total"),
+                 other_entries=[r.get("resourceType") for r in found if r.get("resourceType") != resource_type],
+                 service_requests=[{**_diagnostic_copy(r, _SERVICE_REQUEST_KEEP),
+                                    "ordering_ods_found_by_app": client.order_ordering_ods(r)}
+                                   for r in found if r.get("resourceType") == resource_type])
+    return entry
+
+
+def _report_link_diagnostics(report):
+    """Every lookup that could link `report` to its ServiceRequest, and
+    what each one returned on this server."""
+    out = {
+        "report": _diagnostic_copy(report, _DIAGNOSTIC_REPORT_KEEP),
+        "ordering_ods_on_report_found_by_app": client.report_ordering_ods(report),
+        "basedOn_lookups": [],
+    }
+    for ref in report.get("basedOn") or []:
+        literal = ref.get("reference") or ""
+        lookup = {"basedOn": ref}
+        if "ServiceRequest/" in literal:
+            sr_id = literal.split("ServiceRequest/")[-1].split("/")[0]
+            try:
+                sr = client._get(f"ServiceRequest/{sr_id}")
+                lookup["read"] = {"request": f"ServiceRequest/{sr_id}", "ok": True,
+                                  "service_request": {**_diagnostic_copy(sr, _SERVICE_REQUEST_KEEP),
+                                                      "ordering_ods_found_by_app": client.order_ordering_ods(sr)}}
+            except Exception as e:
+                lookup["read"] = {"request": f"ServiceRequest/{sr_id}", "ok": False, "error": str(e)[:2000]}
+            # The search the monthly report itself uses (batched there).
+            lookup["search_by_id"] = _diagnostic_search("ServiceRequest", {"_id": sr_id, "_count": 10})
+        ident = ref.get("identifier") or {}
+        if ident.get("value"):
+            value = f"{ident['system']}|{ident['value']}" if ident.get("system") else ident["value"]
+            lookup["search_by_identifier"] = _diagnostic_search(
+                "ServiceRequest", {"identifier": value.replace(",", "\\,"), "_count": 10})
+        out["basedOn_lookups"].append(lookup)
+    # Orders sharing an identifier value with the report (accession /
+    # filler number) — commas escaped, a bare comma means OR in FHIR search.
+    values = [i["value"].replace(",", "\\,") for i in report.get("identifier") or [] if i.get("value")]
+    if values:
+        out["orders_sharing_report_identifier"] = _diagnostic_search(
+            "ServiceRequest", {"identifier": ",".join(values), "_count": 20})
+    subject = (report.get("subject") or {}).get("reference")
+    if subject:
+        out["patient_orders"] = _diagnostic_search("ServiceRequest", {"subject": subject, "_count": 20})
+    return out
+
+
+@app.route("/stats/monthly-reports/unknown-diagnostics.json")
+def monthly_reports_unknown_diagnostics():
+    """A JSON download for working out why reports land in the monthly
+    report's Unknown ICS, for when the server can't be queried from
+    elsewhere: for up to ?per_row= (default UNKNOWN_DIAGNOSTICS_PER_ROW)
+    example reports from each Unknown row (same query string as the page),
+    the report's linking elements and the result of every lookup that
+    could find its ServiceRequest (_report_link_diagnostics()). Read-only.
+    Patient references are cut down to their FHIR id; clinical text
+    (conclusion, notes, attachments) isn't included."""
+    context = _monthly_report_context()
+    try:
+        per_row = max(1, min(int(request.args.get("per_row", UNKNOWN_DIAGNOSTICS_PER_ROW)), UNKNOWN_ICS_EXAMPLES))
+    except ValueError:
+        per_row = UNKNOWN_DIAGNOSTICS_PER_ROW
+    rows = []
+    for row in context.get("unknown_code_rows") or []:
+        examples = []
+        for ex in row["examples"][:per_row]:
+            try:
+                report = client._get(f"DiagnosticReport/{ex['id']}")
+            except Exception as e:
+                examples.append({"report_id": ex["id"], "error": str(e)[:2000]})
+                continue
+            examples.append(_report_link_diagnostics(report))
+        rows.append({"code_provided": row["code"], "name_given": row["name"], "where_it_came_from": row["source"],
+                     "reports": row["total"], "examples": examples})
+    body = {
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "fhir_base_url": client.base_url,
+        "query": dict(request.args),
+        "months": context.get("months"),
+        "note": "Read-only diagnostics. Patient identifiers/names redacted; clinical text not included.",
+        "unknown_rows": rows,
+    }
+    months = context.get("months") or []
+    span = f"{months[0]}-to-{months[-1]}" if months else "report"
+    return Response(json.dumps(body, indent=2), mimetype="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="unknown-ics-diagnostics-{span}.json"'})
 
 
 @app.route("/stats/monthly-reports/pdf")
