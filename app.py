@@ -3082,6 +3082,15 @@ DATA_QUALITY_ISSUES = {
     "country_as_ods": ("Country code sent as an ODS code",
                        "A country outside the UK has no ODS code: it should be its ISO 3166-1 alpha-3 code "
                        "under urn:iso:std:iso:3166 (the ESB now does this)."),
+    "site_other_trust": ("Site code belonging to a different trust from its prefix",
+                         "A valid ODS trust site, counted under its parent trust from ODS's site list "
+                         "(data/ods/trust_sites.csv) — not its first 3 characters, which are another trust's. "
+                         "Check the sender means this site."),
+    "unknown_ods": ("Not a known ODS code",
+                    "Not a trust, trust site or any organisation ODS knows (sites are 5 characters, trusts 3). "
+                    "Where its first 3 characters are a trust it's counted under that trust — a guess, since a "
+                    "site's prefix isn't reliably its trust. Map it (ODSCodeCorrections on the ESB, "
+                    "FhirClient.LOCAL_ODS_ALIASES here) or ask the sender for the right ODS code."),
     "shire_no_order_placed": ("Shire report with no order link — placed from the patient's orders",
                               "Shire ORU messages carry no ORC, placer number or ordering facility, so nothing links "
                               "the report to its order; the trust was inferred (all the patient's orders came from it)."),
@@ -3116,6 +3125,23 @@ def _raw_organisation_codes(report, order):
     return codes
 
 
+def _site_code_issue(code):
+    """("site_other_trust" | "unknown_ods", detail) for an ODS code whose
+    trust isn't simply the code itself, or None — see resolve_trust()."""
+    trust, how = FhirClient.resolve_trust(code)
+    if how == "site" and trust and trust["code"] != code[:3] and code[:3] in FhirClient.ods_trusts():
+        site = FhirClient.ods_trust_sites()[code]
+        return ("site_other_trust", f"{code} {FhirClient._ods_name_case(site['name'])} → {trust['code']}")
+    if how in ("trust", "site"):
+        return None
+    known = FhirClient.ods_code_known(code)
+    if how == "prefix" and known is not True:
+        return ("unknown_ods", f"{code} → {trust['code']} (first 3 characters)")
+    if how is None and known is False:
+        return ("unknown_ods", f"{code} (not placed)")
+    return None
+
+
 def _report_data_quality_issues(report, order, org, orders_index):
     """{(issue key, detail): set of where} for one report — see
     DATA_QUALITY_ISSUES. `detail` is e.g. "ROA → R0A"."""
@@ -3131,7 +3157,9 @@ def _report_data_quality_issues(report, order, org, orders_index):
         elif FhirClient.normalise_ods_code(value) != value:
             key = ("ods_typo", f"{value} → {FhirClient.normalise_ods_code(value)}")
         else:
-            continue
+            key = _site_code_issue(upper)
+            if not key:
+                continue
         issues.setdefault(key, set()).add(where)
     is_shire = any(i.get("system") == "https://fhir.nwgenomics.nhs.uk/Shire/ReportIdentifier"
                    for i in report.get("identifier") or [])
@@ -3243,6 +3271,131 @@ def _delivery_summary(trust_totals, total):
 UNCLASSIFIED_SIGNATURES_SHOWN = 25
 
 
+#: The monthly report's work order sections, one each: (key, title,
+#: direction). "outgoing": orders sent to a lab system — the key is a work
+#: orders owner (FhirClient.TASK_OWNER_OPTIONS: K1S6S an Organization by
+#: ODS code, DLIMS a Device by LIMS identifier), found via
+#: resolve_task_owner() and searched by performer + authored.
+#: "incoming": dWGS sub-orders sent to us by NE&Y Genomics' labs
+#: (FhirClient.DWGS_SENDER_ODS), searched by requester
+#: (orders_from_requesters()).
+WORK_ORDER_DESTINATIONS = [
+    (FhirClient.STARLIMS_PERFORMER_ODS, "Orders sent to StarLIMS", "outgoing"),
+    ("DLIMS", "Orders sent to Omics DSS", "outgoing"),
+    ("DWGS", "Incoming dWGS work orders (from NE&Y Genomics)", "incoming"),
+]
+
+
+def _work_order_month(order):
+    """"YYYY-MM" an incoming work order counts in — authoredOn (dWGS: the
+    manifest's glh_sample_dispatch_date, set by the transform since
+    2026-11-28), else meta.lastUpdated for orders sent before that."""
+    return (order.get("authoredOn") or (order.get("meta") or {}).get("lastUpdated") or "")[:7]
+
+
+def _work_order_performer_reference(key):
+    """"Organization/<id>" / "Device/<id>" for a WORK_ORDER_DESTINATIONS
+    key on this server, or None if it has no such resource."""
+    resource = client.resolve_task_owner(key)
+    if resource and resource.get("id"):
+        return f"{resource.get('resourceType', 'Organization')}/{resource['id']}"
+    return None
+
+
+#: How far up a work order's basedOn chain to look for the trust
+#: that ordered it (filler order -> original order is one level).
+WORK_ORDER_PARENT_LEVELS = 3
+
+
+def _work_order_parents_index(orders):
+    """index_orders() over the basedOn ancestors of `orders` (up to
+    WORK_ORDER_PARENT_LEVELS), fetched in batches, with every order's and
+    ancestor's requester (and a PractitionerRole requester's organisation)
+    prefetched into the reference cache — so _order_ordering() doesn't
+    GET them one at a time."""
+    fetched, seen_ids, pending = [], {o.get("id") for o in orders}, list(orders)
+    for _ in range(WORK_ORDER_PARENT_LEVELS):
+        pending = [o for o in pending if o.get("basedOn")]
+        if not pending:
+            break
+        new = [p for p in client.service_requests_for_reports(pending) if p.get("id") not in seen_ids]
+        seen_ids |= {p.get("id") for p in new}
+        fetched += new
+        pending = new
+    requester_refs = [(o.get("requester") or {}).get("reference") for o in list(orders) + fetched
+                      if not ((o.get("requester") or {}).get("identifier") or {}).get("value")]
+    client.prefetch_references(requester_refs)
+    client.prefetch_references([
+        ((client._ref_cache.get(ref) or {}).get("organization") or {}).get("reference")
+        for ref in requester_refs if ref and ref.startswith("PractitionerRole/")])
+    return FhirClient.index_orders(fetched)
+
+
+def _work_order_ordering(order, parents_index):
+    """(ordering Organization or None, the order it was read from) for an
+    order sent to a lab system — the order's own requesting organisation
+    unless that's a lab (FhirClient.LAB_ODS_CODES: a StarLIMS filler
+    order's requester is the GLH, 699X0), or it has none (an Omics DSS
+    filler order's requester is an unresolvable PractitionerRole), else
+    walking up its basedOn chain to the original order the trust placed."""
+    current, seen = order, set()
+    while current and current.get("id") not in seen:
+        seen.add(current.get("id"))
+        org, _ = _order_ordering(current)
+        if org and client.organisation_ods_code(org) not in FhirClient.LAB_ODS_CODES:
+            return org, current
+        current = client.match_report_order(current, parents_index)
+    return None, None
+
+
+def _fetch_work_orders(month, month_start, month_end, performer_ref, truncated_months):
+    """One month's orders sent to one lab system (performer_ref — see
+    WORK_ORDER_DESTINATIONS), searched in MONTHLY_REPORTS_WINDOW_DAYS
+    windows by `performer` and `authored`."""
+    orders = []
+    window_start = month_start
+    while window_start <= month_end:
+        window_end = min(window_start + timedelta(days=MONTHLY_REPORTS_WINDOW_DAYS - 1), month_end)
+        orders += client.orders_for_performer(performer_ref, window_start.isoformat(), window_end.isoformat(),
+                                              max_pages=MONTHLY_REPORTS_MAX_PAGES)
+        if client.last_search_truncated and month not in truncated_months:
+            truncated_months.append(month)
+        window_start = window_end + timedelta(days=1)
+    return orders
+
+
+def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region_names):
+    """Count one month's work orders into ics_counts / trust_counts (ICS
+    -> [trust ->] month -> category -> n), the same shape
+    _build_monthly_report() counts reports in. Each order counts under the
+    trust that placed the original order (_work_order_ordering()) — else
+    "Unknown", as "No original order — from <sending lab>" — and the
+    category of its own test code, falling back to that original order's."""
+    orders = [o for o in orders if o.get("id") not in seen and not seen.add(o.get("id"))]
+    parents_index = _work_order_parents_index(orders)
+    for o in orders:
+        org, source = _work_order_ordering(o, parents_index)
+        ods = client.organisation_ods_code(org) if org else None
+        geo = FhirClient.organisation_geography(
+            ods, name=_org_name(org), postcode=client.organisation_postcode(org)) if org else None
+        ics = geo["icb_name"] if geo else "Unknown"
+        if geo:
+            ics_region_names[ics] = geo["region_name"]
+        trust_name = _org_name(org)
+        trust = _org_display_name(trust_name or ods, ods) if (trust_name or ods) else None
+        if not trust:
+            sender, _ = _order_ordering(o)
+            sender_ods = client.organisation_ods_code(sender) if sender else None
+            trust = (f"No original order — from {_org_display_name(_org_name(sender) or sender_ods, sender_ods)}"
+                     if sender else "Unknown")
+        category = FhirClient.report_category(
+            o.get("code"), source.get("code") if source and source is not o else None)
+        by_cat = ics_counts.setdefault(ics, {}).setdefault(month, {})
+        by_cat[category] = by_cat.get(category, 0) + 1
+        by_cat = trust_counts.setdefault(ics, {}).setdefault(trust, {}).setdefault(month, {})
+        by_cat[category] = by_cat.get(category, 0) + 1
+
+
 def _build_monthly_report():
     """
     Everything the monthly report shows, as the template context dict —
@@ -3309,9 +3462,33 @@ def _build_monthly_report():
     # (issue key, detail) -> {"where": set, "months": {month: n}, "examples": [report, ...]}
     data_quality = {}
     truncated_months = []
+    # Work orders sent to each lab system (WORK_ORDER_DESTINATIONS —
+    # StarLIMS reports don't come through the RIE yet): same ICS/trust x
+    # month x category counts as the reports, one set per destination.
+    work_orders = [{
+        "key": key, "title": title, "direction": direction, "ref": None, "orders": None, "error": None,
+        "truncated_months": [], "seen": set(), "ics_counts": {}, "trust_counts": {},
+    } for key, title, direction in WORK_ORDER_DESTINATIONS]
     selected_leaf_keys = FhirClient.category_leaf_keys(selected_category) if selected_category else None
     try:
         seen = set()
+        for wo in work_orders if months else []:
+            if wo["direction"] == "incoming":
+                try:
+                    wo["orders"] = client.orders_from_requesters(FhirClient.DWGS_SENDER_ODS,
+                                                                 max_pages=MONTHLY_REPORTS_MAX_PAGES)
+                    if client.last_search_truncated:
+                        wo["truncated_months"] = list(months)
+                except Exception as e:
+                    wo["error"] = f"{wo['title']}: {e}"
+                continue
+            try:
+                wo["ref"] = _work_order_performer_reference(wo["key"])
+            except Exception as e:
+                wo["error"] = f"Couldn't look up {wo['key']}: {e}"
+                continue
+            if not wo["ref"]:
+                wo["error"] = f"No {wo['key']} resource on this server, so these orders can't be found."
         for month in months:
             y, m = map(int, month.split("-"))
             month_start = date(y, m, 1)
@@ -3368,6 +3545,19 @@ def _build_monthly_report():
                         unknown_examples.setdefault(key, []).append(r)
                 by_cat = trust_counts.setdefault(ics, {}).setdefault(trust, {}).setdefault(month, {})
                 by_cat[category] = by_cat.get(category, 0) + 1
+            for wo in work_orders:
+                if wo["error"] or not (wo["ref"] or wo["orders"] is not None):
+                    continue
+                try:
+                    if wo["direction"] == "incoming":
+                        month_orders = [o for o in wo["orders"] if _work_order_month(o) == month]
+                    else:
+                        month_orders = _fetch_work_orders(month, month_start, month_end, wo["ref"],
+                                                          wo["truncated_months"])
+                    _count_work_orders(month, month_orders, wo["seen"], wo["ics_counts"], wo["trust_counts"],
+                                       ics_region_names)
+                except Exception as e:
+                    wo["error"] = f"{wo['title']}: {e}"
     except Exception as e:
         error = str(e)
 
@@ -3416,10 +3606,11 @@ def _build_monthly_report():
     regions = list(FhirClient.NHS_REGION_NAMES.values()) + [FhirClient.OUTSIDE_ENGLAND_REGION]
     if selected_region:
         ics_list = list(icbs_by_region.get(selected_region, []))
-        ics_list += sorted(i for i in ics_counts if i not in ics_list and ics_region_names.get(i) == selected_region)
+        ics_list += sorted(i for i in set(ics_counts).union(*(wo['ics_counts'] for wo in work_orders))
+                           if i not in ics_list and ics_region_names.get(i) == selected_region)
     else:
         ics_list = [icb for icbs in icbs_by_region.values() for icb in icbs]
-        ics_list += sorted(i for i in ics_counts if i not in ics_list)
+        ics_list += sorted(i for i in set(ics_counts).union(*(wo['ics_counts'] for wo in work_orders)) if i not in ics_list)
     if not icbs_by_region and not error:
         error = "Couldn't download the NHS ODS trust list, so ICS couldn't be worked out — showing only ICSs with data."
 
@@ -3431,24 +3622,28 @@ def _build_monthly_report():
         return category_tree_rows(
             lambda key: [month_cats.get(mo, {}).get(key, 0) for mo in months], keep_empty=False)
 
-    ics_rows = []
-    for ics in ics_list:
-        month_cats = ics_counts.get(ics, {})
-        trusts = []
-        for trust, trust_month_cats in sorted(trust_counts.get(ics, {}).items()):
-            trust_months = [count(trust_month_cats, mo) for mo in months]
-            if sum(trust_months):
-                trusts.append({"name": trust, "months": trust_months, "total": sum(trust_months),
-                               "categories": category_breakdown(trust_month_cats)})
-        trusts.sort(key=lambda t: -t["total"])
-        ics_months = [count(month_cats, mo) for mo in months]
-        ics_rows.append({
-            "name": ics, "label": short_icb_name(ics), "region": ics_region_names.get(ics) or "—",
-            "months": ics_months, "total": sum(ics_months), "trusts": trusts,
-            "categories": category_breakdown(month_cats),
-        })
+    def ics_table(ics_counts_, trust_counts_):
+        """(ICS rows — each expandable into its trusts — and month totals)
+        over ics_list, category filter applied."""
+        rows = []
+        for ics in ics_list:
+            month_cats = ics_counts_.get(ics, {})
+            trusts = []
+            for trust, trust_month_cats in sorted(trust_counts_.get(ics, {}).items()):
+                trust_months = [count(trust_month_cats, mo) for mo in months]
+                if sum(trust_months):
+                    trusts.append({"name": trust, "months": trust_months, "total": sum(trust_months),
+                                   "categories": category_breakdown(trust_month_cats)})
+            trusts.sort(key=lambda t: -t["total"])
+            ics_months = [count(month_cats, mo) for mo in months]
+            rows.append({
+                "name": ics, "label": short_icb_name(ics), "region": ics_region_names.get(ics) or "—",
+                "months": ics_months, "total": sum(ics_months), "trusts": trusts,
+                "categories": category_breakdown(month_cats),
+            })
+        return rows, [sum(r["months"][i] for r in rows) for i in range(len(months))]
 
-    month_totals = [sum(r["months"][i] for r in ics_rows) for i in range(len(months))]
+    ics_rows, month_totals = ics_table(ics_counts, trust_counts)
 
     # "Reports actually delivered" — same ICS list (region filter) and
     # same counting (category filter) as the ICS table, so its total
@@ -3510,6 +3705,20 @@ def _build_monthly_report():
     category_rows = category_tree_rows(
         lambda key: [sum(ics_counts.get(ics, {}).get(mo, {}).get(key, 0) for ics in ics_list) for mo in months],
         keep_empty=True)
+    work_order_sections = []
+    for wo in work_orders:
+        wo_ics_rows, wo_month_totals = ics_table(wo["ics_counts"], wo["trust_counts"])
+        wo_category_rows = category_tree_rows(
+            lambda key, c=wo["ics_counts"]: [sum(c.get(ics, {}).get(mo, {}).get(key, 0) for ics in ics_list)
+                                             for mo in months],
+            keep_empty=False)
+        work_order_sections.append({
+            "key": wo["key"], "title": wo["title"], "direction": wo["direction"], "error": wo["error"],
+            "truncated_months": wo["truncated_months"],
+            "ics_rows": wo_ics_rows, "month_totals": wo_month_totals, "category_rows": wo_category_rows,
+            "category_month_totals": [sum(r["months"][i] for r in wo_category_rows if not r["child"])
+                                      for i in range(len(months))],
+        })
 
     return dict(
         error=error,
@@ -3524,6 +3733,7 @@ def _build_monthly_report():
         unclassified_shown=UNCLASSIFIED_SIGNATURES_SHOWN, delivery=delivery,
         unknown_code_rows=unknown_code_rows, patient_inferred_reports=patient_inferred_reports,
         data_quality_rows=data_quality_rows,
+        work_order_sections=work_order_sections,
         unknown_code_month_totals=[sum(r["months"][i] for r in unknown_code_rows) for i in range(len(months))],
     )
 

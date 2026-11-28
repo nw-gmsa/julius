@@ -371,6 +371,51 @@ def monthly_report_pdf_bytes(report):
             name_width=text_width * .25, extra_widths=(text_width * .35, text_width * .4),
         ))
 
+    suffix = (f" — {region}" if region else "") + (f" — {category_label}" if category_label else "")
+    for i, wo in enumerate(report.get("work_order_sections") or []):
+        story.append(_para(escape(wo["title"] + suffix), "Heading2"))
+        if wo.get("direction") == "incoming":
+            story.append(_para(
+                "dWGS sub-orders sent to the NW GLH by NE&amp;Y Genomics' laboratories (699C0, 699N0, 699D0), under "
+                "the trust on the NGIS referral. By month dispatched (authoredOn); orders without one by month last updated."))
+        if i == 0:
+            story.append(_para(
+                "StarLIMS and Omics DSS reports don't come through the RIE yet, so these are the work orders sent "
+                "to each (ServiceRequests whose performer is that system), by month authored, under the trust that "
+                "placed the original order. Categories from the order's test code. Not added to the report "
+                "figures above."))
+        if wo.get("error"):
+            story.append(_para(f"<b>{escape(wo['error'])}</b>"))
+            continue
+        if not sum(wo.get("month_totals") or []):
+            story.append(_para("None in the months shown."))
+            continue
+        if wo.get("truncated_months"):
+            story.append(_para("<b>Hit the fetch limit for " + escape(", ".join(wo["truncated_months"]))
+                               + "</b> &mdash; counts may be incomplete."))
+        body, child_rows, totals = _category_body(wo.get("category_rows") or [])
+        totals = totals or [0] * len(months)
+        story.append(_count_table(
+            ["Category"] + month_header, body, ["Total"] + totals + [sum(totals)],
+            name_width=200, trust_rows=child_rows,
+        ))
+        story.append(Spacer(1, 8))
+        body, trust_rows = [], []
+        for row in wo.get("ics_rows") or []:
+            if not row["total"]:
+                continue
+            body.append([_name_cell(row["label"])] + ([row["region"]] if show_region else []) + row["months"] + [row["total"]])
+            for t in row["trusts"]:
+                trust_rows.append(len(body))
+                body.append([_name_cell(t["name"], indent=10)] + ([""] if show_region else []) + t["months"] + [t["total"]])
+        wo_totals = wo.get("month_totals") or [0] * len(months)
+        story.append(_count_table(
+            ["ICS / NHS trust"] + (["Region"] if show_region else []) + month_header,
+            body,
+            ["Total"] + ([""] if show_region else []) + wo_totals + [sum(wo_totals)],
+            name_width=230, extra_widths=(105,) if show_region else (), trust_rows=trust_rows,
+        ))
+
     dq_rows = report.get("data_quality_rows") or []
     story.append(_para("Data quality issues", "Heading2"))
     if dq_rows:

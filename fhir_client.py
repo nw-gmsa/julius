@@ -741,6 +741,79 @@ class FhirClient:
         }
         return list(orders_by_id.values())
 
+    #: StarLIMS (Liverpool GLH) — the performer orders are sent to, and the
+    #: lab ODS codes that are never the *ordering* organisation of one
+    #: (a StarLIMS filler order's requester is the GLH, 699X0; the trust
+    #: that ordered it is on the original order its basedOn points at).
+    STARLIMS_PERFORMER_ODS = "K1S6S"
+    #: NE&Y Genomics laboratories that send dWGS sub-orders to the NW GLH
+    #: (RIE.Transforms.dWGSCSVtoFHIRMessage: glh_laboratory_id, default
+    #: PlacerODSCode 699N0) — Leeds, Newcastle, Sheffield.
+    DWGS_SENDER_ODS = ("699C0", "699N0", "699D0")
+    LAB_ODS_CODES = frozenset({"699X0", "K1S6S", *DWGS_SENDER_ODS})
+
+    def orders_for_performer(self, performer_reference, start, end, max_pages=10):
+        """ServiceRequests (any intent/status) whose `performer` is
+        `performer_reference` ("Organization/<id>"), authored within
+        [start, end] — the monthly report's orders sent to StarLIMS. No
+        `_include` (the 413 shape on production); sets
+        last_search_truncated."""
+        return self._search_all("ServiceRequest", {
+            "performer": performer_reference,
+            "authored": [f"ge{start}", f"le{end}"],
+            "_count": 100,
+        }, max_pages=max_pages)
+
+    def orders_from_requesters(self, ods_codes, max_pages=10):
+        """Work orders (intent filler-order/reflex-order) requested by any
+        of `ods_codes` — the requester as a logical Organization reference
+        (`requester:identifier`), or a PractitionerRole at one
+        (`requester:PractitionerRole.organization.identifier`, chained;
+        skipped if the server rejects it). The monthly report's incoming
+        dWGS work orders. Not date-bounded: dWGS orders carry no
+        `authoredOn`, and the requester scope keeps the search small.
+        Sets last_search_truncated if either search hit max_pages."""
+        value = ",".join(f"{self.ODS_ORGANIZATION_CODE_SYSTEM}|{c}" for c in ods_codes)
+        found, truncated = {}, False
+        for param in ("requester:identifier", "requester:PractitionerRole.organization.identifier"):
+            try:
+                orders = self._search_all("ServiceRequest", {
+                    param: value, "intent": "filler-order,reflex-order", "_count": 100}, max_pages=max_pages)
+            except requests.HTTPError:
+                if param == "requester:identifier":
+                    raise
+                continue
+            truncated = truncated or self.last_search_truncated
+            for o in orders:
+                if o.get("resourceType") == "ServiceRequest" and o.get("id"):
+                    found[o["id"]] = o
+        self.last_search_truncated = truncated
+        return list(found.values())
+
+    def prefetch_references(self, references):
+        """Seed the reference cache with the resources `references`
+        ("Type/id" strings) point at, in batches of
+        SERVICE_REQUEST_BATCH_SIZE (`Type?_id=a,b,...`, no `_include`) —
+        so resolving many orders' requesters is a handful of searches, not
+        one GET each. Already-cached references are skipped; a failed
+        batch is skipped (those resolve one at a time later)."""
+        by_type = {}
+        for ref in references:
+            if ref and "/" in ref and ref not in self._ref_cache:
+                rtype, rid = ref.split("/", 1)
+                by_type.setdefault(rtype, set()).add(rid)
+        size = self.SERVICE_REQUEST_BATCH_SIZE
+        for rtype, ids in by_type.items():
+            ids = sorted(ids)
+            for start in range(0, len(ids), size):
+                try:
+                    found = self._search_all(rtype, {"_id": ",".join(ids[start:start + size]), "_count": 100})
+                except requests.HTTPError:
+                    continue
+                for res in found:
+                    if res.get("resourceType") == rtype and res.get("id"):
+                        self._ref_cache[f"{rtype}/{res['id']}"] = res
+
     @staticmethod
     def requisition_identifier(order):
         """ServiceRequest.requisition's value — the Order Placer Group
@@ -1922,7 +1995,7 @@ class FhirClient:
         (LOCAL_ODS_ALIASES), or a letter O typed for a zero — "ROA" for
         Manchester University's "R0A", seen on production in MFT's placer
         number assigners. The O -> 0 swap only applies when the code as
-        given isn't an NHS trust (or site) in etr.csv and the swapped one
+        given isn't an NHS trust or trust site (etr.csv/ets.csv) and the swapped one
         is, so a real code is never changed."""
         if not ods_code or not isinstance(ods_code, str):
             return ods_code
@@ -1930,8 +2003,8 @@ class FhirClient:
         if code.upper() in cls.LOCAL_ODS_ALIASES:
             return cls.LOCAL_ODS_ALIASES[code.upper()]
         if "O" in code.upper() and len(code) in (3, 5):
-            trusts = cls.ods_trusts()
-            known = lambda c: c in trusts or (len(c) == 5 and c[:3] in trusts)
+            trusts, sites = cls.ods_trusts(), cls.ods_trust_sites()
+            known = lambda c: c in trusts or c in sites
             swapped = code.upper().replace("O", "0")
             if not known(code.upper()) and known(swapped):
                 return swapped
@@ -1955,10 +2028,9 @@ class FhirClient:
         missed_at = self._org_by_ods_misses.get(ods_code)
         if missed_at and time.time() - missed_at < self.ODS_RETRY_AFTER_SECONDS:
             return None
-        trusts = self.ods_trusts()
-        # A trust *site* code ("R0A07") is counted under its parent trust
-        # ("R0A") — the stats screens break down by NHS trust.
-        trust = trusts.get(ods_code) or (trusts.get(ods_code[:3]) if len(ods_code) > 3 else None)
+        # A trust *site* code ("RMC01") is counted under its parent trust
+        # from ODS's site list — the stats screens break down by NHS trust.
+        trust, _ = self.resolve_trust(ods_code)
         if trust:
             # An NHS trust: ODS's own trust list already has name and
             # postcode — no FHIR or ODS API call needed.
@@ -2386,6 +2458,20 @@ class FhirClient:
     ODS_TRUSTS_FILE = os.path.join(ODS_REFERENCE_DATA_DIR, "etr.csv")
     ODS_ICB_NAMES_FILE = os.path.join(ODS_REFERENCE_DATA_DIR, "icb_names.json")
 
+    #: NHS ODS "NHS Trust Sites" export (ets.csv, no header row) — one row
+    #: per trust site: [0] site code ("RMC01"), [1] name, [9] postcode,
+    #: [11] close date, [14] parent trust code. A site's first 3
+    #: characters are *not* reliably its trust — sites move between trusts
+    #: on mergers and keep their code (about 10,000 of ODS's ~46,000 sites
+    #: have a prefix that isn't their parent). Bundled trimmed to just those
+    #: columns (data/ods/trust_sites.csv, with a header row) by
+    #: scripts/update_ods_reference_data.py — the full export is ~8MB.
+    ODS_TRUST_SITES_REPORT_URL = "https://www.odsdatasearchandexport.nhs.uk/api/getReport?report=ets"
+    ODS_TRUST_SITES_FILE = os.path.join(ODS_REFERENCE_DATA_DIR, "trust_sites.csv")
+    ODS_TRUST_SITES_COLUMNS = ("code", "name", "parent", "postcode", "close_date")
+    _ods_trust_sites_cache = None
+    _ods_trust_sites_failed_at = None
+
     #: After a failed download, how long (seconds) before trying again —
     #: without this, a server that can't reach ODS retried the download
     #: once per report, which is both slow and a good way to get throttled.
@@ -2447,6 +2533,66 @@ class FhirClient:
         return trusts
 
     @classmethod
+    def trim_trust_sites_export(cls, text):
+        """ODS's raw ets.csv text -> rows of ODS_TRUST_SITES_COLUMNS."""
+        return [[r[0], r[1], r[14], r[9], r[11]] for r in csv.reader(io.StringIO(text)) if len(r) >= 15 and r[0]]
+
+    @classmethod
+    def ods_trust_sites(cls):
+        """{site code: {"code", "name", "parent", "postcode", "closed"}}
+        for every NHS trust site in ODS's ets.csv (see
+        ODS_TRUST_SITES_REPORT_URL), open and closed — the bundled trimmed
+        copy, else downloaded. {} if it can't be had (retried after
+        ODS_RETRY_AFTER_SECONDS)."""
+        if cls._ods_trust_sites_cache is not None:
+            return cls._ods_trust_sites_cache
+        rows = None
+        if os.path.exists(cls.ODS_TRUST_SITES_FILE):
+            with open(cls.ODS_TRUST_SITES_FILE, encoding="utf-8", newline="") as f:
+                rows = list(csv.reader(f))[1:]
+        else:
+            if cls._ods_trust_sites_failed_at and time.time() - cls._ods_trust_sites_failed_at < cls.ODS_RETRY_AFTER_SECONDS:
+                return {}
+            try:
+                resp = requests.get(cls.ODS_TRUST_SITES_REPORT_URL, timeout=120)
+                resp.raise_for_status()
+                rows = cls.trim_trust_sites_export(resp.text)
+            except requests.RequestException:
+                cls._ods_trust_sites_failed_at = time.time()
+                return {}
+        sites = {}
+        for row in rows:
+            if len(row) < 5 or not row[0]:
+                continue
+            sites[row[0]] = {"code": row[0], "name": row[1], "parent": row[2], "postcode": row[3],
+                             "closed": bool(row[4])}
+        if sites:
+            cls._ods_trust_sites_cache = sites
+        return sites
+
+    @classmethod
+    def resolve_trust(cls, ods_code):
+        """(trust row from ods_trusts(), how) for an ODS code — how is
+        "trust" (the code is a trust), "site" (an ODS trust site, under
+        its parent trust from ets.csv — not its prefix, which can be a
+        different trust), "prefix" (not a trust or site ODS knows, e.g.
+        a local "RR8123": counted under its first 3 characters if those
+        are a trust — a guess, flagged on the monthly report's data
+        quality section), or (None, None)."""
+        if not ods_code:
+            return None, None
+        code = ods_code.strip().upper()
+        trusts = cls.ods_trusts()
+        if code in trusts:
+            return trusts[code], "trust"
+        site = cls.ods_trust_sites().get(code)
+        if site:
+            return trusts.get(site["parent"]), "site"
+        if len(code) > 3 and code[:3] in trusts:
+            return trusts[code[:3]], "prefix"
+        return None, None
+
+    @classmethod
     def icb_name(cls, icb_code):
         """Readable ICB name for an ODS ICB code ("QOP" -> "NHS Greater
         Manchester Integrated Care Board"), via the NHS ODS lookup API —
@@ -2474,13 +2620,11 @@ class FhirClient:
         """{"icb_code", "icb_name", "region_code", "region_name"} for an
         organisation's ODS code, from ods_trusts() — or None if it isn't an
         NHS trust ODS knows about (a GP practice, private provider, ...).
-        A 5-character trust *site* code ("R0A07") falls back to its parent
-        trust (the first 3 characters, "R0A"), since site codes are built
-        on the trust's own code."""
+        A trust *site* code counts under its parent trust (resolve_trust():
+        ODS's site list, not the code's first 3 characters)."""
         if not ods_code:
             return None
-        trusts = cls.ods_trusts()
-        trust = trusts.get(ods_code) or (trusts.get(ods_code[:3]) if len(ods_code) > 3 else None)
+        trust, _ = cls.resolve_trust(ods_code)
         if not trust or not trust["icb_code"]:
             return None
         return {
@@ -2602,6 +2746,21 @@ class FhirClient:
         }
         cls._ods_details_cache[ods_code] = details
         return details
+
+    @classmethod
+    def ods_code_known(cls, ods_code):
+        """True if ODS knows the code (a trust, trust site, or anything the
+        ODS lookup API has a record for — GP practice, health board, GLH,
+        ...), False if the API says it doesn't exist, None if the API
+        couldn't be reached (so "not known" isn't claimed on no evidence)."""
+        if not ods_code:
+            return False
+        code = ods_code.strip().upper()
+        if code in cls.ods_trusts() or code in cls.ods_trust_sites():
+            return True
+        if cls.ods_details(code):
+            return True
+        return False if code in cls._ods_details_cache else None
 
     @staticmethod
     def _group_geography(label, region_name=None):

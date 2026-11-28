@@ -1138,7 +1138,46 @@ down by day, organisation, indication, ICS, and country.
 ### Monthly reports (`/stats/monthly-reports`)
 
 **Coverage: iGene and Shire reports only — not StarLIMS** (stated on the
-page itself too). Reports per calendar month (default: just the last full calendar month,
+page itself too). StarLIMS and Omics DSS reports don't come through the
+RIE yet, so **"Orders sent to StarLIMS" / "Orders sent to Omics DSS"**
+(page and PDF, one section per `app.WORK_ORDER_DESTINATIONS` entry — the
+Work orders screen's owners, found via `resolve_task_owner()`: K1S6S an
+Organization, DLIMS a Device) count the *work orders* instead, by category
+and by ICS/trust per month, same region/category filters (not added to
+the report figures): `ServiceRequest?performer=<Organization|Device>/<id>
+&authored=...` in the same week windows, no `_include`
+(`FhirClient.orders_for_performer()`). A work order's requester is the GLH
+(699X0 on StarLIMS ones — which `organisation_geography()` would place
+under R0A's ICS) or an unresolvable PractitionerRole (Omics DSS), so
+`_work_order_ordering()` skips `LAB_ODS_CODES`/no organisation and walks up
+`basedOn` (`_work_order_parents_index()`, batched via
+`service_requests_for_reports()`, up to `WORK_ORDER_PARENT_LEVELS`) to the
+original order the trust placed — whose requester is often only a literal
+`PractitionerRole/<id>`, so requesters and their organisations are batch-
+prefetched (`FhirClient.prefetch_references()`, `Type?_id=a,b,...`). Each
+work order counts once, so one original order split into several work
+orders counts several times. Category: the order's code, then the original
+order's. The ICS and category tables are shared Jinja macros
+(`ics_table`/`category_table`) in `monthly_reports.html`.
+**"Incoming dWGS work orders"** is a third section (`direction:
+"incoming"` in `WORK_ORDER_DESTINATIONS`): dWGS sub-orders NE&Y Genomics'
+labs (`FhirClient.DWGS_SENDER_ODS` 699C0/699N0/699D0, also in
+`LAB_ODS_CODES`) send us (RIE-SourceCode `dWGSCSVtoFHIRMessage`) — they
+have **no performer and no `authoredOn`**, so
+`FhirClient.orders_from_requesters()` searches by requester instead
+(`requester:identifier=...` plus the chained
+`requester:PractitionerRole.organization.identifier=...` for orders with an
+`approved_by` PractitionerRole; filler/reflex orders; not date-bounded —
+the requester scope keeps it small), once for the whole range, and each
+counts in its `authoredOn` month else its `meta.lastUpdated` month
+(`_work_order_month()`) — RIE-SourceCode's transform now sets
+`authoredOn` from the manifest's `glh_sample_dispatch_date` (date part,
+via `GetDate()`), so only orders sent before that fall back. The trust is the NGIS referral's
+`orderingentityid` (the original order's requester). Older test-server
+dWGS orders have no `basedOn`, so they're under Unknown as "No original
+order — from <lab>".
+
+Reports per calendar month (default: just the last full calendar month,
 so the default page load is a single month's search; the current month can
 be picked too, counted up to today) by ICS and report category — "Monthly reports" under
 Management Reports. Queried **one month at a time** (`reports_in_range(...,
@@ -1266,7 +1305,11 @@ month that hits the page cap is flagged on the page as possibly incomplete.
   typo (`ROA` → `R0A`), local code (`LOCAL_ODS_ALIASES`, `SH_OLDHAM` →
   `RM3`), a country code sent under the ODS system (`IRL`), and Shire
   reports with no order link, split by whether the patient's orders
-  placed them. Up to `DATA_QUALITY_EXAMPLES` examples per row (page only).
+  placed them, a trust site code whose prefix is a *different* trust
+  (`site_other_trust` — placed under its real parent), and a code ODS
+  doesn't know at all (`unknown_ods`, `FhirClient.ods_code_known()`:
+  trust/site lists, then the ODS API — not flagged if the API can't be
+  reached, unless it was only placed by its prefix). Up to `DATA_QUALITY_EXAMPLES` examples per row (page only).
   **The ESB side** (RIE-SourceCode, `RIE.FHIR.Library.NormaliseODSCode()`/
   `OrganisationCodeSystem()`, used by `HL7v2ToFHIRMessage`) now writes
   `R0A` instead of its old internal `ROA` marker for MFT EPIC placer
@@ -1361,9 +1404,16 @@ after a failed download wait `ODS_RETRY_AFTER_SECONDS` before retrying
 rather than retrying per report (the likely reason a production run put
 R0A under "Unknown" — not confirmed, but a failed download there left
 every trust without an ICS and was retried for every report). `trust_geography(ods)` returns ICB code/name and region;
-`organisation_by_ods()` names a trust from the same file. A 5-character
-site code ("R0A07") counts under its 3-character parent trust ("R0A") in
-both. `organisation_ics(org)` is just
+`organisation_by_ods()` names a trust from the same file. **A trust site
+code counts under its parent trust from ODS's own site list**
+(`data/ods/trust_sites.csv` — the "NHS Trust Sites" ets.csv export,
+trimmed to site code/name/parent/postcode/close date, also written by
+that script), via `FhirClient.resolve_trust()` — **not** its first 3
+characters: sites move between trusts on mergers and keep their code
+(~10,000 of ODS's ~46,500 sites have a prefix that isn't their parent,
+e.g. `R0C4X` → RK9). Only a code that's neither a trust nor a known site
+(a local "RR8123") falls back to its first 3 characters, as a guess the
+monthly report flags. `organisation_ics(org)` is just
 `trust_geography(organisation_ods_code(org))`.
 
 - This **replaced** postcode → postcodes.io → point-in-polygon against

@@ -1,5 +1,76 @@
 {% extends "base.html" %}
 {% block content %}
+  {% macro category_table(rows, totals) %}
+      <table>
+        <tr><th>Category</th>{% for m in months %}<th>{{ m }}</th>{% endfor %}<th>Total</th></tr>
+        {% for row in rows %}
+          {% if row.child %}
+            <tr style="background: #fafbfd;" class="muted">
+              <td style="padding-left: 28px;">{{ row.label }}</td>
+              {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
+              <td>{{ row.total }}</td>
+            </tr>
+          {% else %}
+            <tr>
+              <td>{{ row.label }}</td>
+              {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
+              <td><strong>{{ row.total }}</strong></td>
+            </tr>
+          {% endif %}
+        {% endfor %}
+        <tr>
+          <th>Total</th>
+          {% for n in totals %}<th>{{ n }}</th>{% endfor %}
+          <th>{{ totals|sum }}</th>
+        </tr>
+      </table>
+  {% endmacro %}
+  {% macro ics_table(rows, totals, prefix, hide_empty=false) %}
+      <table>
+        <tr>
+          <th>ICS</th>{% if not selected_region %}<th>Region</th>{% endif %}
+          {% for m in months %}<th>{{ m }}</th>{% endfor %}<th>Total</th>
+        </tr>
+        {% for row in rows %}
+          {% if row.total or (not hide_empty and (selected_region or row.region != "—")) %}
+          <tr>
+            <td>
+              {% if row.trusts %}
+                <a href="#" class="ics-toggle" data-ics="{{ prefix }}{{ loop.index }}" onclick="toggleTrusts(this); return false;">&#9656; {{ row.label }}</a>
+              {% else %}
+                {{ row.label }}
+              {% endif %}
+              {% if row.categories %}
+                <button type="button" class="category-btn" data-title="{{ row.name }}"
+                        data-breakdown='{{ row.categories|tojson }}' onclick="showCategories(this)">Categories</button>
+              {% endif %}
+            </td>
+            {% if not selected_region %}<td class="muted">{{ row.region }}</td>{% endif %}
+            {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
+            <td><strong>{{ row.total }}</strong></td>
+          </tr>
+          {% set ics_index = loop.index %}
+          {% for t in row.trusts %}
+            <tr class="trust-row" data-ics="{{ prefix }}{{ ics_index }}" hidden style="background: #fafbfd;">
+              <td style="padding-left: 28px;">
+                {{ t.name }}
+                <button type="button" class="category-btn" data-title="{{ t.name }} — {{ row.label }}"
+                        data-breakdown='{{ t.categories|tojson }}' onclick="showCategories(this)">Categories</button>
+              </td>
+              {% if not selected_region %}<td></td>{% endif %}
+              {% for n in t.months %}<td>{{ n }}</td>{% endfor %}
+              <td>{{ t.total }}</td>
+            </tr>
+          {% endfor %}
+          {% endif %}
+        {% endfor %}
+        <tr>
+          <th>Total</th>{% if not selected_region %}<th></th>{% endif %}
+          {% for n in totals %}<th>{{ n }}</th>{% endfor %}
+          <th>{{ totals|sum }}</th>
+        </tr>
+      </table>
+  {% endmacro %}
   <h1>Monthly reports</h1>
   <p class="muted">
     Genomic test reports per calendar month — defaults to the last full
@@ -10,7 +81,10 @@
   </p>
   <p class="muted">
     <strong>Coverage:</strong> reports from iGene and Shire only — StarLIMS
-    reports aren't included.
+    and Omics DSS reports don't come through the RIE yet, so the work orders
+    sent to <a href="#work-orders-k1s6s">StarLIMS</a> and
+    <a href="#work-orders-dlims">Omics DSS</a> are counted separately instead, along
+    with <a href="#work-orders-dwgs">incoming dWGS work orders</a>.
   </p>
 
   <form action="{{ request.script_root }}/stats/monthly-reports" method="get">
@@ -52,29 +126,7 @@
   {% if months %}
     <h2>Reports by category{% if selected_region %} — {{ selected_region }}{% endif %}</h2>
     <div style="overflow-x: auto;">
-      <table>
-        <tr><th>Category</th>{% for m in months %}<th>{{ m }}</th>{% endfor %}<th>Total</th></tr>
-        {% for row in category_rows %}
-          {% if row.child %}
-            <tr style="background: #fafbfd;" class="muted">
-              <td style="padding-left: 28px;">{{ row.label }}</td>
-              {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
-              <td>{{ row.total }}</td>
-            </tr>
-          {% else %}
-            <tr>
-              <td>{{ row.label }}</td>
-              {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
-              <td><strong>{{ row.total }}</strong></td>
-            </tr>
-          {% endif %}
-        {% endfor %}
-        <tr>
-          <th>Total</th>
-          {% for n in category_month_totals %}<th>{{ n }}</th>{% endfor %}
-          <th>{{ category_month_totals|sum }}</th>
-        </tr>
-      </table>
+      {{ category_table(category_rows, category_month_totals) }}
     </div>
 
     {% if unclassified_total %}
@@ -135,51 +187,58 @@
 
     <h2>Reports by ICS{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
     <div style="overflow-x: auto;">
-      <table>
-        <tr>
-          <th>ICS</th>{% if not selected_region %}<th>Region</th>{% endif %}
-          {% for m in months %}<th>{{ m }}</th>{% endfor %}<th>Total</th>
-        </tr>
-        {% for row in ics_rows %}
-          {% if selected_region or row.total or row.region != "—" %}
-          <tr>
-            <td>
-              {% if row.trusts %}
-                <a href="#" class="ics-toggle" data-ics="{{ loop.index }}" onclick="toggleTrusts(this); return false;">&#9656; {{ row.label }}</a>
-              {% else %}
-                {{ row.label }}
-              {% endif %}
-              {% if row.categories %}
-                <button type="button" class="category-btn" data-title="{{ row.name }}"
-                        data-breakdown='{{ row.categories|tojson }}' onclick="showCategories(this)">Categories</button>
-              {% endif %}
-            </td>
-            {% if not selected_region %}<td class="muted">{{ row.region }}</td>{% endif %}
-            {% for n in row.months %}<td>{{ n }}</td>{% endfor %}
-            <td><strong>{{ row.total }}</strong></td>
-          </tr>
-          {% set ics_index = loop.index %}
-          {% for t in row.trusts %}
-            <tr class="trust-row" data-ics="{{ ics_index }}" hidden style="background: #fafbfd;">
-              <td style="padding-left: 28px;">
-                {{ t.name }}
-                <button type="button" class="category-btn" data-title="{{ t.name }} — {{ row.label }}"
-                        data-breakdown='{{ t.categories|tojson }}' onclick="showCategories(this)">Categories</button>
-              </td>
-              {% if not selected_region %}<td></td>{% endif %}
-              {% for n in t.months %}<td>{{ n }}</td>{% endfor %}
-              <td>{{ t.total }}</td>
-            </tr>
-          {% endfor %}
-          {% endif %}
-        {% endfor %}
-        <tr>
-          <th>Total</th>{% if not selected_region %}<th></th>{% endif %}
-          {% for n in month_totals %}<th>{{ n }}</th>{% endfor %}
-          <th>{{ month_totals|sum }}</th>
-        </tr>
-      </table>
+      {{ ics_table(ics_rows, month_totals, 'r') }}
     </div>
+
+
+    {% for wo in work_order_sections %}
+    <h2 id="work-orders-{{ wo.key|lower }}">{{ wo.title }}{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
+    {% if wo.direction == "incoming" %}
+      <p class="muted">
+        dWGS sub-orders NE&amp;Y Genomics' laboratories (Leeds 699C0, Newcastle
+        699N0, Sheffield 699D0) send to the NW GLH — work orders requested by
+        one of those labs (directly or via a PractitionerRole there). Each counts
+        under the trust on the NGIS referral (the original order it's based on).
+        By month dispatched (<code>authoredOn</code>, from the manifest's
+        <code>glh_sample_dispatch_date</code>); orders sent before the transform
+        set it have none, and count in the month they were last updated.
+      </p>
+    {% endif %}
+    {% if loop.first %}
+      <p class="muted">
+        StarLIMS and Omics DSS reports don't come through the RIE yet, so these
+        are the <em>work orders</em> sent to each — ServiceRequests whose
+        performer is that system (as on the Work orders screen), by month
+        authored. Each counts under the trust that placed it: a work order's
+        requester is the GLH (or nothing usable), so the trust comes from the
+        original order it's based on. Categories are inferred from the order's
+        test code, the same way as for reports. Not added to the report figures
+        above — an order isn't a report.
+      </p>
+    {% endif %}
+    {% if wo.error %}
+      <div class="error">{{ wo.error }}</div>
+    {% else %}
+      {% if wo.truncated_months %}
+        <div class="error">
+          Hit the fetch limit for {{ wo.truncated_months|join(", ") }} — counts for
+          {{ "that month" if wo.truncated_months|length == 1 else "those months" }} may be incomplete.
+        </div>
+      {% endif %}
+      {% if wo.month_totals|sum or wo.category_rows %}
+        <h3 style="font-size: 1rem;">By category</h3>
+        <div style="overflow-x: auto;">
+          {{ category_table(wo.category_rows, wo.category_month_totals) }}
+        </div>
+        <h3 style="font-size: 1rem;">By ICS</h3>
+        <div style="overflow-x: auto;">
+          {{ ics_table(wo.ics_rows, wo.month_totals, 'w' ~ loop.index ~ '-', hide_empty=true) }}
+        </div>
+      {% else %}
+        <p class="muted">None in the months shown.</p>
+      {% endif %}
+    {% endif %}
+    {% endfor %}
 
     {% if patient_inferred_reports %}
       <p class="muted">
