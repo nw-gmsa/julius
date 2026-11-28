@@ -269,7 +269,8 @@ def monthly_report_pdf_bytes(report):
         _para("Monthly reports", "Title"),
         _para(" &middot; ".join(escape(f) for f in filters)),
         _para("Genomic test reports per calendar month, by the ICS of the <i>ordering</i> organisation. "
-              "<b>Coverage:</b> reports from iGene and Shire only &mdash; StarLIMS reports aren't included."),
+              "<b>Coverage:</b> reports from iGene, Shire and Omics DSS &mdash; StarLIMS reports don't come through "
+              "the RIE yet, so the work orders sent to StarLIMS are counted instead (below)."),
         Spacer(1, 8),
     ]
 
@@ -372,16 +373,22 @@ def monthly_report_pdf_bytes(report):
         ))
 
     suffix = (f" — {region}" if region else "") + (f" — {category_label}" if category_label else "")
-    for i, wo in enumerate(report.get("work_order_sections") or []):
+    cepheid = dict(report.get("cepheid") or {}, title="Cepheid results (MRD monitoring)", cepheid=True)
+    for i, wo in enumerate([cepheid] + list(report.get("work_order_sections") or [])):
         story.append(_para(escape(wo["title"] + suffix), "Heading2"))
+        if wo.get("cepheid"):
+            story.append(_para(
+                "Cepheid GeneXpert BCR::ABL1 results (reports with a BCRABL code), by month of the test, under the "
+                "ordering trust. Already counted in the report figures above; shown on their own here."))
         if wo.get("direction") == "incoming":
             story.append(_para(
                 "dWGS sub-orders sent to the NW GLH by NE&amp;Y Genomics' laboratories (699C0, 699N0, 699D0), under "
                 "the trust on the NGIS referral. By month dispatched (authoredOn); orders without one by month last updated."))
-        if i == 0:
+        if i == 1:
             story.append(_para(
-                "StarLIMS and Omics DSS reports don't come through the RIE yet, so these are the work orders sent "
-                "to each (ServiceRequests whose performer is that system), by month authored, counted once per "
+                "Work orders sent to each lab system (ServiceRequests whose performer is that system). StarLIMS "
+                "reports don't come through the RIE yet, so its work orders stand in for them; Omics DSS results "
+                "do, and are in the report figures above. By month authored, counted once per "
                 "original order (the order the trust placed, which the work orders are based on), under that "
                 "trust. Categories from the original order's test code. Not added to the report figures above."))
         if wo.get("error"):

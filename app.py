@@ -2750,7 +2750,8 @@ def _infer_ordering_from_patient_orders(reports, index):
         return
     by_patient = client.service_requests_for_patients(r["subject"]["reference"] for r in unlinked)
     for r in unlinked:
-        report_date = (r.get("issued") or r.get("effectiveDateTime") or "")[:10]
+        report_date = (r.get("issued") or r.get("effectiveDateTime")
+                       or (r.get("effectivePeriod") or {}).get("start") or "")[:10]
         candidates = [
             o for o in by_patient.get(r["subject"]["reference"], [])
             if not report_date or (o.get("authoredOn") or "")[:10] <= report_date
@@ -3293,12 +3294,22 @@ def _work_order_month(order):
     return (order.get("authoredOn") or (order.get("meta") or {}).get("lastUpdated") or "")[:7]
 
 
-def _work_order_performer_reference(key):
-    """"Organization/<id>" / "Device/<id>" for a WORK_ORDER_DESTINATIONS
-    key on this server, or None if it has no such resource."""
+def _work_order_performer_search(key):
+    """The (search param, value) finding a WORK_ORDER_DESTINATIONS key's
+    work orders: `performer:identifier` (the identifier work orders carry
+    on `performer`), checked with a one-result count search — no Device/
+    Organization read, which a login may not be allowed. Falls back to the
+    resolved resource's literal reference ("Device/<id>") if the server
+    rejects that search; None if neither works."""
+    search = client.performer_identifier_search(key)
+    try:
+        client._get("ServiceRequest", params={search[0]: search[1], "_summary": "count"})
+        return search
+    except requests.HTTPError:
+        pass
     resource = client.resolve_task_owner(key)
     if resource and resource.get("id"):
-        return f"{resource.get('resourceType', 'Organization')}/{resource['id']}"
+        return ("performer", f"{resource.get('resourceType', 'Organization')}/{resource['id']}")
     return None
 
 
@@ -3485,6 +3496,10 @@ def _build_monthly_report():
     # (issue key, detail) -> {"where": set, "months": {month: n}, "examples": [report, ...]}
     data_quality = {}
     truncated_months = []
+    # Cepheid (BCR::ABL1) results — BCRABL-coded reports, also counted in the
+    # report figures: ICS/trust x month x category, same as the reports.
+    cepheid_ics_counts, cepheid_trust_counts = {}, {}
+    cepheid_truncated_months, cepheid_error = [], None
     # Work orders sent to each lab system (WORK_ORDER_DESTINATIONS —
     # StarLIMS reports don't come through the RIE yet): same ICS/trust x
     # month x category counts as the reports, one set per destination.
@@ -3506,12 +3521,13 @@ def _build_monthly_report():
                     wo["error"] = f"{wo['title']}: {e}"
                 continue
             try:
-                wo["ref"] = _work_order_performer_reference(wo["key"])
+                wo["ref"] = _work_order_performer_search(wo["key"])
             except Exception as e:
                 wo["error"] = f"Couldn't look up {wo['key']}: {e}"
                 continue
             if not wo["ref"]:
-                wo["error"] = f"No {wo['key']} resource on this server, so these orders can't be found."
+                wo["error"] = (f"Couldn't search for orders whose performer is {wo['key']} — "
+                               "the server rejected the search.")
         for month in months:
             y, m = map(int, month.split("-"))
             month_start = date(y, m, 1)
@@ -3529,6 +3545,17 @@ def _build_monthly_report():
                 if client.last_search_truncated and month not in truncated_months:
                     truncated_months.append(month)
                 reports.extend(window)
+                if not cepheid_error:
+                    # Cepheid reports carry effectivePeriod and may lack the
+                    # Genetics category the search above prefers — searched
+                    # by code too, so they're in the figures either way.
+                    try:
+                        reports.extend(client.bcrabl_reports_in_range(
+                            window_start.isoformat(), window_end.isoformat(), max_pages=MONTHLY_REPORTS_MAX_PAGES))
+                        if client.last_search_truncated and month not in cepheid_truncated_months:
+                            cepheid_truncated_months.append(month)
+                    except Exception as e:
+                        cepheid_error = f"Cepheid results: {e}"
                 window_start = window_end + timedelta(days=1)
             reports = [r for r in reports if r.get("id") not in seen and not seen.add(r.get("id"))]
             orders_index = _orders_index_for_reports(reports)
@@ -3568,6 +3595,11 @@ def _build_monthly_report():
                         unknown_examples.setdefault(key, []).append(r)
                 by_cat = trust_counts.setdefault(ics, {}).setdefault(trust, {}).setdefault(month, {})
                 by_cat[category] = by_cat.get(category, 0) + 1
+                if FhirClient._is_bcrabl_report(r):
+                    by_cat = cepheid_ics_counts.setdefault(ics, {}).setdefault(month, {})
+                    by_cat[category] = by_cat.get(category, 0) + 1
+                    by_cat = cepheid_trust_counts.setdefault(ics, {}).setdefault(trust, {}).setdefault(month, {})
+                    by_cat[category] = by_cat.get(category, 0) + 1
             for wo in work_orders:
                 if wo["error"] or not (wo["ref"] or wo["orders"] is not None):
                     continue
@@ -3728,6 +3760,17 @@ def _build_monthly_report():
     category_rows = category_tree_rows(
         lambda key: [sum(ics_counts.get(ics, {}).get(mo, {}).get(key, 0) for ics in ics_list) for mo in months],
         keep_empty=True)
+    cepheid_ics_rows, cepheid_month_totals = ics_table(cepheid_ics_counts, cepheid_trust_counts)
+    cepheid_category_rows = category_tree_rows(
+        lambda key: [sum(cepheid_ics_counts.get(ics, {}).get(mo, {}).get(key, 0) for ics in ics_list)
+                     for mo in months],
+        keep_empty=False)
+    cepheid = {
+        "error": cepheid_error, "truncated_months": cepheid_truncated_months,
+        "ics_rows": cepheid_ics_rows, "month_totals": cepheid_month_totals, "category_rows": cepheid_category_rows,
+        "category_month_totals": [sum(r["months"][i] for r in cepheid_category_rows if not r["child"])
+                                  for i in range(len(months))],
+    }
     work_order_sections = []
     for wo in work_orders:
         wo_ics_rows, wo_month_totals = ics_table(wo["ics_counts"], wo["trust_counts"])
@@ -3756,7 +3799,7 @@ def _build_monthly_report():
         unclassified_shown=UNCLASSIFIED_SIGNATURES_SHOWN, delivery=delivery,
         unknown_code_rows=unknown_code_rows, patient_inferred_reports=patient_inferred_reports,
         data_quality_rows=data_quality_rows,
-        work_order_sections=work_order_sections,
+        work_order_sections=work_order_sections, cepheid=cepheid,
         unknown_code_month_totals=[sum(r["months"][i] for r in unknown_code_rows) for i in range(len(months))],
     )
 

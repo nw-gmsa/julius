@@ -1137,16 +1137,24 @@ down by day, organisation, indication, ICS, and country.
 
 ### Monthly reports (`/stats/monthly-reports`)
 
-**Coverage: iGene and Shire reports only — not StarLIMS** (stated on the
-page itself too). StarLIMS and Omics DSS reports don't come through the
-RIE yet, so **"Orders sent to StarLIMS" / "Orders sent to Omics DSS"**
+**Coverage: iGene, Shire and Omics DSS reports — not StarLIMS** (stated
+on the page itself too; Omics DSS results carry an
+`https://fhir.nwgenomics.nhs.uk/OmicsDSS/ResultIdentifier`). StarLIMS
+reports don't come through the RIE yet, so **"Orders sent to StarLIMS"**
+stands in for them; **"Orders sent to Omics DSS"** is shown alongside
+(its results *are* in the report figures). Both
 (page and PDF, one section per `app.WORK_ORDER_DESTINATIONS` entry — the
-Work orders screen's owners, found via `resolve_task_owner()`: K1S6S an
-Organization, DLIMS a Device) count the *work orders* instead, by category
+Work orders screen's owners: K1S6S an Organization, DLIMS a Device) count
+the *work orders*, by category
 and by ICS/trust per month, same region/category filters (not added to
-the report figures): `ServiceRequest?performer=<Organization|Device>/<id>
+the report figures): `ServiceRequest?performer:identifier=<system>|<key>
 &authored=...` in the same week windows, no `_include`
-(`FhirClient.orders_for_performer()`). A work order's requester is the GLH
+(`FhirClient.orders_for_performer()`/`performer_identifier_search()`) — by
+the identifier work orders carry on `performer`, **not** by resolving the
+Organization/Device first (`_work_order_performer_search()`), since a login
+that can't read `Device` made Omics DSS show no orders; the resolved
+`performer=Device/<id>` reference is only the fallback if the server rejects
+`performer:identifier`. A work order's requester is the GLH
 (699X0 on StarLIMS ones — which `organisation_geography()` would place
 under R0A's ICS) or an unresolvable PractitionerRole (Omics DSS), so
 `_work_order_ordering()` skips `LAB_ODS_CODES`/no organisation and walks up
@@ -1177,6 +1185,22 @@ via `GetDate()`), so only orders sent before that fall back. The trust is the NG
 `orderingentityid` (the original order's requester). Older test-server
 dWGS orders have no `basedOn`, so they're under Unknown as "No original
 order — from <lab>".
+
+**"Cepheid results (MRD monitoring)"** (page and PDF, before the work
+order sections): BCRABL-coded reports (`FhirClient._is_bcrabl_report()`,
+as on `/cepheid-results`), tallied in the same report loop, so they're
+also in the report figures. Each week window also runs
+`FhirClient.bcrabl_reports_in_range()` (code + `date`, no `_include`, no
+category — unlike `bcrabl_reports()`) and adds them to the month's
+reports, since a Cepheid report without the Genetics category would
+otherwise be missed. Cepheid reports carry `effectivePeriod` (no
+`issued`/`effectiveDateTime` — `date` search covers it, and
+`_infer_ordering_from_patient_orders()` reads its start), a performer
+that's the analyser (no ODS code), and a basedOn placer number assigned by
+699X0 — so **`report_ordering_ods()` skips `LAB_ODS_CODES`** as well as the
+report's own performer (before this, 78 of 745 2026 test-server reports
+were counted as ordered by the GLH, i.e. under Greater Manchester via
+ODS's 699X0 → R0A link).
 
 Reports per calendar month (default: just the last full calendar month,
 so the default page load is a single month's search; the current month can

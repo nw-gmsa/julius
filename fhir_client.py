@@ -752,17 +752,27 @@ class FhirClient:
     DWGS_SENDER_ODS = ("699C0", "699N0", "699D0")
     LAB_ODS_CODES = frozenset({"699X0", "K1S6S", *DWGS_SENDER_ODS})
 
-    def orders_for_performer(self, performer_reference, start, end, max_pages=10):
-        """ServiceRequests (any intent/status) whose `performer` is
-        `performer_reference` ("Organization/<id>"), authored within
-        [start, end] — the monthly report's orders sent to StarLIMS. No
-        `_include` (the 413 shape on production); sets
+    def orders_for_performer(self, performer, start, end, max_pages=10):
+        """ServiceRequests (any intent/status) whose `performer` matches,
+        authored within [start, end] — the monthly report's orders sent to
+        StarLIMS / Omics DSS. `performer` is (search param, value):
+        ("performer:identifier", "system|value") — what work orders carry
+        inline, so no Organization/Device read is needed — or ("performer",
+        "Device/<id>"). No `_include` (the 413 shape on production); sets
         last_search_truncated."""
+        param, value = performer
         return self._search_all("ServiceRequest", {
-            "performer": performer_reference,
+            param: value,
             "authored": [f"ge{start}", f"le{end}"],
             "_count": 100,
         }, max_pages=max_pages)
+
+    def performer_identifier_search(self, owner_key):
+        """("performer:identifier", "system|key") for a TASK_OWNER_OPTIONS
+        key — K1S6S by ODS code, DLIMS by LIMS identifier."""
+        option = next((o for o in self.TASK_OWNER_OPTIONS if o["key"] == owner_key), None)
+        system = option["system"] if option else self.ODS_ORGANIZATION_CODE_SYSTEM
+        return ("performer:identifier", f"{system}|{owner_key}")
 
     def orders_from_requesters(self, ods_codes, max_pages=10):
         """Work orders (intent filler-order/reflex-order) requested by any
@@ -1327,6 +1337,21 @@ class FhirClient:
         unconfirmed and _is_bcrabl_report() itself matches on `code`
         regardless of system (see BCRABL_CODE)."""
         return ",".join(cls.BCRABL_CODES)
+
+    def bcrabl_reports_in_range(self, start_date, end_date, max_pages=10):
+        """BCRABL (Cepheid) DiagnosticReports dated within [start_date,
+        end_date] — the monthly report's Cepheid section, which also adds
+        them to that month's reports. Unlike bcrabl_reports(): no
+        `_include` and no category (the 413 shape on production, and a
+        Cepheid report without the Genetics category would otherwise be
+        missed). `date` covers effectivePeriod, which Cepheid reports use.
+        Sets last_search_truncated."""
+        reports = self._search_all("DiagnosticReport", {
+            "code": self._bcrabl_code_search_value(),
+            "date": [f"ge{start_date}", f"le{end_date}"],
+            "_count": 100,
+        }, max_pages=max_pages)
+        return [r for r in reports if r.get("resourceType") == "DiagnosticReport" and self._is_bcrabl_report(r)]
 
     def bcrabl_reports(self, start_date=None, end_date=None):
         """
@@ -2253,11 +2278,15 @@ class FhirClient:
         Either is skipped when it's the same ODS code as the report's own
         `performer` (the GLH/lab — the IG's examples have the lab, 699X0,
         as assigner on basedOn), since that's who *did* the test, not who
-        ordered it. None if neither gives anything else."""
+        ordered it — and so is any LAB_ODS_CODES code: a Cepheid report's
+        performer is the analyser, not an ODS code, but its placer number
+        is still the GLH's (699X0, which organisation_geography() would
+        otherwise place under R0A's ICS). None if neither gives anything
+        else."""
         performer_ods = {
             ods for ods in (self.resolve_organisation_ods_inline(p) for p in report.get("performer", []))
             if ods
-        }
+        } | self.LAB_ODS_CODES
         candidates = [((report.get("encounter") or {}).get("identifier") or {}).get("assigner")]
         for ref in report.get("basedOn", []):
             ident = ref.get("identifier") or {}

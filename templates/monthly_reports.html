@@ -80,11 +80,11 @@
     its originating order's). Click an ICS to show its NHS trusts.
   </p>
   <p class="muted">
-    <strong>Coverage:</strong> reports from iGene and Shire only — StarLIMS
-    and Omics DSS reports don't come through the RIE yet, so the work orders
-    sent to <a href="#work-orders-k1s6s">StarLIMS</a> and
-    <a href="#work-orders-dlims">Omics DSS</a> are counted separately instead, along
-    with <a href="#work-orders-dwgs">incoming dWGS work orders</a>.
+    <strong>Coverage:</strong> reports from iGene, Shire and Omics DSS — StarLIMS
+    reports don't come through the RIE yet, so the
+    <a href="#work-orders-k1s6s">work orders sent to StarLIMS</a> are counted
+    instead. Work orders sent to <a href="#work-orders-dlims">Omics DSS</a> and
+    <a href="#work-orders-dwgs">incoming dWGS work orders</a> are shown too.
   </p>
 
   <form action="{{ request.script_root }}/stats/monthly-reports" method="get">
@@ -191,6 +191,36 @@
     </div>
 
 
+    <h2 id="cepheid">Cepheid results (MRD monitoring){% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
+    <p class="muted">
+      Cepheid GeneXpert BCR::ABL1 results — reports with a <code>BCRABL</code>
+      code (as on the Cepheid Test Results screen), by month of the test
+      (<code>effectivePeriod</code>), under the ordering trust. Already counted
+      in the report figures above (mostly as MRD monitoring); shown on their own here.
+    </p>
+    {% if cepheid.error %}
+      <div class="error">{{ cepheid.error }}</div>
+    {% else %}
+      {% if cepheid.truncated_months %}
+        <div class="error">
+          Hit the fetch limit for {{ cepheid.truncated_months|join(", ") }} — Cepheid counts for
+          {{ "that month" if cepheid.truncated_months|length == 1 else "those months" }} may be incomplete.
+        </div>
+      {% endif %}
+      {% if cepheid.month_totals|sum or cepheid.category_rows %}
+        <h3 style="font-size: 1rem;">By category</h3>
+        <div style="overflow-x: auto;">
+          {{ category_table(cepheid.category_rows, cepheid.category_month_totals) }}
+        </div>
+        <h3 style="font-size: 1rem;">By ICS</h3>
+        <div style="overflow-x: auto;">
+          {{ ics_table(cepheid.ics_rows, cepheid.month_totals, 'c', hide_empty=true) }}
+        </div>
+      {% else %}
+        <p class="muted">None in the months shown.</p>
+      {% endif %}
+    {% endif %}
+
     {% for wo in work_order_sections %}
     <h2 id="work-orders-{{ wo.key|lower }}">{{ wo.title }}{% if selected_region %} — {{ selected_region }}{% endif %}{% if selected_category_label %} — {{ selected_category_label }}{% endif %}</h2>
     {% if wo.direction == "incoming" %}
@@ -206,9 +236,11 @@
     {% endif %}
     {% if loop.first %}
       <p class="muted">
-        StarLIMS and Omics DSS reports don't come through the RIE yet, so these
-        are the <em>work orders</em> sent to each — ServiceRequests whose
-        performer is that system (as on the Work orders screen), by month
+        <em>Work orders</em> sent to each lab system — ServiceRequests whose
+        performer is that system (as on the Work orders screen). StarLIMS
+        reports don't come through the RIE yet, so its work orders stand in for
+        them; Omics DSS results do, and are already in the report figures above.
+        By month
         authored — <strong>counted once per original order</strong> (the order
         the trust placed, which a work order is based on), so an original order
         split into several work orders counts once, in the first month shown
