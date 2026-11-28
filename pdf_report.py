@@ -381,9 +381,9 @@ def monthly_report_pdf_bytes(report):
         if i == 0:
             story.append(_para(
                 "StarLIMS and Omics DSS reports don't come through the RIE yet, so these are the work orders sent "
-                "to each (ServiceRequests whose performer is that system), by month authored, under the trust that "
-                "placed the original order. Categories from the order's test code. Not added to the report "
-                "figures above."))
+                "to each (ServiceRequests whose performer is that system), by month authored, counted once per "
+                "original order (the order the trust placed, which the work orders are based on), under that "
+                "trust. Categories from the original order's test code. Not added to the report figures above."))
         if wo.get("error"):
             story.append(_para(f"<b>{escape(wo['error'])}</b>"))
             continue

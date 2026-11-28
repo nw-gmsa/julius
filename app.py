@@ -3331,6 +3331,20 @@ def _work_order_parents_index(orders):
     return FhirClient.index_orders(fetched)
 
 
+def _original_order(order, parents_index):
+    """The original order a work order is based on — the top of its
+    basedOn chain among the orders in `parents_index`
+    (_work_order_parents_index()); `order` itself if it has no parent
+    there."""
+    current, seen = order, {order.get("id")}
+    while True:
+        parent = client.match_report_order(current, parents_index)
+        if not parent or parent.get("id") in seen:
+            return current
+        seen.add(parent.get("id"))
+        current = parent
+
+
 def _work_order_ordering(order, parents_index):
     """(ordering Organization or None, the order it was read from) for an
     order sent to a lab system — the order's own requesting organisation
@@ -3367,14 +3381,23 @@ def _fetch_work_orders(month, month_start, month_end, performer_ref, truncated_m
 def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region_names):
     """Count one month's work orders into ics_counts / trust_counts (ICS
     -> [trust ->] month -> category -> n), the same shape
-    _build_monthly_report() counts reports in. Each order counts under the
-    trust that placed the original order (_work_order_ordering()) — else
-    "Unknown", as "No original order — from <sending lab>" — and the
-    category of its own test code, falling back to that original order's."""
-    orders = [o for o in orders if o.get("id") not in seen and not seen.add(o.get("id"))]
+    _build_monthly_report() counts reports in — **once per original
+    order** (_original_order(): the top of the basedOn chain; a work order
+    with no parent found is its own), so one original order split into
+    several work orders counts once, in the first month one of them falls
+    in (`seen` holds the original order ids counted so far, across
+    months). Each counts under the trust that placed the original order
+    (_work_order_ordering()) — else "Unknown", as "No original order —
+    from <sending lab>" — and the category of the original order's test
+    code, falling back to the work order's."""
     parents_index = _work_order_parents_index(orders)
     for o in orders:
-        org, source = _work_order_ordering(o, parents_index)
+        original = _original_order(o, parents_index)
+        key = original.get("id") or o.get("id")
+        if key in seen:
+            continue
+        seen.add(key)
+        org, _ = _work_order_ordering(o, parents_index)
         ods = client.organisation_ods_code(org) if org else None
         geo = FhirClient.organisation_geography(
             ods, name=_org_name(org), postcode=client.organisation_postcode(org)) if org else None
@@ -3389,7 +3412,7 @@ def _count_work_orders(month, orders, seen, ics_counts, trust_counts, ics_region
             trust = (f"No original order — from {_org_display_name(_org_name(sender) or sender_ods, sender_ods)}"
                      if sender else "Unknown")
         category = FhirClient.report_category(
-            o.get("code"), source.get("code") if source and source is not o else None)
+            original.get("code"), o.get("code") if original is not o else None)
         by_cat = ics_counts.setdefault(ics, {}).setdefault(month, {})
         by_cat[category] = by_cat.get(category, 0) + 1
         by_cat = trust_counts.setdefault(ics, {}).setdefault(trust, {}).setdefault(month, {})

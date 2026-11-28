@@ -209,10 +209,12 @@
         StarLIMS and Omics DSS reports don't come through the RIE yet, so these
         are the <em>work orders</em> sent to each — ServiceRequests whose
         performer is that system (as on the Work orders screen), by month
-        authored. Each counts under the trust that placed it: a work order's
-        requester is the GLH (or nothing usable), so the trust comes from the
-        original order it's based on. Categories are inferred from the order's
-        test code, the same way as for reports. Not added to the report figures
+        authored — <strong>counted once per original order</strong> (the order
+        the trust placed, which a work order is based on), so an original order
+        split into several work orders counts once, in the first month shown
+        that one falls in. Each counts under the trust that placed the original
+        order, and the category of its test code (else the work order's),
+        inferred the same way as for reports. Not added to the report figures
         above — an order isn't a report.
       </p>
     {% endif %}

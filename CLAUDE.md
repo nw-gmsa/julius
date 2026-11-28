@@ -1154,10 +1154,11 @@ under R0A's ICS) or an unresolvable PractitionerRole (Omics DSS), so
 `service_requests_for_reports()`, up to `WORK_ORDER_PARENT_LEVELS`) to the
 original order the trust placed — whose requester is often only a literal
 `PractitionerRole/<id>`, so requesters and their organisations are batch-
-prefetched (`FhirClient.prefetch_references()`, `Type?_id=a,b,...`). Each
-work order counts once, so one original order split into several work
-orders counts several times. Category: the order's code, then the original
-order's. The ICS and category tables are shared Jinja macros
+prefetched (`FhirClient.prefetch_references()`, `Type?_id=a,b,...`). **Counted once per
+original order** (`_original_order()`: the top of the basedOn chain, else
+the work order itself), so one original order split into several work
+orders counts once, in the first month shown one of them falls in.
+Category: the original order's code, then the work order's. The ICS and category tables are shared Jinja macros
 (`ics_table`/`category_table`) in `monthly_reports.html`.
 **"Incoming dWGS work orders"** is a third section (`direction:
 "incoming"` in `WORK_ORDER_DESTINATIONS`): dWGS sub-orders NE&Y Genomics'
